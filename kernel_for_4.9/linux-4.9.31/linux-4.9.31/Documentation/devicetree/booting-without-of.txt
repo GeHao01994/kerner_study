@@ -1,0 +1,1841 @@
+           Booting the Linux/ppc kernel without Open Firmware
+           --------------------------------------------------
+
+(c) 2005 Benjamin Herrenschmidt <benh at kernel.crashing.org>,
+    IBM Corp.
+(c) 2005 Becky Bruce <becky.bruce at freescale.com>,
+    Freescale Semiconductor, FSL SOC and 32-bit additions
+(c) 2006 MontaVista Software, Inc.
+    Flash chip node definition
+
+Table of Contents
+=================
+
+  I - Introduction
+    1) Entry point for arch/arm
+    2) Entry point for arch/powerpc
+    3) Entry point for arch/x86
+    4) Entry point for arch/mips/bmips
+    5) Entry point for arch/sh
+
+  II - The DT block format
+    1) Header
+    2) Device tree generalities
+    3) Device tree "structure" block
+    4) Device tree "strings" block
+
+  III - Required content of the device tree
+    1) Note about cells and address representation
+    2) Note about "compatible" properties
+    3) Note about "name" properties
+    4) Note about node and property names and character set
+    5) Required nodes and properties
+      a) The root node
+      b) The /cpus node
+      c) The /cpus/* nodes
+      d) the /memory node(s)
+      e) The /chosen node
+      f) the /soc<SOCname> node
+
+  IV - "dtc", the device tree compiler
+
+  V - Recommendations for a bootloader
+
+  VI - System-on-a-chip devices and nodes
+    1) Defining child nodes of an SOC
+    2) Representing devices without a current OF specification
+
+  VII - Specifying interrupt information for devices
+    1) interrupts property
+    2) interrupt-parent property
+    3) OpenPIC Interrupt Controllers
+    4) ISA Interrupt Controllers
+
+  VIII - Specifying device power management information (sleep property)
+
+  IX - Specifying dma bus information
+
+  Appendix A - Sample SOC node for MPC8540
+
+
+Revision Information
+====================
+
+   May 18, 2005: Rev 0.1 - Initial draft, no chapter III yet.
+
+   May 19, 2005: Rev 0.2 - Add chapter III and bits & pieces here or
+                           clarifies the fact that a lot of things are
+                           optional, the kernel only requires a very
+                           small device tree, though it is encouraged
+                           to provide an as complete one as possible.
+
+   May 24, 2005: Rev 0.3 - Precise that DT block has to be in RAM
+			 - Misc fixes
+			 - Define version 3 and new format version 16
+			   for the DT block (version 16 needs kernel
+			   patches, will be fwd separately).
+			   String block now has a size, and full path
+			   is replaced by unit name for more
+			   compactness.
+			   linux,phandle is made optional, only nodes
+			   that are referenced by other nodes need it.
+			   "name" property is now automatically
+			   deduced from the unit name
+
+   June 1, 2005: Rev 0.4 - Correct confusion between OF_DT_END and
+                           OF_DT_END_NODE in structure definition.
+                         - Change version 16 format to always align
+                           property data to 4 bytes. Since tokens are
+                           already aligned, that means no specific
+                           required alignment between property size
+                           and property data. The old style variable
+                           alignment would make it impossible to do
+                           "simple" insertion of properties using
+                           memmove (thanks Milton for
+                           noticing). Updated kernel patch as well
+			 - Correct a few more alignment constraints
+			 - Add a chapter about the device-tree
+                           compiler and the textural representation of
+                           the tree that can be "compiled" by dtc.
+
+   November 21, 2005: Rev 0.5
+			 - Additions/generalizations for 32-bit
+			 - Changed to reflect the new arch/powerpc
+			   structure
+			 - Added chapter VI
+
+
+ ToDo:
+	- Add some definitions of interrupt tree (simple/complex)
+	- Add some definitions for PCI host bridges
+	- Add some common address format examples
+	- Add definitions for standard properties and "compatible"
+	  names for cells that are not already defined by the existing
+	  OF spec.
+	- Compare FSL SOC use of PCI to standard and make sure no new
+	  node definition required.
+	- Add more information about node definitions for SOC devices
+  	  that currently have no standard, like the FSL CPM.
+
+
+I - Introduction
+================
+Ëæ×ÅLinux/ppc64ÄÚºËµÄ·¢Õ¹£¬¸ü¾ßÌåµÄËµ,³ıÁËÀÏµÄIBM 
+pSeries/iSeriesÒ»¶ÔÌí¼ÓĞÂµÄÆ½Ì¨ÀàĞÍ£¬Ëü¾ö¶¨Ö´ĞĞÒ»Ğ©ÑÏ¸ñµÄ¹æÔò¹ØÓÚÕâ¸öÄÚºËµÄÌõÄ¿ºÍbootloadler£¬ÄÚºË½Ó¿Ú
+ÎªÁË±ÜÃâµÄ   ²îÒì     ³ÉÎªppc32ÄÚºËÈë¿ÚµãºÍÒ»¸öĞÂÆ½Ì¨µÄ·½Ê½Ó¦¸Ã±»Ìí¼Óµ½ÄÚºË¡£
+ÒÅÁôµÄiSeriesÆ½Ì¨ÔÚ¸Ã·½°¸³öÏÖÖ®Ç°¾ÍÎ¥·´ÁËÕâĞ©¹æÔò£¬
+µ«ÊÇÔÚÖ÷Ê÷ÖĞÃ»ÓĞÈÎºÎĞÂµÄ¶­ÊÂ»áÖ§³Ö£¬ÒòÎªÖ÷Ê÷²»ÄÜÕıÈ·µØÖ´ĞĞÕâĞ©¹æÔò¡£´ËÍâ£¬ÓÉÓÚ
+powerpcºÍppc32ºÍppc64µÄ¼Ü¹¹µÄ³öÏÖ£¬ĞÂµÄ32Î»Æ½Ì¨ºÍ32Î»µÄÆ½Ì¨Ò²ĞèÒªÊ¹ÓÃÕâĞ©¹æÔò¡£
+
+During the development of the Linux/ppc64 kernel, and more
+specifically, the addition of new platform types outside of the old
+IBM pSeries/iSeries pair, it was decided to enforce some strict rules
+regarding the kernel entry and bootloader <-> kernel interfaces, in
+order to avoid the degeneration that had become the ppc32 kernel entry
+point and the way a new platform should be added to the kernel. The
+legacy iSeries platform breaks those rules as it predates this scheme,
+but no new board support will be accepted in the main tree that
+doesn't follow them properly.  In addition, since the advent of the
+arch/powerpc merged architecture for ppc32 and ppc64, new 32-bit
+platforms and 32-bit platforms which move into arch/powerpc will be
+required to use these rules as well.
+
+ÏÂÃæ½«ÏêÏ¸¶¨ÒåµÄÖ÷ÒªĞèÇóÊÇÒ»¸öÉè±¸Ê÷µÄ´æÔÚ
+ËüµÄ¸ñÊ½ÊÇÔÚ¿ª·ÅµÄ¹Ì¼ş¹æ·¶Ö®ºó¶¨ÒåµÄ
+È»¶ø£¬ÎªÁËÈÃÇ¶ÈëÊ½°å¹©Ó¦ÉÌµÄÉú»î¸üÇáËÉ
+ÄÚºË²»ĞèÒªÉè±¸Ê÷À´±íÊ¾ÏµÍ³ÖĞµÄÃ¿Ò»¸öÉè±¸
+Ö»ĞèÒªÒ»Ğ©½ÚµãºÍÊôĞÔ¾Í¿ÉÒÔÁË¡£Õâ½«ÔÚµÚÈı½ÚÖĞÏêÏ¸ÃèÊö£¬µ«ÊÇ
+µ«ÊÇ£¬ÀıÈç£¬ÄÚºË²»ÒªÇóÄúÎªÏµÍ³ÖĞµÄÃ¿Ò»¸öPCIÉè±¸´´½¨Ò»¸ö½Úµã
+ÎªÁËÌá¹©ÖĞ¶ÏÂ·ÓÉĞÅÏ¢ºÍÄÚ´æ/io·¶Î§£¬ĞèÒªÓĞÒ»¸öPCIÖ÷»úÇÅ½ÓµÄ½Úµã
+»¹½¨ÒéÔÚĞ¾Æ¬Éè±¸ºÍÆäËû×ÜÏßÉÏ¶¨Òå½Úµã£¬¶øÕâĞ©½Úµã²¢²»ÌØ±ğÊÊºÏÓÚÏÖÓĞOF  µÄ¹æ·¶
+ÕâÑù£¬ÄÚºË¾Í¿ÉÒÔÔÚ²»ĞèÒªÓ²±àÂë¸÷ÖÖ±íµÄÇé¿öÏÂ£¬¶ÔÄÚºË½øĞĞÌ½²â
+
+The main requirement that will be defined in more detail below is
+the presence of a device-tree whose format is defined after Open
+Firmware specification. However, in order to make life easier
+to embedded board vendors, the kernel doesn't require the device-tree
+to represent every device in the system and only requires some nodes
+and properties to be present. This will be described in detail in
+section III, but, for example, the kernel does not require you to
+create a node for every PCI device in the system. It is a requirement
+to have a node for PCI host bridges in order to provide interrupt
+routing information and memory/IO ranges, among others. It is also
+recommended to define nodes for on chip devices and other buses that
+don't specifically fit in an existing OF specification. This creates a
+great flexibility in the way the kernel can then probe those and match
+drivers to device, without having to hard code all sorts of tables. It
+also makes it more flexible for board vendors to do minor hardware
+upgrades without significantly impacting the kernel code or cluttering
+it with special cases.
+
+
+1) Entry point for arch/arm
+---------------------------
+ÔÚÄÚºËÓ³ÏñµÄ¿ªÊ¼´¦£¬ÄÚºËÓĞÒ»¸öµ¥¶ÀµÄÈë¿Úµã¡£¸ÃÈë¿ÚµãÖ§³ÖÁ½¸öµ÷ÓÃ
+Ô¼¶¨¡£ÕâÀïÃèÊöÁË½Ó¿ÚµÄÕªÒª¡£¶ÔÒıµ¼ĞèÇóµÄÍêÕûÃèÊö±»¼ÇÂ¼ÔÚÎÄµµÖĞ
+ÎÄµµ  Documentation/arm/Booting
+
+   There is one single entry point to the kernel, at the start
+   of the kernel image. That entry point supports two calling
+   conventions.  A summary of the interface is described here.  A full
+   description of the boot requirements is documented in
+   Documentation/arm/Booting
+ATAGS½Ó¿Ú¡£×îĞ¡µÄĞÅÏ¢´Ó¹Ì¼ş´«µİµ½ÄÚºË£¬²¢´øÓĞÒ»¸öÒÑ±ê¼ÇµÄÔ¤¶¨Òå²ÎÊıÁĞ±í
+        a) ATAGS interface.  Minimal information is passed from firmware
+        to the kernel with a tagged list of predefined parameters.
+
+                r0 : 0
+
+                r1 : Machine type number
+
+                r2 : Physical address of tagged list in system RAM
+½øÈëÒ»¸ö±âÆ½µÄÉè±¸Ê÷¿é¡£¹Ì¼ş½«±âÆ½Éè±¸Ê÷¿é(dtb)µÄÎïÀíµØÖ·¼ÓÔØµ½r2ÖĞ£¬
+r1Ã»ÓĞÊ¹ÓÃ,µ«Ëü±»ÈÏÎªÊÇÁ¼ºÃµÄÊµ¼ùÊ¹ÓÃÒ»¸öÓĞĞ§µÄ»úÆ÷Âë
+        b) Entry with a flattened device-tree block.  Firmware loads the
+        physical address of the flattened device tree block (dtb) into r2,
+        r1 is not used, but it is considered good practice to use a valid
+        machine number as described in Documentation/arm/Booting.
+
+                r0 : 0
+
+                r1 : Valid machine type number.  When using a device tree,
+                a single machine type number will often be assigned to
+                represent a class or family of SoCs.
+
+                r2 : physical pointer to the device-tree block
+                (defined in chapter II) in RAM.  Device tree can be located
+                anywhere in system RAM, but it should be aligned on a 64 bit
+                boundary.
+
+   The kernel will differentiate between ATAGS and device tree booting by
+   reading the memory pointed to by r2 and looking for either the flattened
+   device tree block magic value (0xd00dfeed) or the ATAG_CORE value at
+   offset 0x4 from r2 (0x54410001).
+
+2) Entry point for arch/powerpc
+-------------------------------
+
+   There is one single entry point to the kernel, at the start
+   of the kernel image. That entry point supports two calling
+   conventions:
+
+        a) Boot from Open Firmware. If your firmware is compatible
+        with Open Firmware (IEEE 1275) or provides an OF compatible
+        client interface API (support for "interpret" callback of
+        forth words isn't required), you can enter the kernel with:
+
+              r5 : OF callback pointer as defined by IEEE 1275
+              bindings to powerpc. Only the 32-bit client interface
+              is currently supported
+
+              r3, r4 : address & length of an initrd if any or 0
+MMUÊÇ¿ª»¹ÊÇ¹Ø£¬ÄÚºË½«ÔËĞĞ 
+arch/powerpc/kernel/prom_init.cÖĞµÄtrampolineÈ¥ÌáÈ¡Éè±¸Ê÷ºÍÆäËûµÄĞÅÏ¢´Ó¿ªÔ´¹Ì¼ş²¢ÔÚb)ÖĞ¹¹½¨Ò»¸ö±âÆ½Éè±¸Ê÷¡£
+prom_init½«Ê¹ÓÃµÚ¶şÖÖ·½·¨ÖØĞÂ½øÈëÄÚºË¡£trampoline´úÂëÔËĞĞÔÚ¹Ì¼şµÄÉÏÏÂÎÄÖĞ£¬ËûÓ¦¸ÃÔÚÄÇÀï´¦ÀíËùÓĞµÄÒì³£
+              The MMU is either on or off; the kernel will run the
+              trampoline located in arch/powerpc/kernel/prom_init.c to
+              extract the device-tree and other information from open
+              firmware and build a flattened device-tree as described
+              in b). prom_init() will then re-enter the kernel using
+              the second method. This trampoline code runs in the
+              context of the firmware, which is supposed to handle all
+              exceptions during that time.
+Ö±½Ó½øÈëÒ»¸ö±âÆ½µÄÉè±¸Ê÷¿é¡£ÔÚtrampolineÖ®ºóÕâ¸öÈë¿Úµã±»a)µ÷Ó¡£¬ 
+ËüÒ²ÄÜÖ±½Ó±»bootloaderµ÷ÓÃ£¬Ëü²»Ö§³Ö´ú¿ª¿ªÔ´Ó²¼şµÄ¿Í»§¶Ë½è¿Ú¡£Ëû»¹±»Ê¹ÓÃÍ¨¹ı"kexec"È¥ÊµÏÖÈÈÆô¶¯´ÓÒÔÇ°ÔËĞĞµÄÄÇ¸ö
+ÄÇ¸öµ½ÔËĞĞĞÂµÄÄÚºË¡£Õâ¸ö·½·¨ÊÇÎÒ½«ÔÚ±¾ÎÄÖĞÏêÏ¸ÃèÊöµÄ£¬×÷Îª·½·¨a)½ö½öÊÇ±ê×¼µÄ¿ª·Å¹Ì¼ş£¬Òò´ËÓ¦¸Ã¸ù¾İ¶¨ÒåËüµÄ¸÷ÖÖ±ê×¼ÎÄµµºÍËü¶ÔPowerPC
+Æ½Ì¨µÄ°ó¶¨À´ÊµÏÖ¡£Èë¿ÚµãµÄ¶¨Òå¾Í±ä³ÉÁË
+        b) Direct entry with a flattened device-tree block. This entry
+        point is called by a) after the OF trampoline and can also be
+        called directly by a bootloader that does not support the Open
+        Firmware client interface. It is also used by "kexec" to
+        implement "hot" booting of a new kernel from a previous
+        running one. This method is what I will describe in more
+        details in this document, as method a) is simply standard Open
+        Firmware, and thus should be implemented according to the
+        various standard documents defining it and its binding to the
+        PowerPC platform. The entry point definition then becomes:
+
+                r3 : physical pointer to the device-tree block
+                (defined in chapter II) in RAM
+                
+ÎïÀíÖ¸ÕëÖ¸ÏòÄÚºËËü±¾Éí            Èç¹ûÄúÊ¹ÓÃMMUÆôÓÃÁËMMUºÍÒ»¸ö·Ç1:1Ó³Éä£¬ÄÇÃ´»ã±à´úÂë½«Ê¹ÓÃ»ã±à´úÂëÀ´ÕıÈ·µØ½ûÓÃ
+MMU¡£
+                r4 : physical pointer to the kernel itself. This is
+                used by the assembly code to properly disable the MMU
+                in case you are entering the kernel with MMU enabled
+                and a non-1:1 mapping.
+
+                r5 : NULL (as to differentiate with method a)
+ÒªÃ´ÊÇÄãµÄ¹Ì¼ş°ÑÄãµÄÆäËûcpu·ÅÔÚÄ³¸öË¯ÃßÑ­»·ÖĞ£¬ÒªÃ´ÊÇÔÚROMÉÏµÄĞı×ªÑ­»·£¬
+Äã¿ÉÒÔÍ¨¹ıÈíÖØÖÃ»òÆäËû·½Ê½°ÑËüÃÇÅª³öÀ´£¬ÔÚÕâÖÖÇé¿öÏÂ£¬Äã²»ĞèÒª¹ØĞÄ£¬»òÕßÄã±ØĞë
+ÓÃËùÓĞµÄcpuÀ´ÊäÈëÄÚºË¡£·½·¨b µÄ·½·¨)½«ÔÚºóÃæµÄĞŞ¶©±¾ÎÄµµÖĞ½øĞĞÃèÊö
+        Note about SMP entry: Either your firmware puts your other
+        CPUs in some sleep loop or spin loop in ROM where you can get
+        them out via a soft reset or some other means, in which case
+        you don't need to care, or you'll have to enter the kernel
+        with all CPUs. The way to do that with method b) will be
+        described in a later revision of this document.
+°åÖ§³Ö(Æ½Ì¨)²»ÊÇÎ¨Ò»µÄÅäÖÃÑ¡Ïî¡£¿ÉÒÔÔÚµ¥¸öÄÚºËÓ³ÏñÖĞ¹¹½¨ÈÎÒâÒ»×é°åÖ§³Ö¡£
+ÄÚºË½«¡°ÖªµÀ¡±»ùÓÚÉè±¸Ê÷µÄÄÚÈİ¶Ô¸ø¶¨Æ½Ì¨Ê¹ÓÃµÄ¹¦ÄÜ¼¯¡£Òò´Ë,ÄãÓ¦¸Ã:
+   Board supports (platforms) are not exclusive config options. An
+   arbitrary set of board supports can be built in a single kernel
+   image. The kernel will "know" what set of functions to use for a
+   given platform based on the content of the device-tree. Thus, you
+   should:
+
+        a) add your platform support as a _boolean_ option in
+        arch/powerpc/Kconfig, following the example of PPC_PSERIES,
+        PPC_PMAC and PPC_MAPLE. The later is probably a good
+        example of a board support to start from.
+
+        b) create your main platform file as
+        "arch/powerpc/platforms/myplatform/myboard_setup.c" and add it
+        to the Makefile under the condition of your CONFIG_
+        option. This file will define a structure of type "ppc_md"
+        containing the various callbacks that the generic code will
+        use to get to your platform specific code
+
+  A kernel image may support multiple platforms, but only if the
+  platforms feature the same core architecture.  A single kernel build
+  cannot support both configurations with Book E and configurations
+  with classic Powerpc architectures.
+
+3) Entry point for arch/x86
+-------------------------------
+ÔÚcode32_startÖĞ£¬ÄÚºËÓĞÒ»¸ö32Î»µÄÈë¿Úµã£¬½âÑ¹ËõÆ÷(µ±×ª»»ÎªÊÜ±£»¤Ä£Ê½Ê±£¬ÕæÕıµÄÄ£Ê½Èë¿Úµã½øÈëÏàÍ¬µÄ32Î»Èë¿Úµã)
+¸ÃÈë¿ÚµãÖ§³ÖÒ»¸öµ÷ÓÃÔ¼¶¨ÔÚ 
+Documentation/x86/boot.txt±»¼ÇÂ¼¡£¶ÔÉè±¸Ê÷¿éµÄÎïÀíÖ¸Õë(ÔÚµÚ2ÕÂÖĞ¶¨Òå)ÊÇÍ¨¹ısetup_data
+´«µİµÄ£¬¸ÃÊı¾İÖÁÉÙĞèÒªÒıµ¼Ğ­Òé2.09¡£ÀàĞÍÎÄ¼ş±»¶¨ÒåÎª
+  There is one single 32bit entry point to the kernel at code32_start,
+  the decompressor (the real mode entry point goes to the same  32bit
+  entry point once it switched into protected mode). That entry point
+  supports one calling convention which is documented in
+  Documentation/x86/boot.txt
+  The physical pointer to the device-tree block (defined in chapter II)
+  is passed via setup_data which requires at least boot protocol 2.09.
+  The type filed is defined as
+
+  #define SETUP_DTB                      2
+Õâ¸öÉè±¸Ê÷±»ÓÃ×÷¡°Òıµ¼Ò³Ãæ¡±µÄÀ©Õ¹.Òò´Ë£¬Ëü²»»á½âÎö/¿¼ÂÇÒÑ¾­±»Òıµ¼Ò³Ãæ¸²¸ÇµÄÊı¾İ
+Õâ°üÀ¨ÄÚ´æ´óĞ¡¡¢±£Áô·¶Î§¡¢ÃüÁîĞĞ²ÎÊı»òinitrdµØÖ·. ËüÖ»°üº¬ÎŞ·¨¼ìË÷µÄĞÅÏ¢£¬±ÈÈçÖĞ¶ÏÂ·ÓÉ»òI2C×ÜÏßºóÃæµÄÉè±¸ÁĞ±í¡£
+  This device-tree is used as an extension to the "boot page". As such it
+  does not parse / consider data which is already covered by the boot
+  page. This includes memory size, reserved ranges, command line arguments
+  or initrd address. It simply holds information which can not be retrieved
+  otherwise like interrupt routing or a list of devices behind an I2C bus.
+
+4) Entry point for arch/mips/bmips
+----------------------------------
+Ò»Ğ©Òıµ¼¼ÓÔØ³ÌĞòÖ»Ö§³ÖÒ»¸öÈë¿Úµã£¬ÔÚÄÚºËÓ³ÏñµÄ¿ªÊ¼¡£ÆäËûÒıµ¼¼ÓÔØ³ÌĞò½«Ìø×ªµ½ELF¿ªÊ¼µØÖ·
+ÕâÁ½¸ö·½°¸¶¼Ö§³Ö;CONFIG_BOOT_RAW=y and CONFIG_NO_EXCEPT_FILL=y,Òò´Ë£¬µÚÒ»¸öÖ¸ÁîÁ¢¼´Ìø×ªµ½ÄÚºËÌõÄ¿
+Òò´Ë£¬µÚÒ»¸öÖ¸ÁîÁ¢¼´Ìø×ªµ½kernelentry()
+  Some bootloaders only support a single entry point, at the start of the
+  kernel image.  Other bootloaders will jump to the ELF start address.
+  Both schemes are supported; CONFIG_BOOT_RAW=y and CONFIG_NO_EXCEPT_FILL=y,
+  so the first instruction immediately jumps to kernel_entry().
+ÀàËÆÓÚarch/arm°¸Àı(b)£¬Ò»¸öÓĞdtµÄÒıµ¼×°ÔØ³ÌĞò½«»áÉèÖÃÈçÏÂµÄ¼Ä´æÆ÷:
+  Similar to the arch/arm case (b), a DT-aware bootloader is expected to
+  set up the following registers:
+
+         a0 : 0
+
+         a1 : 0xffffffff
+
+         a2 : Physical pointer to the device tree block (defined in chapter
+         II) in RAM.  The device tree can be located anywhere in the first
+         512MB of the physical address space (0x00000000 - 0x1fffffff),
+         aligned on a 64 bit boundary.
+ÒÅÁôÒıµ¼¼ÓÔØ³ÌĞò²»Ê¹ÓÃÕâ¸öÔ¼¶¨£¬ËüÃÇ²»»á´«ÈëÒ»¸öDT¿é
+ÔÚÕâÖÖÇé¿öÏÂ£¬Linux½«Ñ°ÕÒÒ»¸öÍ¨¹ıconfig_dt_Ñ¡ÔñµÄÄÚÖÃDTB
+  Legacy bootloaders do not use this convention, and they do not pass in a
+  DT block.  In this case, Linux will look for a builtin DTB, selected via
+  CONFIG_DT_*.
+Õâ¸öÔ¼¶¨½öÕë¶Ô32Î»ÏµÍ³¶¨Òå£¬ÒòÎªÄ¿Ç°»¹Ã»ÓĞ64Î»BMIPSÊµÏÖ¡£
+  This convention is defined for 32-bit systems only, as there are not
+  currently any 64-bit BMIPS implementations.
+
+5) Entry point for arch/sh
+--------------------------
+Device-tree-compatibleµÄSH bootloaders 
+¿ÉÒÔÔÚr4ÖĞÌá¹©Éè±¸Ê÷blobµÄÎïÀíµØÖ·¡£ÓÉÓÚ´«Í³µÄbootloaders²»ÄÜ±£Ö¤ÌØ±ğµÄ³õÊ¼¼Ä´æÆ÷×´Ì¬
+ËùÒÔÓë¾ÉµÄ   bootloaders   ½øĞĞ½» »¥²Ù×÷µÄÄÚºË±ØĞëÊ¹ÓÃÒ»¸öÄÚÖÃµÄDTB
+»òÕßÑ¡ÔñÒ»¸ö²»Ê¹ÓÃÉè±¸Ê÷µÄÒÅÁô°åÑ¡Ïî(³ıÁËCONFIG_SH_DEVICE_TREE  ÒÔÍâµÄÆäËû¶«Î÷)
+
+
+  Device-tree-compatible SH bootloaders are expected to provide the physical
+  address of the device tree blob in r4. Since legacy bootloaders did not
+  guarantee any particular initial register state, kernels built to
+  inter-operate with old bootloaders must either use a builtin DTB or
+  select a legacy board option (something other than CONFIG_SH_DEVICE_TREE)
+  that does not use device tree. Support for the latter is being phased out
+  in favor of device tree.
+
+
+II - The DT block format
+========================
+±¾ÕÂ¶¨ÒåÁË´«µİ¸øÄÚºËµÄ±âÆ½Éè±¸Ê÷µÄÊµ¼Ê¸ñÊ½¡£ÉÔºó½«½éÉÜit
+ºÍÄÚºËĞèÇóµÄÊµ¼ÊÄÚÈİ¡£Äú¿ÉÒÔÔÚ²»Í¬µÄµØ·½ÕÒµ½ÕâÑùµÄ´úÂëÊ¾Àı£¬°üÀ¨arch/powerpc/kernel/prom_init.c
+½«´Ó´ò¿ªµÄ¹Ì¼ş±íÊ¾ÖĞÉú³ÉÒ»¸ö±âÆ½µÄÉè±¸Ê÷£¬»òÕßfs2dt
+ÊµÓÃ³ÌĞò£¬ËüÊÇkexec¹¤¾ßµÄÒ»²¿·Ö£¬Ëü½«´ÓÎÄ¼şÏµÍ³±íÊ¾ÖĞÉú³ÉÒ»¸ö¹¤¾ß¡£Ô¤ÆÚÏñuboot
+ÕâÑùµÄÒıµ¼¼ÓÔØÆ÷Ìá¹©ÁË¸ü¶àµÄÖ§³Ö£¬ÕâÒ²½«ÔÚÒÔºóÌÖÂÛ¡£
+
+This chapter defines the actual format of the flattened device-tree
+passed to the kernel. The actual content of it and kernel requirements
+are described later. You can find example of code manipulating that
+format in various places, including arch/powerpc/kernel/prom_init.c
+which will generate a flattened device-tree from the Open Firmware
+representation, or the fs2dt utility which is part of the kexec tools
+which will generate one from a filesystem representation. It is
+expected that a bootloader like uboot provides a bit more support,
+that will be discussed later as well.
+×¢Òâ:¸Ã¿é±ØĞëÎ»ÓÚÖ÷ÄÚ´æÖĞ¡£Ëü±ØĞëÔÚÕæÊµÄ£Ê½ºÍĞéÄâÄ£Ê½ÏÂ¶¼¿ÉÒÔ·ÃÎÊ£¬³ıÁËÖ÷´æÖ®Íâ
+Ã»ÓĞÆäËûÓ³Éä¡£Èç¹ûÄúÕıÔÚ±àĞ´Ò»¸ö¼òµ¥µÄflash
+Òıµ¼¼ÓÔØ³ÌĞò£¬ÄÇÃ´ÔÚ½«Ëü´«µİ¸øÄÚºËÖ®Ç°£¬ËüÓ¦¸Ã½«¸Ã¿é¸´ÖÆµ½RAMÖĞ¡£
+Note: The block has to be in main memory. It has to be accessible in
+both real mode and virtual mode with no mapping other than main
+memory. If you are writing a simple flash bootloader, it should copy
+the block to RAM before passing it to the kernel.
+
+
+1) Header
+---------
+ÄÚºËÍ¨¹ıÎïÀíµØÖ·£¬Ö¸ÏòÒ»¸öÄÚ´æÇøÓò£¬Í¨¹ı include/linux/of_fdt.hÖĞµÄ 
+boot_param_header½á¹¹ÌåÉùÃ÷Òıµ¼
+   The kernel is passed the physical address pointing to an area of memory
+   that is roughly described in include/linux/of_fdt.h by the structure
+   boot_param_header:
+
+struct boot_param_header {
+        u32     magic;                  /* magic word OF_DT_HEADER */
+        u32     totalsize;              /* total size of DT block */
+        u32     off_dt_struct;          /* offset to structure */
+        u32     off_dt_strings;         /* offset to strings */
+        u32     off_mem_rsvmap;         /* offset to memory reserve map
+                                           */
+        u32     version;                /* format version */
+        u32     last_comp_version;      /* last compatible version */
+
+        /* version 2 fields below */
+        u32     boot_cpuid_phys;        /* Which physical CPU id we're
+                                           booting on */
+        /* version 3 fields below */
+        u32     size_dt_strings;        /* size of the strings block */
+
+        /* version 17 fields below */
+        u32	size_dt_struct;		/* size of the DT structure block */
+};
+
+   Along with the constants:
+
+/* Definitions used by the flattened device tree */
+#define OF_DT_HEADER            0xd00dfeed      /* 4: version,
+						   4: total size */
+#define OF_DT_BEGIN_NODE        0x1             /* Start node: full name
+						   */
+#define OF_DT_END_NODE          0x2             /* End node */
+#define OF_DT_PROP              0x3             /* Property: name off,
+                                                   size, content */
+#define OF_DT_END               0x9
+Õâ¸öheader ÖĞµÄËùÓĞÖµ¶¼ÊÇ´ó¶ËÄ£Ê½µÄ ¸ñÊ½
+ÔÚÕâ¸öheaderÖĞµÄ¸÷¸ö×Ö¶ÎÔÚÏÂÃæÓĞ¸ü¾«È·µÄ¶¨Òå¡£
+ËùÓĞµÄÆ«ÒÆÖµ¶¼ÊÇ´Óheader ¿ªÊ¼µÄ×Ö½Ú¿ªÊ¼µÄ¡£ÕâÊÇÀ´×ÔÉè±¸Ê÷¿éµÄÎïÀí»ù´¡µØÖ·¡£
+   All values in this header are in big endian format, the various
+   fields in this header are defined more precisely below. All
+   "offset" values are in bytes from the start of the header; that is
+   from the physical base address of the device tree block.
+
+   - magic
+ÕâÊÇÒ»¸öÉñÆæµÄÖµ£¬±êÊ¶ÕâÉè±¸Êı¿éµÄheaderµÄ¿ªÊ¼¡£ËüµÄÖµÊÇ0xd00dfeed£¬Í¨¹ı²»±äµÄOF_DT_HEADER¶¨Òå
+     This is a magic value that "marks" the beginning of the
+     device-tree block header. It contains the value 0xd00dfeed and is
+     defined by the constant OF_DT_HEADER
+
+   - totalsize
+ÕâÊÇDT¿éµÄ×Ü´óĞ¡£¬°üÀ¨Í·¡£DT¿éÓ¦¸Ã°üº¬ËùÓĞµÄÊı¾İ½á¹¹¶¨ÒåÔÚÕâÒ»ÕÂµÄ(Í¨¹ıÍ·µÄÆ«ÒÆÀ´Ö¸Ïò¸ÄµØÖ·)¡£
+Ò²¾ÍÊÇËµ£¬Éè±¸Ê÷½á¹¹¡¢×Ö·û´®ºÍÄÚ´æ±£ÁôÓ³Éä
+     This is the total size of the DT block including the header. The
+     "DT" block should enclose all data structures defined in this
+     chapter (who are pointed to by offsets in this header). That is,
+     the device-tree structure, strings, and the memory reserve map.
+
+   - off_dt_struct
+ÕâÊÇÍ·µÄ¿ªÊ¼µ½Éè±¸Ê÷µÄstructure²¿·ÖµÄÆ«ÒÆ
+     This is an offset from the beginning of the header to the start
+     of the "structure" part the device tree. (see 2) device tree)
+
+   - off_dt_strings
+ÕâÊÇ´ÓÍ·¿ªÊ¼µ½Éè±¸Ê÷µÄ¡°×Ö·û´®¡±²¿·Ö¿ªÊ¼µÄÆ«ÒÆÁ¿
+     This is an offset from the beginning of the header to the start
+     of the "strings" part of the device-tree
+
+   - off_mem_rsvmap
+ÕâÊÇ´ÓÍ·¿ªÊ¼µ½Ô¤ÁôÄÚ´æÓ³Éä¿ªÊ¼µÄÆ«ÒÆÁ¿¡£Õâ¸öÓ³ÉäÊÇ¶à¸ö64Î»ÕûÊıµÄÁĞ±í
+Ã¿Ò»¶Ô¶¼ÊÇÒ»¸öÎïÀíµØÖ·ºÍÒ»¸ö´óĞ¡¡£ÁĞ±í±»Ò»¸ö´óĞ¡Îª0µÄÌõÄ¿ÖÕÖ¹
+Õâ¸öÓ³ÉäÎªÄÚºËÌá¹©ÁËÒ»¸ö¡°±£Áô¡±µÄÎïÀíÄÚ´æÇøÓòÁĞ±í
+Òò´Ë²»ÄÜÓÃÓÚÄÚ´æ·ÖÅä£¬ÓÈÆäÊÇÔÚÔçÆÚ³õÊ¼»¯ÆÚ¼ä¡£ÄÚºËĞèÒªÔÚÆô¶¯Ò»Ğ©ÊÂÇé£¬ÖîÈç±âÆ½Éè±¸Ê÷£¬·ÖÅäMMU¹şÏ£±íµÈÖ®ÀàµÄ¶«Î÷¡£
+Õâ¸ö·ÖÅä±ØĞë±»ÕâÑùµÄÇé¿öÖĞÍê³É£¬±ÜÃâÖØĞ´ÖØÒªµÄÊÂÇé±ÈÈç´ò¿ª¹Ì¼şµÄ»úÆ÷£¬rtas ÊµÀı£¬»òÕßÒ»Ğ©pSeries
+ÓÃÓÚiommuµÄ±íµÄTCE¡£Í¨³£±£ÁôÓ³ÉäÓ¦¸Ã°üº¬at_least_Õâ¸ödt¿é±¾Éí(header,total_size)¡£Èç¹ûÄã´«initrd¸øÄÚºË£¬ÄãÓ¦¸Ã±£ÁôËû¡£
+Äú²»ĞèÒª±£ÁôÄÚºËÓ³Ïñ±¾Éí¡£map Ó¦¸ÃÊÇ64Î»¶ÔÆëµÄ¡£
+     This is an offset from the beginning of the header to the start
+     of the reserved memory map. This map is a list of pairs of 64-
+     bit integers. Each pair is a physical address and a size. The
+     list is terminated by an entry of size 0. This map provides the
+     kernel with a list of physical memory areas that are "reserved"
+     and thus not to be used for memory allocations, especially during
+     early initialization. The kernel needs to allocate memory during
+     boot for things like un-flattening the device-tree, allocating an
+     MMU hash table, etc... Those allocations must be done in such a
+     way to avoid overriding critical things like, on Open Firmware
+     capable machines, the RTAS instance, or on some pSeries, the TCE
+     tables used for the iommu. Typically, the reserve map should
+     contain _at least_ this DT block itself (header,total_size). If
+     you are passing an initrd to the kernel, you should reserve it as
+     well. You do not need to reserve the kernel image itself. The map
+     should be 64-bit aligned.
+
+   - version
+Õâ¸öÊÇÕâ¸ö½á¹¹ÌåµÄ°æ±¾£¬°æ±¾1Í£Ö¹ÔÚÕâÀï£¬°æ±¾2Ìá¹©ÁËÒ»¸ö¶îÍâµÄ×Ö¶Îboot_cpuid_phys.
+°æ±¾3 Ìí¼ÓÁË×Ö·û´®¿ìµÄ´óĞ¡¡£ÔÊĞíÄÚºËÔÚÒıµ¼Ê±ÇáËÉµØÖØĞÂ·ÖÅäËü£¬²¢ÔÚÀ©Õ¹ºóÊÍ·ÅÎ´Ê¹ÓÃµÄ±âÆ½½á¹¹
+°æ±¾16 ÒıÈëÁËĞÂµÄ"½ô´Õ"¸ñÊ½µÄ£¬µ«ÊÇ²»Ïëºó¼æÈİ¡£Version 
+17Ìí¼ÓÁËÒ»¸ö¶îÍâµÄ×Ö¶Î£¬size_dt_struct£¬ÔÊĞíËü¸üÈİÒ×µØÖØĞÂ·ÖÅä»òÒÆ¶¯(ÕâÊÇ
+¶ÔÓÚĞèÒª½øĞĞµ÷Õû»ùÓÚprobe ĞÅÏ¢µÄÉè±¸Ê÷·Ç³£ÓĞÓÃ).ÄúÓ¦¸ÃÊ¼ÖÕÉú³É×î¸ß°æ±¾¶¨ÒåµÄ½á¹¹
+ÔÚÄúÊµÏÖµÄÊ±ºò¡£Ä¿Ç°ÕâÊÇµÚ17°æ£¬³ı·ÇÄúÃ÷È·µÄÄ¿±êÊÇÏòºó¼æÈİ¡£
+     This is the version of this structure. Version 1 stops
+     here. Version 2 adds an additional field boot_cpuid_phys.
+     Version 3 adds the size of the strings block, allowing the kernel
+     to reallocate it easily at boot and free up the unused flattened
+     structure after expansion. Version 16 introduces a new more
+     "compact" format for the tree itself that is however not backward
+     compatible. Version 17 adds an additional field, size_dt_struct,
+     allowing it to be reallocated or moved more easily (this is
+     particularly useful for bootloaders which need to make
+     adjustments to a device tree based on probed information). You
+     should always generate a structure of the highest version defined
+     at the time of your implementation. Currently that is version 17,
+     unless you explicitly aim at being backward compatible.
+
+   - last_comp_version
+×îºóÒ»¸ö¼æÈİµÄ°æ±¾¡£Õâ±íÃ÷ÁËÄúÏòºó¼æÈİµÄDT¿éµÄ°æ±¾¡£ÀıÈç£¬°æ±¾2Ïòºó¼æÈİ°æ±¾1(
+Ò²¾ÍÊÇËµ£¬°æ±¾1µÄÄÚºË¹¹½¨¿ÉÒÔÊ¹ÓÃ°æ±¾2µÄ¸ñÊ½Æô¶¯)¡£Èç¹ûÄúÉú³ÉµÄÊÇ°æ±¾1µ½3
+µÄÉè±¸Ê÷£¬ÄãÕâÀïÓ¦¸Ã·Å1   Èç¹ûÄúÊ¹ÓÃĞÂµÄµ¥ÔªÃû³Æ¸ñÊ½Éú³ÉÁË16»ò17
+Ê÷µÄÊ÷£¬ÄÇÃ´ÄúÓ¦¸ÃÔÚ¸Ã×Ö¶ÎÖĞ·ÅÖÃ16¡£
+     Last compatible version. This indicates down to what version of
+     the DT block you are backward compatible. For example, version 2
+     is backward compatible with version 1 (that is, a kernel build
+     for version 1 will be able to boot with a version 2 format). You
+     should put a 1 in this field if you generate a device tree of
+     version 1 to 3, or 16 if you generate a tree of version 16 or 17
+     using the new unit name format.
+
+   - boot_cpuid_phys
+Õâ¸ö×Ö¶ÎÖ»´æÔÚÓÚ°æ±¾2µÄÍ·ÖĞ£¬ËüÖ¸Ê¾ÁËÄÄ¸öÎïÀíCPU IDµ÷ÓÃÄÚºËÈë¿Úµã£¬ÕâÊÇÓÉkexecËùÊ¹ÓÃµÄ
+Èç¹ûÄúÊÇÔÚSMPÏµÍ³ÉÏ£¬ÄÇÃ´Õâ¸öÖµÓ¦¸ÃÓëÉè±¸Ê÷ÖĞCPU½ÚµãµÄ¡°reg¡±ÊôĞÔÏàÆ¥Åä
+¸ÃÊôĞÔ¶ÔÓ¦ÓÚµ÷ÓÃÄÚºËÈë¿ÚµãµÄCPU(
+Çë²ÎÔÄ½øÒ»²½µÄÕÂ½Ú£¬ÒÔ»ñµÃ¹ØÓÚËùĞèµÄÉè±¸-Ê÷ÄÚÈİµÄ¸ü¶àĞÅÏ¢)
+     This field only exist on version 2 headers. It indicate which
+     physical CPU ID is calling the kernel entry point. This is used,
+     among others, by kexec. If you are on an SMP system, this value
+     should match the content of the "reg" property of the CPU node in
+     the device-tree corresponding to the CPU calling the kernel entry
+     point (see further chapters for more information on the required
+     device-tree contents)
+
+   - size_dt_strings
+Õâ¸ö×Ö¶ÎÖ»´æÔÚÓÚ°æ±¾3ºÍºóÃæµÄÍ·ÖĞ
+ ¡£Ëü¸ø³öÁËÉè±¸Ê÷µÄ¡° string  ¡±²¿·ÖµÄ´óĞ¡(´Ó
+off_dt_string¸ø³öµÄÆ«ÒÆÁ¿¿ªÊ¼)¡£
+     This field only exists on version 3 and later headers.  It
+     gives the size of the "strings" section of the device tree (which
+     starts at the offset given by off_dt_strings).
+
+   - size_dt_struct
+Õâ¸ö×Ö¶ÎÖ»´æÔÚÓÚ°æ±¾17ºÍºóÃæµÄÍ·  ÖĞ¡£Ëü¸ø³öÁËÉè±¸Ê÷µÄ¡° struct  ¡±²¿·ÖµÄ´óĞ¡(´Ó
+offdtstruct¸ø³öµÄÆ«ÒÆÁ¿¿ªÊ¼)
+     This field only exists on version 17 and later headers.  It gives
+     the size of the "structure" section of the device tree (which
+     starts at the offset given by off_dt_struct).
+Òò´Ë£¬Ò»¸öDT¿éµÄµäĞÍ²¼¾Ö(¾¡¹Ü¸÷¸ö²¿·Ö²»ĞèÒªÕâÑùµÄË³Ğò)¿´ÆğÀ´ÊÇÕâÑùµÄ(
+µØÖ·´ÓÉÏµ½ÏÂ):
+   So the typical layout of a DT block (though the various parts don't
+   need to be in that order) looks like this (addresses go from top to
+   bottom):
+
+
+             ------------------------------
+     base -> |  struct boot_param_header  |
+             ------------------------------
+             |      (alignment gap) (*)   |
+             ------------------------------
+             |      memory reserve map    |
+             ------------------------------
+             |      (alignment gap)       |
+             ------------------------------
+             |                            |
+             |    device-tree structure   |
+             |                            |
+             ------------------------------
+             |      (alignment gap)       |
+             ------------------------------
+             |                            |
+             |     device-tree strings    |
+             |                            |
+      -----> ------------------------------
+      |
+      |
+      --- (base + totalsize)
+¶ÔÆëµÄÈ±¿Ú²»Ò»¶¨´æÔÚ;ËüÃÇµÄ´æÔÚºÍ´óĞ¡È¡¾öÓÚ¸÷¸öÊı¾İ¿éµÄ¸÷ÖÖ¶ÔÆëÒªÇó¡£
+  (*) The alignment gaps are not necessarily present; their presence
+      and size are dependent on the various alignment requirements of
+      the individual data blocks.
+
+
+2) Device tree generalities
+---------------------------
+Õâ¸öÉè±¸Ê÷±¾Éí±»·Ö³ÉÁ½¸ö²»Í¬µÄ¿é£¬Ò»¸ö½á¹¹¿éºÍÒ»¸ö×Ö·û´®¿é¡£Á½Õß¶¼ĞèÒª¶ÔÆë
+µ½Ò»¸ö4×Ö½ÚµÄ±ß½ç¡£
+This device-tree itself is separated in two different blocks, a
+structure block and a strings block. Both need to be aligned to a 4
+byte boundary.
+Ê×ÏÈ£¬ÔÚÏêÏ¸ÃèÊö´æ´¢¸ñÊ½Ö®Ç°£¬ÈÃÎÒÃÇ¿ìËÙÃèÊöÒ»ÏÂÉè±¸Ê÷µÄ¸ÅÄî
+±¾ÕÂÃ»ÓĞÃèÊöÄÚºËËùĞèµÄ½ÚµãºÍÊôĞÔµÄÏ¸½Ú£¬ÕâÊÇÔÚµÚÈıÕÂµÄºóÃæÍê³ÉµÄ¡£
+First, let's quickly describe the device-tree concept before detailing
+the storage format. This chapter does _not_ describe the detail of the
+required types of nodes & properties for the kernel, this is done
+later in chapter III.
+Éè±¸Ê÷µÄ²¼¾Ö´Ó¿ª·Å¹Ì¼şIEEE 1275Éè±¸Ê÷µÄ¶¨ÒåÖĞµÃµ½ÁËÑÏ¸ñµÄ¼Ì³Ğ
+Ëü»ù±¾ÉÏÊÇÒ»¸ö½ÚµãÊ÷£¬Ã¿¸ö½ÚµãÓĞÁ½¸ö»ò¸ü¶àµÄÃüÃûÊôĞÔ¡£Ò»¸öÊôĞÔ¿ÉÒÔÓĞÒ»¸öÖµ¡£
+The device-tree layout is strongly inherited from the definition of
+the Open Firmware IEEE 1275 device-tree. It's basically a tree of
+nodes, each node having two or more named properties. A property can
+have a value or not.
+ËüÊÇÒ»¿ÃÊ÷£¬Òò´ËÃ¿¸ö½ÚµãÖ»ÓĞÒ»¸ö¸¸½Úµã,³ıÁËÃ»ÓĞ¸¸½ÚµãµÄ¸ù½ÚµãÖ®Íâ£¬Ö»ÓĞÒ»¸ö¸¸½Úµã
+It is a tree, so each node has one and only one parent except for the
+root node who has no parent.
+Ò»¸ö½ÚµãÓĞÁ½¸öÃû³Æ¡£Êµ¼ÊµÄ½ÚµãÃûÍ¨³£°üº¬ÔÚ½ÚµãÊôĞÔÁĞ±íÖĞµÄ¡°name
+¡±ÊôĞÔÖĞ£¬¸ÃÊôĞÔÖµÎªÁãÖÕÖ¹µÄ×Ö·û´®£¬²¢ÇÒ¶ÔÓÚ¸ñÊ½¶¨ÒåµÄ°æ±¾1µ½3(ÈçÔÚ¿ª·Å¹Ì¼şÖĞ)
+ÊÇÇ¿ÖÆµÄ¡£°æ±¾16Ê¹Ëü³ÉÎª¿ÉÑ¡µÄ£¬ÒòÎªËü¿ÉÒÔ´ÓÏÂÃæ¶¨ÒåµÄµ¥ÔªÃû³ÆÖĞÉú³ÉËü¡£
+A node has 2 names. The actual node name is generally contained in a
+property of type "name" in the node property list whose value is a
+zero terminated string and is mandatory for version 1 to 3 of the
+format definition (as it is in Open Firmware). Version 16 makes it
+optional as it can generate it from the unit name defined below.
+»¹ÓĞÒ»¸ö¡°µ¥ÔªÃû¡±£¬ÓÃÓÚÔÚÍ¬Ò»¼¶±ğÉÏÇø·Ö¾ßÓĞÏàÍ¬Ãû³ÆµÄ½Úµã£¬Í¨³£ÓÉ½ÚµãÃû¡¢¡°@¡±
+·ûºÅºÍ¡°µ¥ÔªµØÖ·¡±×é³É£¬¸Ã¶¨ÒåÌØ¶¨ÓÚ½ÚµãËùÔÚµÄ×ÜÏßÀàĞÍ
+There is also a "unit name" that is used to differentiate nodes with
+the same name at the same level, it is usually made of the node
+names, the "@" sign, and a "unit address", which definition is
+specific to the bus type the node sits on.
+µ¥ÔªÃû³Æ²¢²»×÷ÎªÒ»¸öÊôĞÔ´æÔÚ£¬¶øÊÇ°üº¬ÔÚÉè±¸Ê÷½á¹¹ÖĞ¡£ËüÍ¨³£ÓÃÓÚÔÚÉè±¸Ê÷ÖĞ±íÊ¾
+¡°Â·¾¶¡±¡£¹ØÓÚÕâĞ©ÄÚÈİµÄ¾ßÌå¸ñÊ½µÄ¸ü¶àÏ¸½Ú½«»áÔÚÏÂÃæ¡£
+The unit name doesn't exist as a property per-se but is included in
+the device-tree structure. It is typically used to represent "path" in
+the device-tree. More details about the actual format of these will be
+below.
+ÄÚºËÍ¨ÓÃ´úÂëÃ»ÓĞ¶Ôµ¥ÔªµØÖ·½øĞĞÈÎºÎÕıÊ½µÄÊ¹ÓÃ(¾¡¹ÜÓĞÒ»Ğ©°å×ÓÖ§³Ö°üÕâÃ´×ö)£¬
+Òò´Ë£¬¶ÔÓÚµ¥ÔªµØÖ·À´Ëµ£¬Î¨Ò»ÕæÕıµÄĞèÇóÊÇÈ·±£½Úµãµ¥ÔªÃû³ÆÔÚÊ÷µÄ¸ø¶¨¼¶±ğÉÏµÄÎ©Ò»ĞÔ
+Ã»ÓĞµØÖ·µÄ½Úµã£¬Ã»ÓĞÏàÍ¬Ãû×ÖµÄĞÖµÜ½ãÃÃ(±ÈÈç/memory »òÕßÊÇ/cpus)¿ÉÄÜ»áÔÚÕâ¸ö¹æ·¶µÄÉÏÏÂÎÄÖĞÊ¡ÂÔµ¥ÔªµØÖ·
+»òÕßÊ¹ÓÃ¡°@0¡±Ä¬ÈÏµÄµ¥ÔªµØÖ·¡£µ¥ÔªÃû³ÆÓÃÓÚ¶¨Òå½Úµã¡°ÍêÕûÂ·¾¶¡±£¬¼´ËùÓĞ¸¸½Úµãµ¥ÔªÃû³ÆÓë¡°/¡±
+·Ö¸ôµÄÁ¬½Ó¡£
+The kernel generic code does not make any formal use of the
+unit address (though some board support code may do) so the only real
+requirement here for the unit address is to ensure uniqueness of
+the node unit name at a given level of the tree. Nodes with no notion
+of address and no possible sibling of the same name (like /memory or
+/cpus) may omit the unit address in the context of this specification,
+or use the "@0" default unit address. The unit name is used to define
+a node "full path", which is the concatenation of all parent node
+unit names separated with "/".
+¸ù½ÚµãÃ»ÓĞ¶¨ÒåµÄÃû³Æ£¬Èç¹ûÄúÊ¹ÓÃµÄÊÇ°æ±¾3
+»ò¸üÔçµÄ¸ñÊ½£¬Ôò²»ĞèÒªÓĞÃû³ÆÊôĞÔ¡£ËüÒ²Ã»ÓĞµ¥ÔªµØÖ·(Ã»ÓĞ@·ûºÅ£¬ºóÃæÊÇµ¥ÔªµØÖ·)
+¡£¸ù½Úµãµ¥ÔªÃûÒò´ËÊÇÒ»¸ö¿Õ×Ö·û´®¡£¸ù½ÚµãµÄÍêÕûÂ·¾¶ÊÇ¡°/¡±¡£
+The root node doesn't have a defined name, and isn't required to have
+a name property either if you are using version 3 or earlier of the
+format. It also has no unit address (no @ symbol followed by a unit
+address). The root node unit name is thus an empty string. The full
+path to the root node is "/".
+Ã¿¸ö½ÚµãÊµ¼ÊÉÏ´ú±íÒ»¸öÊµ¼ÊµÄÉè±¸(Ò²¾ÍÊÇËµ£¬¶ÔÓÚ¶à¸ö½ÚµãÒ»¸ö½Úµã²»½ö½öÊÇÒ»¸öĞéÄâµÄ¡°ÈİÆ÷",±ÈÈç¡°/cpus)
+»¹ĞèÒªÒ»¸ö¡°compatible  ¡±ÊôĞÔÀ´Ö¸Ê¾ÌØ¶¨µÄÓ²¼şºÍÒ»¸ö¿ÉÑ¡µÄÉè±¸ÁĞ±í£¬ËüÊÇÍêÈ«Ïòºó¼æÈİ
+Every node which actually represents an actual device (that is, a node
+which isn't only a virtual "container" for more nodes, like "/cpus"
+is) is also required to have a "compatible" property indicating the
+specific hardware and an optional list of devices it is fully
+backwards compatible with.
+×îºó£¬¿ÉÒÔ´ÓÁíÒ»¸ö½ÚµãÉÏµÄÊôĞÔÒıÓÃµÄÃ¿¸ö½Úµã¶¼ĞèÒªÒ»¸ö¡°phandle¡±»òÒ»¸ö¡°linux
+£¬phandle¡±ÊôĞÔ¡£ÕæÕıµÄ¿ªÔ´¹Ì¼şÊµÏÖÎªÃ¿¸ö½Úµã 
+Ìá¹©Î¨Ò»µÄ¡°phandle¡±Öµ¡£"prom_init()Ìø×ª´úÂë±ä³ÉÁËlinux,phandleÊôĞÔ¡£È»¶ø£¬ 
+µ«ÊÇ£¬Èç¹ûÖ±½ÓÊ¹ÓÃ±âÆ½µÄÉè±¸Ê÷£¬ÄÇÃ´ÕâÊÇ¿ÉÑ¡µÄ¡£
+Ò»¸öÀı×Ó¶ÔÓÚÒ»¸ö½ÚµãÍ¨¹ıphandle ÒıÓÃÁíÒ»¸ö½ÚµãµÄÀı×ÓÊÇÔÚ²¼¾ÖÖĞ¶ÏÊ÷Ê±£¬¸Ã½Úµã½«ÔÚ¸ÃÎÄµµµÄÁíÒ»¸ö°æ±¾ÖĞ½øĞĞÃèÊö¡£
+Finally, every node that can be referenced from a property in another
+node is required to have either a "phandle" or a "linux,phandle"
+property. Real Open Firmware implementations provide a unique
+"phandle" value for every node that the "prom_init()" trampoline code
+turns into "linux,phandle" properties. However, this is made optional
+if the flattened device tree is used directly. An example of a node
+referencing another node via "phandle" is when laying out the
+interrupt tree which will be described in a further version of this
+document.
+¡°phandle¡±ÊôĞÔÊÇÒ»¸ö32Î»Öµ,Î©Ò»µØ±êÊ¶Ò»¸ö½Úµã¡£Äã¿ÉÒÔ×ÔÓÉµÄÊ¹ÓÃÈÎºÎÖµ»òÕßÊÇÏµÍ³µÄÖµ£¬ÄÚ²¿Ö¸Õë£¬»òÕßÉú³ÉÕâĞ©
+Î¨Ò»µÄÒªÇó¾ÍÊÇ£¬ÄãÌá¹©¸øÃ¿¸ö½ÚµãµÄÕâ¸öÊôĞÔµÄÖµÊÇÎ¨Ò»µÄ
+
+The "phandle" property is a 32-bit value that uniquely
+identifies a node. You are free to use whatever values or system of
+values, internal pointers, or whatever to generate these, the only
+requirement is that every node for which you provide that property has
+a unique value for it.
+ÏÂÃæÊÇÒ»¸ö¼òµ¥µÄÉè±¸Ê÷µÄÀı×Ó
+ÔÚ±¾ÀıÖĞ£¬¡°o¡±Ö¸¶¨ÁËÒ»¸ö½Úµã£¬ºóÃæÊÇ½Úµãµ¥ÔªÃû³Æ
+¡£ÊôĞÔÒÔËüÃÇµÄÃû³ÆºÍÄÚÈİ³ÊÏÖ
+"content"  ±íÊ¾Ò»¸öASCII×Ö·û´®(ÁãÖÕÖ¹)Öµ£¬¶ø<content> ±íÊ¾Ò»¸ö32
+Î»µÄÖµ£¬ÒÔÊ®½øÖÆ»òÊ®Áù½øÖÆ(ºóÕßµÄÇ°×ºÊÇ0x)Ö¸¶¨¡£
+±¾ÀıÖĞµÄ¸÷¸ö½Úµã½«ÔÚºóÃæµÄÕÂ½ÚÖĞÌÖÂÛ
+ÔÚÕâÀï£¬ËüÖ»ÊÇÏëÈÃÄúÁË½âÒ»¸öÉè±¸Ê÷ÊÇÊ²Ã´Ñù×ÓµÄ¡£
+ÎÒÌØÒâ±£ÁôÁË¡°name¡±ºÍ¡°linux£¬phandle
+¡±ÊôĞÔ£¬ÕâÊÇ²»±ØÒªµÄ£¬ÒÔ±ãÈÃÄú¸üºÃµØÁË½âÕâ¿ÃÊ÷ÔÚÊµ¼ÊÖĞÊÇÊ²Ã´Ñù×ÓµÄ¡£
+Here is an example of a simple device-tree. In this example, an "o"
+designates a node followed by the node unit name. Properties are
+presented with their name followed by their content. "content"
+represents an ASCII string (zero terminated) value, while <content>
+represents a 32-bit value, specified in decimal or hexadecimal (the
+latter prefixed 0x). The various nodes in this example will be
+discussed in a later chapter. At this point, it is only meant to give
+you a idea of what a device-tree looks like. I have purposefully kept
+the "name" and "linux,phandle" properties which aren't necessary in
+order to give you a better idea of what the tree looks like in
+practice.
+
+  / o device-tree
+      |- name = "device-tree"
+      |- model = "MyBoardName"
+      |- compatible = "MyBoardFamilyName"
+      |- #address-cells = <2>
+      |- #size-cells = <2>
+      |- linux,phandle = <0>
+      |
+      o cpus
+      | | - name = "cpus"
+      | | - linux,phandle = <1>
+      | | - #address-cells = <1>
+      | | - #size-cells = <0>
+      | |
+      | o PowerPC,970@0
+      |   |- name = "PowerPC,970"
+      |   |- device_type = "cpu"
+      |   |- reg = <0>
+      |   |- clock-frequency = <0x5f5e1000>
+      |   |- 64-bit
+      |   |- linux,phandle = <2>
+      |
+      o memory@0
+      | |- name = "memory"
+      | |- device_type = "memory"
+      | |- reg = <0x00000000 0x00000000 0x00000000 0x20000000>
+      | |- linux,phandle = <3>
+      |
+      o chosen
+        |- name = "chosen"
+        |- bootargs = "root=/dev/sda2"
+        |- linux,phandle = <4>
+Õâ¿ÃÊ÷¼¸ºõÊÇ×îĞ¡µÄÊ÷¡£Ëü¼¸ºõ°üº¬ÁËÒıµ¼linuxÄÚºËËùĞèµÄ×î»ù±¾µÄ½ÚµãºÍÊôĞÔ
+;Ò²¾ÍÊÇËµ£¬ÔÚ¸ù¡¢cpuºÍÎïÀíÄÚ´æ²¼¾ÖÖĞÓĞÒ»Ğ©»ù±¾µÄÄ£ĞÍĞÅÏ¢
+Ëü»¹°üÀ¨Í¨¹ı/chosen  µÄmiscĞÅÏ¢£¬ÀıÈçÔÚ±¾ÀıÖĞ£¬Æ½Ì¨ÀàĞÍ(Ç¿ÖÆĞÔ)ºÍÄÚºËÃüÁîĞĞ²ÎÊı(¿ÉÑ¡)¡£
+This tree is almost a minimal tree. It pretty much contains the
+minimal set of required nodes and properties to boot a linux kernel;
+that is, some basic model information at the root, the CPUs, and the
+physical memory layout.  It also includes misc information passed
+through /chosen, like in this example, the platform type (mandatory)
+and the kernel command line arguments (optional).
+/cpus/PowerPC,970@0 ÊÇÒ»¸öÃ»ÓĞÖµµÄÊôĞÔµÄÀı×Ó
+ËùÓĞÆäËûÊôĞÔ¶¼ÓĞÒ»¸öÖµ
+ #address-cellsºÍ #size-cells½«ÔÚµÚËÄÕÂ½âÎö£¬Ëü¶¨ÒåÁËËùĞèµÄ½ÚµãºÍÊôĞÔ¼°ÆäÄÚÈİ¡£
+The /cpus/PowerPC,970@0/64-bit property is an example of a
+property without a value. All other properties have a value. The
+significance of the #address-cells and #size-cells properties will be
+explained in chapter IV which defines precisely the required nodes and
+properties and their content.
+
+
+3) Device tree "structure" block
+Éè±¸µÄ½á¹¹ÏßĞÔÊ÷ÊÇÒ»¸öÊ÷½á¹¹¡£OF_DT_BEGIN_NODEÏóÕ÷×ÅÒ»¸öĞÂ½ÚµãµÄ¿ªÊ¼
+OF_DT_END_NODEÏóÕ÷×ÅÒ»¸ö½ÚµãµÄ½áÊø¡£×Ó½ÚµãÖ»ÊÇÖ®Ç°¶¨Òå¡°OF_DT_END_NODE¡±(¼´½ÚµãÄÚµÄ½Úµã)¡£
+'token' ÊÇÒ»¸ö32Î»µÄÖµ£¬Ê÷ÄÜ±»Íê³ÉOF_DT_END
+
+The structure of the device tree is a linearized tree structure. The
+"OF_DT_BEGIN_NODE" token starts a new node, and the "OF_DT_END_NODE"
+ends that node definition. Child nodes are simply defined before
+"OF_DT_END_NODE" (that is nodes within the node). A 'token' is a 32
+bit value. The tree has to be "finished" with a OF_DT_END token
+ÕâÊÇÒ»¸öµ¥Ò»½ÚµãµÄ»ù±¾½á¹¹
+Here's the basic structure of a single node:
+
+     * token OF_DT_BEGIN_NODE (that is 0x00000001)
+     * for version 1 to 3, this is the node full path as a zero
+       terminated string, starting with "/". For version 16 and later,
+       this is the node unit name only (or an empty string for the
+       root node)
+     * [align gap to next 4 bytes boundary]
+     * for each property:
+        * token OF_DT_PROP (that is 0x00000003)
+        * 32-bit value of property value size in bytes (or 0 if no
+          value)
+        * 32-bit value of offset in string block of property name
+        * property value data if any
+        * [align gap to next 4 bytes boundary]
+     * [child nodes if any]
+     * token OF_DT_END_NODE (that is 0x00000002)
+Òò´Ë½ÚµãÄÚÈİ¿ÉÒÔ¸ÅÀ¨ÎªÒ»¸ö¿ªÊ¼±ê¼Ç
+Ò»¸öÍêÕûµÄÂ·¾¶,Ò»¸öÊôĞÔÁĞ±í,×Ó½ÚµãÁĞ±í,ºÍ½áÊø±ê¼Ç
+Ã¿¸ö×Ó½Úµã±¾Éí¾ÍÊÇÒ»¸öÍêÕûµÄ½Úµã½á¹¹¶¨Òå¡£
+
+So the node content can be summarized as a start token, a full path,
+a list of properties, a list of child nodes, and an end token. Every
+child node is a full node structure itself as defined above.
+×¢Òâ:ÒÔÉÏ¶¨ÒåÒªÇóÌØ¶¨½ÚµãµÄËùÓĞÊôĞÔ¶¨Òå±ØĞëÔÚ¸Ã½ÚµãµÄ×Ó½Úµã¶¨ÒåÖ®Ç° 
+¾¡¹ÜÈç¹û½«ÊôĞÔºÍ×Ó½Úµã»ìºÏÔÚÒ»Æğ£¬Õâ¸ö½á¹¹½«²»»áÊÇÄ£ºıµÄ
+µ«ÊÇÄÚºË½âÎöÆ÷ÒªÇóÊôĞÔÊ×ÏÈ³öÏÖ(ÖÁÉÙÒªµ½2.6.22)¡£
+ÈÎºÎ²Ù×İÒ»¿Ã±âÆ½Ê÷µÄ¹¤¾ß¶¼±ØĞëĞ¡ĞÄÎ¬»¤Õâ¸öÔ¼Êø¡£
+NOTE: The above definition requires that all property definitions for
+a particular node MUST precede any subnode definitions for that node.
+Although the structure would not be ambiguous if properties and
+subnodes were intermingled, the kernel parser requires that the
+properties come first (up until at least 2.6.22).  Any tools
+manipulating a flattened tree must take care to preserve this
+constraint.
+
+4) Device tree "strings" block
+ÎªÁË½ÚÊ¡¿Õ¼ä£¬ÊôĞÔµÄÃû×Ö£¬Í¨³£ÊÇ¶àÓàµÄ£¬·Ö±ğ´æ´¢ÔÚ"strings"¿éÖĞ¡£
+Õâ¸ö¿é½ö½öÊÇËùÓĞÊôĞÔÃûÁ¬½ÓÔÚÒ»ÆğµÄÁãÖÕÖ¹×Ö·û´®
+½á¹¹¿éÖĞµÄÉè±¸-Ê÷ÊôĞÔ¶¨Òå½«°üº¬À´×Ô×Ö·û´®¿é¿ªÍ·µÄÆ«ÒÆÖµ¡£
+In order to save space, property names, which are generally redundant,
+are stored separately in the "strings" block. This block is simply the
+whole bunch of zero terminated strings for all property names
+concatenated together. The device-tree property definitions in the
+structure block will contain offset values from the beginning of the
+strings block.
+
+
+III - Required content of the device tree
+=========================================
+¾¯¸æ:±¾ÎÄÖĞ¶¨ÒåµÄËùÓĞ¡°linux,*¡±ÊôĞÔ½öÊÊÓÃÓÚÒ»¸ö±âÆ½µÄÉè±¸Ê÷
+Èç¹ûÄúµÄÆ½Ì¨Ê¹ÓÃÁË¿ª·Å¹Ì¼şµÄÕæÊµÊµÏÖ»òÓë¿ª·Å¹Ì¼ş¿Í»§¶Ë½Ó¿Ú¼æÈİµÄÊµÏÖ
+ÕâĞ©ÊôĞÔ½«±»´´½¨Í¨¹ıÔÚÄÚºËµÄprom_init()ÎÄ¼şÖĞÌø×ª´úÂë´´½¨¡£
+Äã±ØĞëÌí¼Ó´úÂëÈ¥·¢ÏÖÄã°å×ÓµÄÄ£Ê½ºÍÉèÖÃÆ½Ì¨ºÅ£¬È»¶øµ±Ê¹ÓÃÆ½Ì¨Éè±¸Ê÷Èë¿ÚÖ¸ÕëµÄÊ±ºò
+Ã»ÓĞprom_init() ´«µİ£¬Òò´ËÄú±ØĞë×Ô¼ºÌá¹©ÕâĞ©ÊôĞÔ
+
+
+WARNING: All "linux,*" properties defined in this document apply only
+to a flattened device-tree. If your platform uses a real
+implementation of Open Firmware or an implementation compatible with
+the Open Firmware client interface, those properties will be created
+by the trampoline code in the kernel's prom_init() file. For example,
+that's where you'll have to add code to detect your board model and
+set the platform number. However, when using the flattened device-tree
+entry point, there is no prom_init() pass, and thus you have to
+provide those properties yourself.
+
+
+1) Note about cells and address representation
+----------------------------------------------
+Ò»°ã¹æÔò±»¼ÇÂ¼ÔÚ¸÷ÖÖ¿ª·Å¹Ì¼şÎÄµµÖĞ£¬Èç¹ûÄãÑ¡ÔñÊ¹ÓÃÉè±¸Ê÷À´ÃèÊö×ÜÏß
+´æÔÚOF Æ½Ì¨°ó¶¨£¬ÄúÓ¦¸Ã×ñÑ­¹æ·¶¡£µ«ÊÇ£¬ÄÚºË²»ĞèÒªÉè±¸Ê÷ÃèÊöÃ¿Ò»¸öÉè±¸»ò×ÜÏß
+The general rule is documented in the various Open Firmware
+documentations. If you choose to describe a bus with the device-tree
+and there exist an OF bus binding, then you should follow the
+specification. However, the kernel does not require every single
+device or bus to be described by the device tree.
+Ò»°ãÀ´Ëµ£¬Éè±¸µØÖ·µÄ¸ñÊ½ÊÇÓÉ¸¸×ÜÏßÀàĞÍ¶¨ÒåµÄ£¬»ùÓÚ #address-cells ºÍ#size-cells
+#size-cells²»ÄÜ±»¼Ì³Ğ£¬ÓĞ×Ó½ÚµãµÄÃ¿¸ö½Úµã¶¼ĞèÒªÖ¸Ã÷Ëü¡£
+ÄÚºËÒªÇó¸ù½ÚµãÓĞÕâĞ©ÊôĞÔ¶ÔÓÚÓ³ÉäÔÚ´¦ÀíÆ÷×ÜÏßÏÂµÄÉè±¸¶¨ÒåÊı¾İ¸ñÊ½
+In general, the format of an address for a device is defined by the
+parent bus type, based on the #address-cells and #size-cells
+properties.  Note that the parent's parent definitions of #address-cells
+and #size-cells are not inherited so every node with children must specify
+them.  The kernel requires the root node to have those properties defining
+addresses format for devices directly mapped on the processor bus.
+ÕâÁ½¸öÊôĞÔ¶¨ÒåÁË±íÊ¾µØÖ·ºÍ´óĞ¡µÄ¡°cell ¡±£¬Ò»¸öcell ÊÇÒ»¸ö32Î»µÄÊı×Ö
+ÀıÈç£¬ÀıÈç£¬Èç¹ûÁ½Õß¶¼°üº¬2£¬¾ÍÏñÉÏÃæ¸ø³öµÄÊ¾ÀıÊ÷Ò»Ñù£¬ÄÇÃ´µØÖ·ºÍ´óĞ¡¶¼ÓÉÁ½¸öµ¥Ôª×é³É
+Ã¿¸ö¶¼ÊÇÒ»¸ö64Î»µÄÊı×Ö(cells±»´®½ÓÔÚÒ»Æğ£¬²¢ÇÒÆÚÍû´ó¶Ë¸ñÊ½)
+ÁíÒ»¸öÀı×ÓÊÇÆ»¹û¹Ì¼ş¶¨ÒåËüÃÇµÄ·½Ê½¡£Ò»¸öµØÖ·µÄÁ½¸ö cell £¬Ò»¸ö´óĞ¡µÄcell£¬
+´ó¶àÊı32Î»µÄÊµÏÖÓ¦¸Ã¶¨Òå#address-cells  ºÍ#size-cells Îª1£¬±íÊ¾Ò»¸ö32Î»µÄÖµ
+Ò»Ğ©32Î»´¦ÀíÆ÷ÔÊĞíÎïÀíµØÖ·´óÓÚ32Î»       ÕâĞ©´¦ÀíÆ÷Ó¦¸Ã°Ñ#address-cellsÎª2¡£
+Those 2 properties define 'cells' for representing an address and a
+size. A "cell" is a 32-bit number. For example, if both contain 2
+like the example tree given above, then an address and a size are both
+composed of 2 cells, and each is a 64-bit number (cells are
+concatenated and expected to be in big endian format). Another example
+is the way Apple firmware defines them, with 2 cells for an address
+and one cell for a size.  Most 32-bit implementations should define
+#address-cells and #size-cells to 1, which represents a 32-bit value.
+Some 32-bit processors allow for physical addresses greater than 32
+bits; these processors should define #address-cells as 2.
+reg¡±ÊôĞÔ×ÜÊÇÒ»¸ö¡a"address 
+size"Ôª×é£¬µØÖ·ºÍ´óĞ¡µÄcellÊÇÓÉ×ÜÏßµÄ#address-cellsºÍ#size-cellsÖ¸¶¨µÄ¡£
+µ±Ò»¸ö×ÜÏßÖ§³Ö¶àÖÖ¶àÑùµÄµØÖ·¿Õ¼äºÍÆäËûµÄÒ»Ğ©  Ïà¶ÔÓÚ¸ø¶¨µØÖ··ÖÅä±êÖ¾¡£(Èçprefetchable£¬µÈµÈ¡£)
+ÕâĞ©±êÖ¾Í¨³£±»Ìí¼Óµ½ÎïÀíµØÖ·µÄ¶¥²ãÎ»£¬ÀıÈç£¬Ò»¸öPCIÎïÀíµØÖ·ÓÉ3
+¸öµ¥Ôª×é³É£¬µ×²¿Á½¸ö°üº¬Êµ¼ÊµØÖ·±¾Éí£¬¶ø¶¥²¿µ¥Ôª¸ñ°üº¬µØÖ·¿Õ¼äÖ¸Ê¾¡¢±êÖ¾ºÍPCI
+×ÜÏßºÍÉè±¸ºÅ¡£
+
+"reg" properties are always a tuple of the type "address size" where
+the number of cells of address and size is specified by the bus
+#address-cells and #size-cells. When a bus supports various address
+spaces and other flags relative to a given address allocation (like
+prefetchable, etc...) those flags are usually added to the top level
+bits of the physical address. For example, a PCI physical address is
+made of 3 cells, the bottom two containing the actual address itself
+while the top cell contains address space indication, flags, and pci
+bus & device numbers.
+¶ÔÓÚÖ§³Ö¶¯Ì¬·ÖÅäµÄ×ÜÏß£¬ÕâÊÇÒ»ÖÖ±»½ÓÊÜµÄ×ö·¨£¬
+²»Ìá¹©µØÖ·ÔÚreg(±£³ÖËüÎª0)£¬ËäÈ»Ìá¹©ÁËÒ»¸ö±êÖ¾±êÃ÷Õâ¸öµØÖ·ÊÇ¶¯Ì¬·ÖÅäµÄ£¬È¥Ìá¹©Ò»¸ö¶ÀÁ¢µÄ"assigned-addresses"ÊôĞÔ
+°üº¬ÁËÍêÃÀ·ÖÅäµÄµØÖ·¡£ÓĞ¹ØÏêÏ¸ĞÅÏ¢£¬Çë²ÎÔÄ°ó¶¨µÄPCI¡£
+For buses that support dynamic allocation, it's the accepted practice
+to then not provide the address in "reg" (keep it 0) though while
+providing a flag indicating the address is dynamically allocated, and
+then, to provide a separate "assigned-addresses" property that
+contains the fully allocated addresses. See the PCI OF bindings for
+details.
+Ò»°ãÇé¿öÏÂ£¬Èç¹ûËü·´ÕÕÄãµÄÓ²¼ş£¬Ã»ÓĞµØÖ·¿Õ¼äÎ»ºÍÃ»ÓĞ¶¯Ì¬·ÖÅäµÄ¼òµ¥×ÜÏßÓÅÏÈ
+ÒòÎªÏÖÓĞµÄÄÚºËµØÖ·½âÎöº¯Êı½«»áÔÚÕâ¸ö·½¿òÖĞ¹¤×÷¡£
+Èç¹ûÄú¶¨ÒåÒ»¸ö¾ßÓĞ¸ü¸´ÔÓµØÖ·¸ñÊ½µÄ×ÜÏßÀàĞÍ£¬°üÀ¨µØÖ·¿Õ¼äÎ»Ö®ÀàµÄ¶«Î÷
+Äã±ØĞëÔÚprom_parse.cÌí¼ÓÒ»¸öÎªÄãµÄ×ÜÏßÀàĞÍµÄ×ÜÏß·­ÒëÆ÷
+In general, a simple bus with no address space bits and no dynamic
+allocation is preferred if it reflects your hardware, as the existing
+kernel address parsing functions will work out of the box. If you
+define a bus type with a more complex address format, including things
+like address space bits, you'll have to add a bus translator to the
+prom_parse.c file of the recent kernels for your bus type.
+¡°reg¡±ÊôĞÔÖ»¶¨ÒåÁË¸ø¶¨×ÜÏßÄÚµÄµØÖ·ºÍ´óĞ¡(Èç¹û#size-cells  Îª·Ç0)
+ÎªÁË½«µØÖ·ÏòÉÏ×ª»»(ÕâÊÇ¸¸µØÖ·£¬¿ÉÄÜÊÇCPUÎïÀíµØÖ·)£¬
+ËùÓĞ×ÜÏß¶¼±ØĞë°üº¬Ò»¸ö¡åranges  ¡±ÊôĞÔ¡£
+Èç¹û¡° range ¡±ÊôĞÔÔÚ¸ø¶¨µÄ¼¶±ğ¶ªÊ§£¬Ôò¼Ù¶¨×ª»» ÊÇ²»¿ÉÄÜµÄ
+Ò²¾ÍÊÇËµ¡£ÔÚ¸¸×ÜÏßÉÏ£¬¼Ä´æÆ÷ÊÇ²»¿É¼ûµÄ£¬×ÜÏßµÄ¡°ranges ¡±ÊôĞÔµÄ¸ñÊ½ÊÇ:
+bus address, parent bus address, size
+
+The "reg" property only defines addresses and sizes (if #size-cells is
+non-0) within a given bus. In order to translate addresses upward
+(that is into parent bus addresses, and possibly into CPU physical
+addresses), all buses must contain a "ranges" property. If the
+"ranges" property is missing at a given level, it's assumed that
+translation isn't possible, i.e., the registers are not visible on the
+parent bus.  The format of the "ranges" property for a bus is a list
+of:
+
+	bus address, parent bus address, size
+
+
+"bus address"ÊÇ×ÜÏß½Úµã¶¨ÒåµÄ×ÜÏßµÄ¸ñÊ½
+Ò²¾ÍÊÇËµ£¬¶ÔÓÚÒ»¸öPCIÇÅ£¬Ëü½«ÊÇÒ»¸öPCIµØÖ·
+Òò´Ë£¬bus address, parent bus address, size
+Îª×ÓÉè±¸¶¨ÒåÁËÒ»ÏµÁĞµØÖ·£¬parent
+bus address" ÊÇ¸Ã×ÜÏßµÄ¸¸×ÜÏßµÄ¸ñÊ½¡£ ÀıÈç£¬
+¶ÔÓÚÒ»¸öPCIÖ÷»ú¿ØÖÆÆ÷£¬Ëü½«ÊÇÒ»¸öCPUµØÖ·
+¡£¶ÔÓÚÒ»ÖÖPCI <->  ISAÇÅ,ÄÇ½«ÊÇÒ»ÖÖPCIµØÖ·
+Ëü¶¨ÒåÁË¸¸×ÜÏßÖĞµÄ»ù±¾µØÖ·£¬ÔÚ¸ÃÇøÓòÖĞÓ³ÉäÁË¸Ã·¶Î§µÄ¿ªÊ¼¡£
+"bus address" is in the format of the bus this bus node is defining,
+that is, for a PCI bridge, it would be a PCI address. Thus, (bus
+address, size) defines a range of addresses for child devices. "parent
+bus address" is in the format of the parent bus of this bus. For
+example, for a PCI host controller, that would be a CPU address. For a
+PCI<->ISA bridge, that would be a PCI address. It defines the base
+address in the parent bus where the beginning of that range is mapped.
+¶ÔÓÚÒ»¸öĞÂµÄ64Î»°å×ÓµÄÖ§³Ö£¬ÎÒÍÆ¼ö2/2¸ñÊ½»òÕßÊÇÆ»¹ûµÄ2/1¸ñÊ½£¬
+ÒòÎªsizesÍ¨³£ÊÊºÏÒ»¸ö32Î»µÄword£¬ËùÒÔÉÔÎ¢½ô´ÕÒ»Ğ©
+ĞÂµÄ32Î»°å×ÓÖ§³ÖÓ¦Ê¹ÓÃÊ¹ÓÃ1/1¸ñÊ½£¬³ı·Ç´¦ÀíÆ÷Ö§³ÖÎïÀíµØÖ·grea´óÓÚ32Î»
+ÔÚÕâÖÖÇé¿öÏÂ½¨ÒéÊ¹ÓÃ2/1¸ñÊ½¡£
+For new 64-bit board support, I recommend either the 2/2 format or
+Apple's 2/1 format which is slightly more compact since sizes usually
+fit in a single 32-bit word.   New 32-bit board support should use a
+1/1 format, unless the processor supports physical addresses grea  ter
+than 32-bits, in which case a 2/1 format is recommended.
+»òÕß£¬rangesÊôĞÔ¿ÉÄÜÊÇ¿ÕµÄ£¬±êÃ÷¼Ä´æÆ÷Ê¹ÓÃÍ¬µÈÓ³Éä×ª»»ÔÚ¸¸×ÜÏßÉÏÊÇ¿É¼ûµÄ
+»»¾ä»°Ëµ£¬¸¸Àà×ÜÏßµØÖ·¿Õ¼äÓë×Ó×ÜÏßµØÖ·¿Õ¼äÊÇÏàÍ¬µÄ¡£
+Alternatively, the "ranges" property may be empty, indicating that the
+registers are visible on the parent bus using an identity mapping
+translation.  In other words, the parent bus address space is the same
+as the child bus address space.
+
+2) Note about "compatible" properties
+-------------------------------------
+ÕâĞ©ÊôĞÔÊÇ¿ÉÑ¡µÄ£¬µ«ÊÇÔÚÉè±¸ºÍ¸ù½ÚµãÖĞÍÆ¼ö¡£
+compatibleÊôĞÔµÄ¸ñÊ½ÊÇÁ¬½ÓµÄÁãÖÕÖ¹×Ö·û´®µÄÁĞ±í
+ËûÃÇÔÊĞíÒ»ÖÖÉè±¸À´±í´ïÓëÀàËÆÉè±¸µÄ¼æÈİĞÔ
+ÔÚÄ³Ğ©Çé¿öÏÂÔÊĞíµ¥¸öÇı¶¯³ÌĞòÓë¶à¸öÉè±¸½øĞĞÆ¥Åä£¬¶ø²»¿¼ÂÇËüÃÇµÄÊµ¼ÊÃû³Æ¡£
+These properties are optional, but recommended in devices and the root
+node. The format of a "compatible" property is a list of concatenated
+zero terminated strings. They allow a device to express its
+compatibility with a family of similar devices, in some cases,
+allowing a single driver to match against several devices regardless
+of their actual names.
+
+3) Note about "name" properties
+-------------------------------
+ËäÈ»ÔçÆÚµÄÒ»Ğ©¿ª·Å¹Ì¼şµÄÓÃ»§£¬ÏñOldWorld macintoshesÇãÏòÓÚÊ¹ÓÃ¡°name¡±ÊôĞÔµÄÊµ¼ÊÉè±¸Ãû
+µ«ÊÇÏÖÔÚÊ¹ÓÃÒ»¸ö¸ü½Ó½üÉè±¸ÀàµÄÃû³Æ(Í¨³£µÈÓÚdevicetype)ÊÇÒ»ÖÖºÜºÃµÄ×ö·¨
+ÀıÈç£¬ÏÖÔÚ£¬ÒÔÌ«Íø¿ØÖÆÆ÷±»ÃüÃûÎª¡°ethernet¡±£¬ÕâÊÇÒ»¸ö¶îÍâµÄ¡°model¡±ÊôĞÔ£¬¶¨ÒåÒ»¸öÃ÷È·µÄ
+Ğ¾Æ¬ÀàĞÍºÍÄ£Ê½¡£
+compatible ÊôĞÔ¶¨ÒåÒ»¸ö¼ÒÍ¥£¬Èç¹ûÒ»¸öÇı¶¯³ÌĞò¿ÉÒÔÇı¶¯³¬¹ıÒ»¸öÕâÑùµÄĞ¾Æ¬
+µ«ÊÇ£¬ÄÚºËÍ¨³£²»»á¶Ô¡°name¡±ÊôĞÔÉèÖÃÈÎºÎÏŞÖÆ
+¼òµ¥µØ×ñÑ­±ê×¼ºÍËüµÄÑİ½øÊÇÒ»ÖÖºÜºÃµÄÊµ¼ù¡£
+
+While earlier users of Open Firmware like OldWorld macintoshes tended
+to use the actual device name for the "name" property, it's nowadays
+considered a good practice to use a name that is closer to the device
+class (often equal to device_type). For example, nowadays, Ethernet
+controllers are named "ethernet", an additional "model" property
+defining precisely the chip type/model, and "compatible" property
+defining the family in case a single driver can driver more than one
+of these chips. However, the kernel doesn't generally put any
+restriction on the "name" property; it is simply considered good
+practice to follow the standard and its evolutions as closely as
+possible.
+»¹Òª×¢ÒâµÄÊÇ£¬ĞÂµÄ¸ñÊ½°æ±¾16Ê¹¡°name¡±ÊôĞÔ¿ÉÑ¡
+Èç¹û½Úµã²»´æÔÚ£¬ÄÇÃ´½ÚµãµÄµ¥Î»Ãû³Æ¾Í»á±»ÓÃÀ´ÖØĞÂ¹¹ÔìÃû³Æ
+Ò²¾ÍÊÇËµ£¬ÔÚÊ¹ÓÃ¡°@¡±·ûºÅÖ®Ç°£¬µ¥ÔªÃû³ÆµÄÒ»²¿·Ö(
+Èç¹ûÃ»ÓĞ¡°@¡±·ûºÅ£¬Ôò±íÊ¾Õû¸öµ¥ÔªÃû³Æ)¡£
+Note also that the new format version 16 makes the "name" property
+optional. If it's absent for a node, then the node's unit name is then
+used to reconstruct the name. That is, the part of the unit name
+before the "@" sign is used (or the entire unit name if no "@" sign
+is present).
+×¢Òâ½ÚµãºÍÊôĞÔÃûºÍ×Ö·û¼¯
+4) Note about node and property names and character set
+-------------------------------------------------------
+ËäÈ»¿ª·Å¹Ì¼şÌá¹©ÁË¸üÁé»îµÄ8859-1µÄÓÃ·¨£¬µ«ÊÇÕâ¸ö¹æ·¶ÊµÊ©ÁË¸üÑÏ¸ñµÄ¹æÔò
+½ÚµãºÍÊôĞÔÓ¦¸ÃÖ»°üº¬ASCII×Ö·ûaµ½'z'£¬'0'µ½'9''£¬''¡£'''+'£¬''?¡±ºÍ¡°-¡±¡£
+½ÚµãÃû»¹ÔÊĞí´óĞ´×ÖÄ¸¡°A¡±µ½¡°Z¡±£¬ÊôĞÔÃûÓ¦¸ÃÊÇĞ¡Ğ´µÄ¡£
+ÏñÆ»¹ûÕâÑùµÄ¹©Ó¦ÉÌ²»×ğÖØÕâÌõ¹æÔòµÄÊÂÊµÔÚÕâÀïÊÇ²»Ïà¹ØµÄ)
+´ËÍâ£¬½ÚµãºÍÊôĞÔÃûÓ¦¸Ã×ÜÊÇÒÔaµ½z(»ò¡°a¡±µ½¡°z¡±)µÄ×Ö·û¿ªÍ·¡£
+While Open Firmware provides more flexible usage of 8859-1, this
+specification enforces more strict rules. Nodes and properties should
+be comprised only of ASCII characters 'a' to 'z', '0' to
+'9', ',', '.', '_', '+', '#', '?', and '-'. Node names additionally
+allow uppercase characters 'A' to 'Z' (property names should be
+lowercase. The fact that vendors like Apple don't respect this rule is
+irrelevant here). Additionally, node and property names should always
+begin with a character in the range 'a' to 'z' (or 'A' to 'Z' for node
+names).
+Á½¸ö½ÚµãºÍÊôĞÔÃûµÄ×î´ó×Ö·ûÊıÊÇ31¡£
+ÔÚ½ÚµãÃûµÄÇé¿öÏÂ£¬ÕâÖ»ÊÇµ¥ÔªÃû³ÆµÄ×î×ó²¿·Ö(´¿¡°name¡±ÊôĞÔ)
+£¬Ëü²»°üÀ¨¿ÉÒÔ³¬³ö¸ÃÏŞÖÆ·¶Î§µÄµ¥ÔªµØÖ·¡£
+The maximum number of characters for both nodes and property names
+is 31. In the case of node names, this is only the leftmost part of
+a unit name (the pure "name" property), it doesn't include the unit
+address which can extend beyond that limit.
+
+
+5) Required nodes and properties
+--------------------------------
+ÕâĞ©¶¼ÊÇÄ¿Ç°ËùĞèÒªµÄ¡£µ«ÊÇ£¬Ç¿ÁÒ½¨ÒéÄú½«PCI
+Ö÷»úÇÅ±©Â¶ÔÚÒ»ÖÖ×ÜÏß±ê×¼°ó¶¨ÖĞ£¬ÒÔ´ò¿ª¹Ì¼ş£¬²¢ÇÒÔÚÖĞ¶ÏÊ÷¹æ·¶ÖĞ¼ÇÂ¼ÄúµÄÖĞ¶ÏÊ÷¡£
+  These are all that are currently required. However, it is strongly
+  recommended that you expose PCI host bridges as documented in the
+  PCI binding to Open Firmware, and your interrupt tree as documented
+  in OF interrupt tree specification.
+
+  a) The root node
+¸ù½ÚµãĞèÒªÒ»Ğ©ÊôĞÔÀ´ÏÔÊ¾
+  The root node requires some properties to be present:
+
+    - model : this is your board name/model
+    rootÉè±¸µÄµØÖ·±íÏÖ
+    - #address-cells : address representation for "root" devices
+    - #size-cells: the size representation for "root" devices
+    - compatible : the board "family" generally finds its way here,
+      for example, if you have 2 board models with a similar layout,
+      that typically get driven by the same platform code in the
+      kernel, you would specify the exact board model in the
+      compatible property followed by an entry that represents the SoC
+      model.
+
+¸ù½ÚµãÍ¨³£Ò²»áÔÚÄãµÄ°åÉÏÌí¼Ó¶îÍâµÄÊôĞÔ£¬±ÈÈçĞòÁĞºÅ£¬Èç¹ûÓĞµÄ»°
+½¨ÒéÈç¹ûÄúÌí¼ÓÈÎºÎcustom ÊôĞÔ£¬ÆäÃû³Æ¿ÉÄÜÓë±ê×¼¶¨ÒåµÄÃû³Æ³åÍ»£¬ÄÇÃ´Äú¿ÉÒÔÊ¹ÓÃÄúµÄ¹©Ó¦ÉÌÃû³ÆºÍ¶ººÅÀ´Ç°×ºËüÃÇ
+  The root node is also generally where you add additional properties
+  specific to your board like the serial number if any, that sort of
+  thing. It is recommended that if you add any "custom" property whose
+  name may clash with standard defined ones, you prefix them with your
+  vendor name and a comma.
+¸ù½ÚµãµÄ¸½¼ÓÊôĞÔ:
+  Additional properties for the root node:
+´®¿ÚºÅ :Ò»¸ö±íÊ¾Éè±¸ĞòÁĞºÅµÄ×Ö·û´®
+    - serial-number : a string representing the device's serial number
+
+  b) The /cpus node
+Õâ¸ö½ÚµãÊÇËùÓĞµ¥¶ÀµÄCPU
+½ÚµãµÄ¸¸½Úµã¡£ËüÃ»ÓĞÈÎºÎ¾ßÌåµÄÒªÇó£¬¾¡¹ÜÍ¨³£ÖÁÉÙÓĞÕâÑùµÄÁ¼ºÃÊµ¼ù:
+  This node is the parent of all individual CPU nodes. It doesn't
+  have any specific requirements, though it's generally good practice
+  to have at least:
+
+               #address-cells = <00000001>
+               #size-cells    = <00000000>
+Õâ¾Í¶¨ÒåÁËCPUµÄ¡°address  ¡±ÊÇµ¥¸öµÄcell£¬²¢ÇÒÃ»ÓĞÒâÒåµÄsize¡£
+ÕâÊÇ²»±ØÒªµÄ£¬µ«ÊÇÔÚ¶ÁÈ¡CPU½ÚµãµÄ¡°reg¡±ÊôĞÔÊ±£¬ÄÚºË»á¼ÙÉèÕâÖÖ¸ñÊ½ÈçÏÂËùÊ¾
+  This defines that the "address" for a CPU is a single cell, and has
+  no meaningful size. This is not necessary but the kernel will assume
+  that format when reading the "reg" properties of a CPU node, see
+  below
+
+  c) The /cpus/* nodes
+Òò´Ë£¬ÔÚ/CPUÏÂ£¬ÄúÓ¦¸ÃÎª»úÆ÷ÉÏµÄÃ¿¸öCPU´´½¨Ò»¸ö½Úµã
+¶ÔÓÚCPUµÄÃû³Æ£¬²¢Ã»ÓĞÌØ¶¨µÄÏŞÖÆ£¬¾¡¹ÜÍ¨³£³ÆËüÎª¡°  <architecture>,<core>. ¡±¡£
+ÀıÈç£¬Æ»¹ûÊ¹ÓÃPowerPC£¬G5£¬¶øIBMÊ¹ÓÃPowerPC£¬970 FX
+¡£µ«ÊÇ£¬Í¨ÓÃÃû³ÆÔ¼¶¨±íÃ÷£¬×îºÃÊÇ¼òµ¥µØÎªÃ¿¸öcpu½ÚµãÊ¹ÓÃ¡°cpu
+¡±£¬²¢Ê¹ÓÃ¼æÈİµÄÊôĞÔÀ´±êÊ¶ÌØ¶¨µÄcpuÄÚºË¡£
+  So under /cpus, you are supposed to create a node for every CPU on
+  the machine. There is no specific restriction on the name of the
+  CPU, though it's common to call it <architecture>,<core>. For
+  example, Apple uses PowerPC,G5 while IBM uses PowerPC,970FX.
+  However, the Generic Names convention suggests that it would be
+  better to simply use 'cpu' for each cpu node and use the compatible
+  property to identify the specific cpu core.
+
+  Required properties:
+
+    - device_type : has to be "cpu"
+ÕâÊÇÎïÀíCPUºÅ£¬ËüÊÇÒ»¸ö32Î»µÄcell£¬ÕâÊÇÎïÀíCPUºÅ£¬ËüÊÇÒ»¸ö32
+Î»µÄµ¥Ôª¸ñ£¬²¢ÇÒ×÷Îªµ¥ÔªºÅÔÚÍêÕûÂ·¾¶ÖĞ¹¹Ôìµ¥ÔªÃû£¬Ò²±»×÷Îªµ¥ÔªºÅÊ¹ÓÃ¡£ÀıÈç£¬Ê¹Ó
+Ã2¸öcpu£¬Äú½«ÓµÓĞÍêÕûµÄÂ·¾¶
+    - reg : This is the physical CPU number, it's a single 32-bit cell
+      and is also used as-is as the unit number for constructing the
+      unit name in the full path. For example, with 2 CPUs, you would
+      have the full path:
+        /cpus/PowerPC,970FX@0
+        /cpus/PowerPC,970FX@1
+        µ¥Î»µØÖ·²»ĞèÒª0
+      (unit addresses do not require leading zeroes)
+    - d-cache-block-size : one cell, L1 data cache block size in bytes (*)
+    - i-cache-block-size : one cell, L1 instruction cache block size in
+      bytes
+    - d-cache-size : one cell, size of L1 data cache in bytes
+    - i-cache-size : one cell, size of L1 instruction cache in bytes
+»º´æµÄ¡° block ¡±´óĞ¡ÊÇ»º´æ¹ÜÀíÖ¸Áî²Ù×÷µÄ´óĞ¡
+ÀúÊ·ÉÏ£¬Õâ¸öÎÄµµÊ¹ÓÃÁË»º´æµÄ¡°ĞĞ¡±´óĞ¡£¬ÕâÊÇ²»ÕıÈ·µÄ¡£ÄÚºË¸üÇãÏòÓÚ»º´æ¿é´óĞ¡£¬
+²¢½«·µ»Ø»º´æĞĞ´óĞ¡ÒÔÖ§³ÖÏòºó¼æÈİĞÔ¡£
+(*) The cache "block" size is the size on which the cache management
+instructions operate. Historically, this document used the cache
+"line" size here which is incorrect. The kernel will prefer the cache
+block size and will fallback to cache line size for backward
+compatibility.
+
+  Recommended properties:
+ timebase-frequency:Ò»¸ö±íÊ¾ºÕ×ÈµÄÊ±¼ä»ùÆµÂÊµÄcell,
+    - timebase-frequency : a cell indicating the frequency of the
+      timebase in Hz. This is not directly used by the generic code,
+      but you are welcome to copy/paste the pSeries code for setting
+      the kernel timebase/decrementer calibration based on this
+      value.
+    - clock-frequency : a cell indicating the CPU core clock frequency
+      in Hz. A new property will be defined for 64-bit values, but if
+      your frequency is < 4Ghz, one cell is enough. Here as well as
+      for the above, the common code doesn't use that property, but
+      you are welcome to re-use the pSeries or Maple one. A future
+      kernel version might provide a common function for this.
+    - d-cache-line-size : one cell, L1 data cache line size in bytes
+      if different from the block size
+    - i-cache-line-size : one cell, L1 instruction cache line size in
+      bytes if different from the block size
+»¶Ó­ÄãÌí¼ÓÈÎºÎÏà¹ØµÄÈÎºÎÊôĞÔ¸øÄãµÄ°å×Ó±ÈÈçÒ»Ğ©ÓĞ¹ØÓÃÓÚÈíÖØÖÃcpuµÄ»úÖÆµÄĞÅÏ¢¡£
+ÀıÈç£¬Æ»¹û½«CPUÈíÖĞ¶Ï µÄGPIOºÅÔÚsoft-resetÊôĞÔÖĞ£¬ÒòÎªËüÃÇÍ¨¹ıÈíÖØÖÃÀ´Æô¶¯¶ş¼¶CPU
+  You are welcome to add any property you find relevant to your board,
+  like some information about the mechanism used to soft-reset the
+  CPUs. For example, Apple puts the GPIO number for CPU soft reset
+  lines in there as a "soft-reset" property since they start secondary
+  CPUs by soft-resetting them.
+
+
+  d) the /memory node(s)
+ÎªÁË¸øÄãµÄ°å×Ó½øĞĞÎïÀíÄÚ´æ²¼¾Ö£¬ÄãÓ¦¸Ã´´½¨Ò»¸ö»òÕß¶à¸öÄÚ´æ½Úµã£¬
+Äú¿ÉÒÔÔÚreg ÊôĞÔÖĞ´´½¨Ò»¸ö¾ßÓĞËùÓĞÄÚ´æ·¶Î§µÄµ¥¸ö½Úµã£¬Ò²¿ÉÒÔ°´ÕÕÄúµÄÒâÔ¸´´½¨¶à¸ö½Úµã
+ÓÃÓÚÍêÕûÂ·¾¶µÄµ¥ÔªµØÖ·(@ part)ÊÇ¸ø¶¨½Úµã¶¨ÒåµÄµÚÒ»¸öÄÚ´æ·¶Î§µÄµØÖ·
+  To define the physical memory layout of your board, you should
+  create one or more memory node(s). You can either create a single
+  node with all memory ranges in its reg property, or you can create
+  several nodes, as you wish. The unit address (@ part) used for the
+  full path is the address of the first range of memory defined by a
+  given node. If you use a single memory node, this will typically be
+  @0.
+
+  Required properties:
+
+    - device_type : has to be "memory"
+    ¸ÃÊôĞÔ°üº¬ÁËÄúµÄ °å×Ó µÄËùÓĞÎïÀíÄÚ´æ·¶Î§
+    ËüÊÇÁ¬½Óµ½Ò»ÆğµÄµØÖ·/´óĞ¡µÄÁĞ±í¡£
+    ÆäÖĞÃ¿¸öµ¥Ôª¸ñµÄÊıÄ¿ÓÉ¸ù½ÚµãµÄ  #address-cellsºÍ#size-cells µÄcells Ëù¶¨Òå
+    ÀıÈç£¬ÔÚÔçÆÚ¸øµÄÀı×ÓÖĞ£¬ËùÓĞµÄÕâĞ©ÊôĞÔ¶¼±ä³ÉÁË2¡£
+    Ò»¸ö»ùÓÚ970µÄ»úÆ÷£¬ÓĞ6GbµÄRAM£¬Í¨³£ÔÚÕâÀïÓĞÒ»¸ö¡°reg¡±ÊôĞÔ£¬¿´ÆğÀ´Ïñ:
+    - reg : This property contains all the physical memory ranges of
+      your board. It's a list of addresses/sizes concatenated
+      together, with the number of cells of each defined by the
+      #address-cells and #size-cells of the root node. For example,
+      with both of these properties being 2 like in the example given
+      earlier, a 970 based machine with 6Gb of RAM could typically
+      have a "reg" property here that looks like:
+
+      00000000 00000000 00000000 80000000
+      00000001 00000000 00000001 00000000
+
+ÕâÊÇÒ»¸ö´Ó0x80000000×Ö½Ú¿ªÊ¼µÄ·¶Î§£¬Ò»¸ö·¶Î§´Ó0x100000000ºÍ0x100000000
+×Ö½Ú¿ªÊ¼¡£Äã¿ÉÒÔ¿´µ½£¬ÔÚ2Gb  ºÍ4GB Ö®¼äÃ»ÓĞÄÚ´æ¸²¸ÇIO¶´¡£
+Ò»Ğ©¹©Ó¦ÉÌÇãÏòÓÚ½«ÕâĞ©·¶Î§»®·ÖÎª¸üĞ¡µÄ²¿·Ö£¬µ«ÊÇÄÚºË²¢²»¹ØĞÄ
+
+
+
+
+      That is a range starting at 0 of 0x80000000 bytes and a range
+      starting at 0x100000000 and of 0x100000000 bytes. You can see
+      that there is no memory covering the IO hole between 2Gb and
+      4Gb. Some vendors prefer splitting those ranges into smaller
+      segments, but the kernel doesn't care.
+
+  e) The /chosen node
+Õâ¸ö½ÚµãÓĞµãÌØÊâ¡£Í¨³£Çé¿öÏÂ
+Í¨³£Çé¿öÏÂ£¬¿ª·Å¹Ì¼ş»á½«Ò»Ğ©¿É±äµÄ»·¾³ĞÅÏ¢£¬±ÈÈç²ÎÊı£¬»òÕßÄ¬ÈÏµÄÊäÈë/Êä³öÉè±¸·Å
+ÔÚÕâÀï¡£
+  This node is a bit "special". Normally, that's where Open Firmware
+  puts some variable environment information, like the arguments, or
+  the default input/output devices.
+Õâ¸ö¹æ·¶ÓĞÒ»Ğ©Ç¿ÖÆĞÔµÄ£¬µ«ÊÇÒ²¶¨ÒåÁËÒ»Ğ©ÌØ¶¨ÓÚlinuxµÄÌØĞÔ£¬
+ÕâĞ©ÊôĞÔÍ¨³£ÊÇÔÚprom_init()properties ¹¹ÔìµÄ¡£µ±Í¨¹ıOF ¿Í»§½è¿ÚÆô¶¯Ê±¡£
+µ«ÊÇÄú±ØĞëÔÚÊ¹ÓÃ±âÆ½¸ñÊ½Ê±Ìá¹©×Ô¼º¡£
+  This specification makes a few of these mandatory, but also defines
+  some linux-specific properties that would be normally constructed by
+  the prom_init() trampoline when booting with an OF client interface,
+  but that you have to provide yourself when using the flattened format.
+ÍÆ¼öµÄÊôĞÔ:
+  Recommended properties:
+bootargs : Õâ¸öÁãÖÕÖ¹µÄ×Ö·û´®×÷ÎªÄÚºËÃüÁîĞĞ´«µİ
+    - bootargs : This zero-terminated string is passed as the kernel
+      command line
+linux,stdout-path
+Èç¹ûÓĞµÄ»°£¬ÕâÊÇ±ê×¼¿ØÖÆÌ¨Éè±¸µÄÍêÕûÂ·¾¶
+Í¨³££¬Èç¹ûÔÚÄãµÄ°å×ÓÉÏÓĞ´®ĞĞÉè±¸£¬Äú¿ÉÄÜÏ£Íû½«ÍêÕûµÄÂ·¾¶ÉèÖÃÎªÔÚ¹Ì¼şÖĞÄ¬ÈÏµÄ¿ØÖÆÌ¨
+ÒÔ±ãÄÚºË½«Æä×÷ÎªËü×Ô¼ºµÄÄ¬ÈÏ¿ØÖÆÌ¨½øĞĞÑ¡Ôñ¡£
+    - linux,stdout-path : This is the full path to your standard
+      console device if any. Typically, if you have serial devices on
+      your board, you may want to put the full path to the one set as
+      the default console in the firmware here, for the kernel to pick
+      it up as its own default console.
+×¢Òâuboot´´½¨ºÍÌî³äÕâ¸öchosen½Úµã±ãÓÚplatformsÊ¹ÓÃËü
+  Note that u-boot creates and fills in the chosen node for platforms
+  that use it.
+×¢Òâ:ÏÖÔÚÒÑ¾­¹ıÊ±µÄÒ»ÖÖ×ö·¨ÊÇÔÚchosenÏÂÃæÒ»¸ö½Ğinterrupt-controllerµÄÊôĞÔ£¬¸ÃÊôĞÔ¾ßÓĞÖ¸ÏòÖ÷ÖĞ¶Ï¿ØÖÆÆ÷µÄphandleÖµ
+  (Note: a practice that is now obsolete was to include a property
+  under /chosen called interrupt-controller which had a phandle value
+  that pointed to the main interrupt controller)
+
+  f) the /soc<SOCname> node
+¸Ã½ÚµãÓÃÓÚ±íÊ¾ÏµÍ³-a-Ğ¾Æ¬(SoC)£¬¸Ã½ÚµãÓÃÓÚ±íÊ¾ÏµÍ³-a-Ğ¾Æ¬(SoC)£¬Èç¹û´¦ÀíÆ÷ÊÇSoC£¬Ôò±ØĞëÏÔÊ¾¸Ã½Úµã
+¶¥²ãsoc½Úµã°üº¬ÁË¶ÔsocËùÓĞÉè±¸µÄÈ«¾ÖĞÅÏ¢¡£½ÚµãÃûÓ¦¸Ã°üº¬SoCµÄÒ»¸öµ¥ÔªµØÖ·£¬SoC½ÚµãµÄÃû³ÆÓ¦¸ÃÒÔ¡°SoC¡±¿ªÍ·
+¶ø¸ÃÃû³ÆµÄÆäÓà²¿·ÖÓ¦¸Ã±íÊ¾SoCµÄ²¿¼ş±àºÅ£¬ÀıÈç£¬MPC8540µÄsoc½Úµã½«±»³ÆÎª¡°soc8540¡±¡£
+  This node is used to represent a system-on-a-chip (SoC) and must be
+  present if the processor is a SoC. The top-level soc node contains
+  information that is global to all devices on the SoC. The node name
+  should contain a unit address for the SoC, which is the base address
+  of the memory-mapped register set for the SoC. The name of an SoC
+  node should start with "soc", and the remainder of the name should
+  represent the part number for the soc.  For example, the MPC8540's
+  soc node would be called "soc8540".
+ËùĞèµÄÊôĞÔ :
+  Required properties:
+Ó¦ÔÚ±»¶¨ÒåÔÚ1)ÖĞÓĞÏêÏ¸ËµÃ÷À´ÃèÊöÓÃÓÚÄÚ´æÓ³ÉäSoC¼Ä´æÆ÷µÄSoCµØÖ·µÄ×ª»»¡£
+    - ranges : Should be defined as specified in 1) to describe the
+      translation of SoC addresses for memory mapped SoC registers.
+bus-frequency :     °üº¬SoC½ÚµãµÄ×ÜÏßÆµÂÊ¡£Í¨³££¬Õâ¸ö×Ö¶ÎµÄÖµÓÉÒıµ¼×°ÔØ³ÌĞòÌî³ä¡£ 
+    - bus-frequency: Contains the bus frequency for the SoC node.
+      Typically, the value of this field is filled in by the boot
+      loader.
+      
+    - compatible : Exact model of the SoC
+
+ÍÆ¼öÊôĞÔ
+  Recommended properties:
+reg:Õâ¸öÊôĞÔ¶¨ÒåÁËÓÃÓÚSOC½Úµã±¾ÉíµÄÄÚ´æÓ³Éä¼Ä´æÆ÷µÄµØÖ·ºÍ´óĞ¡¡£
+Ëü²»°üÀ¨×ÓÉè±¸¼Ä´æÆ÷¡ª¡ªÕâĞ©½«ÔÚÃ¿¸ö×Ó½ÚµãÄÚ¶¨Òå¡£
+ÔÚ¡°reg¡±ÊôĞÔÖĞÖ¸¶¨µÄµØÖ·Ó¦¸ÃÓëSOC½ÚµãµÄµ¥ÔªµØÖ·Æ¥Åä
+
+    - reg : This property defines the address and size of the
+      memory-mapped registers that are used for the SOC node itself.
+      It does not include the child device registers - these will be
+      defined inside each child node.  The address specified in the
+      "reg" property should match the unit address of the SOC node.
+ #address-cells : ¡°soc¡±Éè±¸µÄµØÖ·±íÊ¾¡£¸Ã×Ö¶ÎµÄ¸ñÊ½¿ÉÄÜ»áÒòÉè±¸¼Ä´æÆ÷ÊÇ·ñÎªÄÚ´æÓ³Éä¶øÒì¡£
+ ¶ÔÓÚÄÚ´æÓ³Éä¼Ä´æÆ÷£¬Õâ¸ö×Ö¶Î±íÊ¾ cellsµÄÊıÄ¿ĞèÒª±íÊ¾¼Ä´æÆ÷µØÖ·µÄ¡£
+ ¶ÔÓÚ²»Ê¹ÓÃMMIOµÄSOCs£¬¶ÔÓÚ²»Ê¹ÓÃMMIOµÄSOCs£¬Ó¦¸Ã¶¨ÒåÒ»¸öÌØÊâµÄµØÖ·¸ñÊ½£¬ÆäÖĞ°üº¬×ã¹»µÄµ¥Ôª¸ñÀ´±íÊ¾ËùĞèµÄĞÅÏ¢
+ ²Î¼û1)¹ØÓÚ¶¨ÒåµØÖ·-µ¥Ôª¸ñµÄ¸ü¶àÏ¸½Ú¡£
+    - #address-cells : Address representation for "soc" devices.  The
+      format of this field may vary depending on whether or not the
+      device registers are memory mapped.  For memory mapped
+      registers, this field represents the number of cells needed to
+      represent the address of the registers.  For SOCs that do not
+      use MMIO, a special address format should be defined that
+      contains enough cells to represent the required information.
+      See 1) above for more details on defining #address-cells.
+ #size-cells :     ¡°soc¡±Éè±¸µÄ´óĞ¡±íÊ¾
+    - #size-cells : Size representation for "soc" devices
+  #interrupt-cells :  ¶¨ÒåÓÃÓÚ±íÊ¾ÖĞ¶ÏµÄ cell  µÄ¿í¶È¡£
+  Í¨³£Õâ¸öÖµÊÇ2£¬ÆäÖĞ°üÀ¨Ò»¸ö´ú±íÖĞ¶ÏÊıµÄ32Î»Êı×Ö
+  ÆäÖĞÒ»¸ö±íÊ¾ÖĞ¶ÏµÄ¹¦ÄÜºÍµÈ¼¶¡£
+  Ö»ÓĞµ±SOC°üº¬Ò»¸öÖĞ¶Ï¿ØÖÆÆ÷Ê±£¬²ÅĞèÒªÕâ¸ö×Ö¶Î
+  
+    - #interrupt-cells : Defines the width of cells used to represent
+       interrupts.  Typically this value is <2>, which includes a
+       32-bit number that represents the interrupt number, and a
+       32-bit number that represents the interrupt sense and level.
+       This field is only needed if the SOC contains an interrupt
+       controller.
+SOC½Úµã¿ÉÄÜ°üº¬Æ½Ì¨Ê¹ÓÃµÄÃ¿¸öSOCÉè±¸µÄ×Ó½Úµã£¬
+²»Ó¦¸ÃÎª´æÔÚÓÚSOCµÄÉè±¸´´½¨½Úµã£¬¶ø²»ÎªÌØ¶¨Æ½Ì¨Ê¹ÓÃ
+Çë²ÎÔÄµÚÁùÕÂ£¬ÁË½â¸ü¶à¹ØÓÚÈçºÎÖ¸¶¨ÊôÓÚSOCµÄÉè±¸µÄĞÅÏ¢¡£
+  The SOC node may contain child nodes for each SOC device that the
+  platform uses.  Nodes should not be created for devices which exist
+  on the SOC but are not used by a particular platform. See chapter VI
+  for more information on how to specify devices that are part of a SOC.
+
+  Example SOC node for the MPC8540:
+
+	soc8540@e0000000 {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		#interrupt-cells = <2>;
+		device_type = "soc";
+		ranges = <0x00000000 0xe0000000 0x00100000>
+		reg = <0xe0000000 0x00003000>;
+		bus-frequency = <0>;
+	}
+
+
+
+IV - "dtc", the device tree compiler
+====================================
+
+
+dtc source code can be found at
+<http://git.jdl.com/gitweb/?p=dtc.git>
+¾¯¸æ:Õâ¸ö°æ±¾»¹´¦ÓÚÔçÆÚ¿ª·¢½×¶Î,×îÖÕµÄÉè±¸Ê÷¡°blob¡±»¹Ã»ÓĞ±»ÄÚºËÑéÖ¤¡£
+µ±Ç°Éú³ÉµÄ¿éÈ±ÉÙÒ»¸öÓĞÓÃµÄ±£ÁôÓ³Éä(Ëü½«±»¹Ì¶¨ÒÔÉú³ÉÒ»¸ö¿ÕµÄÓ³Éä£¬ËüÈ¡¾öÓÚbootloader   À´Ìî³äËü)¡£
+´íÎó´¦ÀíĞèÒª¹¤×÷£¬bugÔÚÇ±·ü£¬µÈµÈ¡£
+WARNING: This version is still in early development stage; the
+resulting device-tree "blobs" have not yet been validated with the
+kernel. The current generated block lacks a useful reserve map (it will
+be fixed to generate an empty one, it's up to the bootloader to fill
+it up) among others. The error handling needs work, bugs are lurking,
+etc...
+dtc
+»ù±¾ÉÏÒÔÒ»ÖÖ¸ø¶¨µÄ¸ñÊ½½ÓÊÕÉè±¸Ê÷£¬²¢ÒÔÁíÒ»ÖÖ¸ñÊ½Êä³öÉè±¸Ê÷¡£Ä¿Ç°Ö§³ÖµÄ¸ñÊ½ÊÇ:
+dtc basically takes a device-tree in a given format and outputs a
+device-tree in another format. The currently supported formats are:
+ÊäÈë¸ñÊ½:
+- - - - - - - - - - - - -
+¡°dtb¡±:¡°blob¡±¸ñÊ½£¬ËüÊÇÒ»¸ö±âÆ½µÄÉè±¸Ê÷¿é£¬ËüµÄÍ·¶¼ÊÇÒ»¸ö¶ş½øÖÆµÄblob¡£
+¡°dts¡±:¡°Ô´¡±¸ñÊ½¡£ÕâÊÇÒ»¸öÎÄ±¾ÎÄ¼ş£¬ÆäÖĞ°üº¬ÁËÒ»¸öÉè±¸Ê÷µÄ¡°Ô´¡±¡£¸Ã¸ñÊ½ÔÚ±¾ÕÂºóÃæ
+¶¨Òå¡£
+
+-¡°fs¡±¸ñÊ½¡£ÕâÊÇÒ»¸öµÈ¼ÛÓÚ/proc/device-tree µÄÊä³ö£¬¼´½ÚµãÊÇÄ¿Â¼£¬ÊôĞÔÊÇÎÄ¼ş
+  Input formats:
+  -------------
+
+     - "dtb": "blob" format, that is a flattened device-tree block
+       with
+        header all in a binary blob.
+     - "dts": "source" format. This is a text file containing a
+       "source" for a device-tree. The format is defined later in this
+        chapter.
+     - "fs" format. This is a representation equivalent to the
+        output of /proc/device-tree, that is nodes are directories and
+	properties are files
+
+ Output formats:
+ ---------------
+
+     - "dtb": "blob" format
+     - "dts": "source" format
+" asm ":»ã±àÓïÑÔÎÄ¼ş¡£ÕâÊÇÒ»¸ö¿ÉÒÔÓÉÆøÌåÀ´Ô´µÄÎÄ¼ş£¬¿ÉÒÔÉú³ÉÒ»¸öÉè±¸Ê÷¡°blob¡±
+´ËÍâ£¬»ã±àÎÄ¼şµ¼³öÁËÒ»Ğ©¿ÉÒÔÊ¹ÓÃµÄ·ûºÅ
+     - "asm": assembly language file. This is a file that can be
+       sourced by gas to generate a device-tree "blob". That file can
+       then simply be added to your Makefile. Additionally, the
+       assembly file exports some symbols that can be used.
+
+dtc¹¤¾ßµÄÓï·¨ÊÇ
+The syntax of the dtc tool is
+
+    dtc [-I <input-format>] [-O <output-format>]
+        [-o output-filename] [-V output_version] input_filename
+
+output_version¶¨ÒåÁË½«Éú³ÉµÄ¡°blob¡±¸ñÊ½µÄ°æ±¾£¬Ö§³ÖµÄ°æ±¾ÊÇ1,2,3ºÍ16
+Ä¬ÈÏÇé¿öÊÇµ±Ç°°æ±¾3£¬µ«½«À´¿ÉÄÜ»á¸ü¸ÄÎª16°æ±¾¡£
+The "output_version" defines what version of the "blob" format will be
+generated. Supported versions are 1,2,3 and 16. The default is
+currently version 3 but that may change in the future to version 16.
+ÁíÍâ£¬dtc¶ÔÊ÷½øĞĞÁË¸÷ÖÖ¸÷ÑùµÄ¼ì²é£¬±ÈÈçlinuxµÄÎ©Ò»ĞÔ¡¢phandle
+ÊôĞÔ¡¢×Ö·û´®µÄÓĞĞ§ĞÔµÈµÈ¡£
+Additionally, dtc performs various sanity checks on the tree, like the
+uniqueness of linux, phandle properties, validity of strings, etc...
+ËüµÄ¸ñÊ½.dts¡° source ¡±ÎÄ¼şÏñ ¡°C¡±£¬Ö§³ÖCºÍC++·ç¸ñµÄ×¢ÊÍ¡£
+The format of the .dts "source" file is "C" like, supports C and C++
+style comments.
+
+/ {
+}
+ÉÏÃæÊÇ¡°Éè±¸Ê÷¡±µÄ¶¨Òå£¬ÕâÊÇÄ¿Ç°ÔÚ¶¥²ã  ÖĞÎ¨Ò»Ö§³ÖµÄÓï¾ä¡£
+The above is the "device-tree" definition. It's the only statement
+supported currently at the toplevel.
+
+/ {
+¶¨ÒåÒ»¸ö°üº¬0ÖÕÖ¹×Ö·û´®µÄÊôĞÔ
+  property1 = "string_value";	/* define a property containing a 0
+                                 * terminated string
+				 */
+¶¨ÒåÒ»¸ö°üº¬Êı×Ö32Î»Öµ(Ê®Áù½øÖÆ)µÄÊôĞÔ¡£
+  property2 = <0x1234abcd>;	/* define a property containing a
+                                 * numerical 32-bit value (hexadecimal)
+				 */
+¶¨ÒåÒ»¸ö°üº¬3¸öÊı×Ö32Î»16½øÖÆ ( cell)µÄÊôĞÔ¡£
+
+  property3 = <0x12345678 0x12345678 0xdeadbeef>;
+                                /* define a property containing 3
+                                 * numerical 32-bit values (cells) in
+                                 * hexadecimal
+				 */
+¶¨ÒåÒ»¸öÊôĞÔ£¬ËüµÄÄÚÈİÊÇÒ»¸öÈÎÒâµÄ×Ö½ÚÊı×é
+  property4 = [0x0a 0x0b 0x0c 0x0d 0xde 0xea 0xad 0xbe 0xef];
+                                /* define a property whose content is
+                                 * an arbitrary array of bytes
+                                 */
+¶¨ÒåÒ»¸öÃûÎª¡°childnode¡±µÄ×Ó½Úµã
+ËüµÄµ¥Î»ÃûÊÇ¡°×Ó½Úµã¡±*µØÖ·¡±
+
+  childnode@address {	/* define a child node named "childnode"
+                                 * whose unit name is "childnode at
+				 * address"
+                                 */
+
+    childprop = "hello\n";      /* define a property "childprop" of
+                                 * childnode (in this case, a string)
+                                 */
+  };
+};
+½Úµã¿ÉÒÔ°üº¬ÆäËû½ÚµãµÈµÈ¡£ÕâÑù¾Í¶¨ÒåÁËÊ÷µÄ²ã´Î½á¹¹¡£
+Nodes can contain other nodes etc... thus defining the hierarchical
+structure of the tree.
+
+×Ö·û´®Ö§³ÖÀ´×ÔCµÄ³£¼û×ªÒåĞòÁĞ:¡°n¡±¡¢¡°t¡±¡¢¡°r¡±¡¢¡°(°Ë½øÖÆÖµ)"," \ x(
+Ê®Áù½øÖÆÖµ)¡±¡£
+Strings support common escape sequences from C: "\n", "\t", "\r",
+"\(octal value)", "\x(hex value)".
+»¹½¨ÒéÄúÍ¨¹ıcpp(gccÔ¤´¦ÀíÆ÷)À´¹ÜµÀÄúµÄÔ´ÎÄ¼ş£¬ÕâÑùÄú¾Í¿ÉÒÔÊ¹ÓÃinclude
+£¬Îª³£Á¿¶¨Òå£¬µÈµÈ¡£
+It is also suggested that you pipe your source file through cpp (gcc
+preprocessor) so you can use #include's, #define for constants, etc...
+×îºó,¸÷ÖÖÑ¡Ïî¼Æ»®µ«ÉĞÎ´ÊµÏÖ,ÏñphandlesµÄ×Ô¶¯Éú³É, lables
+(   µ¼³ö µ½asmÎÄ¼şÄã¿ÉÒÔÖ¸ÏòÒ»¸ö ÊôĞÔ  ÄÚÈİºÍ¸Ä±äËüºÜÈİÒ×  
+²»¹ÜÄãÁ´½ÓµÄÉè±¸Ê÷)£¬±êÇ©ºÍÂ·¾¶´úÌæÁËÒ»Ğ©cellµÄÊıÖµÓÃÀ´Ö¸ÏòÄ³¸ö½Úµã
+ÔÚ±àÒëÊ±±»phandleÈ¡´ú£¬¸øasmÎÄ¼ş µ¼³öµÄ±£ÁôÓ³ÉäµØÖ·£¬ÓĞÄÜÁ¦ ÔÚ±àÒëÊ±Ö¸¶¨±£ÁôÓ³ÉäÄÚÈİ
+Finally, various options are planned but not yet implemented, like
+automatic generation of phandles, labels (exported to the asm file so
+you can point to a property content and change it easily from whatever
+you link the device-tree with), label or path instead of numeric value
+in some cells to "point" to a node (replaced by a phandle at compile
+time), export of reserve map address to the asm file, ability to
+specify reserve map content at compile time, etc...
+ÎÒÃÇ¿ÉÒÔÌá¹©Ò»¸ö.h µÄÍ·ÎÄ¼ş  ¶ÔÄ³Ğ©ÊôĞÔµÄ³£ÓÃ¶¨Òå
+(±ÈÈç¹¹½¨PCIÊôĞÔ»òÖĞ¶ÏÓ³Éä)£¬¾¡¹Ü×îºÃ½«struct¶¨ÒåµÄ¸ÅÄîÌí¼Óµ½±àÒëÆ÷ÖĞ¡£
+We may provide a .h include file with common definitions of that
+proves useful for some properties (like building PCI properties or
+interrupt maps) though it may be better to add a notion of struct
+definitions to the compiler...
+
+V - bootloaderµÄ¼ÓÔØ
+V - Recommendations for a bootloader
+====================================
+
+ÕâÀïÊÇÒ»Ğ©ÒÑ¾­±»ÌáÒéµÄ²»Í¬µÄÏë·¨/½¨Òé£¬¶øËùÓĞÕâĞ©¶¼ÒÑ¾­±»¶¨ÒåºÍÊµÏÖÁË¡£
+Here are some various ideas/recommendations that have been proposed
+while all this has been defined and implemented.
+bootloader¿ÉÄÜÏ£ÍûÄÜ¹»Ê¹ÓÃÉè±¸±¾Éí£¬²¢¿ÉÄÜÏ£Íû²Ù×İËü(ÓÃÓÚÌí¼Ó/±à¼­Ä³Ğ©ÊôĞÔ£¬±ÈÈçÎïÀíÄÚ´æ´óĞ¡»òÄÚºË²ÎÊı)¡£
+ÔÚÕâÒ»µãÉÏ£¬¿ÉÒÔ×ö³öÁ½ÖÖÑ¡Ôñ£¬bootloader¿ÉÒÔÖ±½ÓÔÚ±»Ñ¹±âµÄ¸ñÊ½ÉÏ¹¤×÷£¬
+»òÕß  bootloader  ÓĞ×Ô¼ºµÄÄÚ²¿Ê÷±íÊ¾  
+ÆäÖĞÓĞÖ¸Õë(ÀàËÆÓÚÄÚºË)£¬²¢ÇÒÔÚÒıµ¼ÄÚºËÊ±ÖØĞÂÊ¹Ê÷±âÆ½¡£Ç°Õß¶ÔÓÚ±à¼­/ĞŞ¸ÄÓĞĞ©À§ÄÑ
+ºóÕß¿ÉÄÜĞèÒª¸ü¶àµÄ´úÂëÀ´´¦ÀíÊ÷½á¹¹¡£×¢Òâ£¬½á¹¹¸ñÊ½ÒÑ¾­±»Éè¼ÆºÃÁË£¬ËùÒÔ¡°²åÈë¡±ÊôĞÔ»ò½ÚµãÏà¶ÔÈİÒ×£¬
+»òÕß½ö½öÍ¨¹ıÔÚÖÜÎ§ÒÆ¶¯¶«Î÷À´É¾³ıËüÃÇ
+Ëü²»°üº¬ÓÃÓÚ´ËÄ¿µÄµÄÄÚ²¿Æ«ÒÆÁ¿»òÖ¸Õë¡£
+  - The bootloader may want to be able to use the device-tree itself
+    and may want to manipulate it (to add/edit some properties,
+    like physical memory size or kernel arguments). At this point, 2
+    choices can be made. Either the bootloader works directly on the
+    flattened format, or the bootloader has its own internal tree
+    representation with pointers (similar to the kernel one) and
+    re-flattens the tree when booting the kernel. The former is a bit
+    more difficult to edit/modify, the later requires probably a bit
+    more code to handle the tree structure. Note that the structure
+    format has been designed so it's relatively easy to "insert"
+    properties or nodes or delete them by just memmoving things
+    around. It contains no internal offsets or pointers for this
+    purpose.
+ÔÚÄÚºËÎÄ¼şÇı¶¯³ÌĞò/oft/fdt.cÖĞ£¬¿ÉÒÔÕÒµ½Ò»¸öÖ±½Ó´Ó±»±âµÄÊ÷¸ñÊ½ÖĞµü´ú½ÚµãºÍ¼ìË÷ÊôĞÔµÄ´úÂëÊ¾Àı
+¿´Ò»ÏÂof_scan_flat_dt()º¯Êı£¬ÔÚearly_init_devtreeÖĞÊ¹ÓÃ¡£ÒÔ¼°ÏàÓ¦µÄ¸÷ÖÖÔçÆÚearly_init_dt_scan_*()»Øµ÷º¯Êı¡£
+Õâ¶Î´úÂë¿ÉÒÔÔÚGPL bootloaderÖĞÖØĞÂÊ¹ÓÃ£¬×÷Îª¸Ã´úÂëµÄ×÷Õß£¬
+ÎÒºÜÀÖÒâÌÖÂÛ¿ÉÄÜµÄÃâ·ÑÊÚÈ¨¸øÈÎºÎÏ£Íû½«ËùÓĞ»ò²¿·Ö´úÂë¼¯³Éµ½·ÇGPLÒıµ¼³ÌĞòµÄ¹©Ó¦ÉÌ
+  - An example of code for iterating nodes & retrieving properties
+    directly from the flattened tree format can be found in the kernel
+    file drivers/of/fdt.c.  Look at the of_scan_flat_dt() function,
+    its usage in early_init_devtree(), and the corresponding various
+    early_init_dt_scan_*() callbacks. That code can be re-used in a
+    GPL bootloader, and as the author of that code, I would be happy
+    to discuss possible free licensing to any vendor who wishes to
+    integrate all or part of this code into a non-GPL bootloader.
+    (reference needed; who is 'I' here? ---gcl Jan 31, 2011)
+
+
+ÏµÍ³¼¶Ğ¾Æ¬Éè±¸ºÍ½Úµã
+VI - System-on-a-chip devices and nodes
+=======================================
+Ğí¶à¹«Ë¾ÏÖÔÚ¿ªÊ¼¿ª·¢ÏµÍ³-Ğ¾Æ¬´¦ÀíÆ÷£¬´¦ÀíÆ÷ºËĞÄ(CPU)ºÍĞí¶àÍâÎ§Éè±¸¶¼´æÔÚÓÚÒ»¿é¹èÆ¬ÉÏ
+¶ÔÓÚÕâĞ©SOCs£¬Ó¦¸ÃÊ¹ÓÃSOC½ÚµãÀ´¶¨Òå×é³ÉSOCµÄÉè±¸µÄ×Ó½Úµã¡£·Ç³£¸ßµÄÖ§³Ö¹ØÓÚ
+ËùÓĞSOCµÄÊµÏÖ¶¼¶¨ÒåÎªÍêÕûµÄÆ½Éè±¸Ê÷À´ÃèÊöSOCÉÏµÄÉè±¸¡£
+Õâ½«ÔÊĞí¶Ô´ó²¿·ÖµÄÄÚºË´úÂë½øĞĞ·º»¯¡£
+Many companies are now starting to develop system-on-a-chip
+processors, where the processor core (CPU) and many peripheral devices
+exist on a single piece of silicon.  For these SOCs, an SOC node
+should be used that defines child nodes for the devices that make
+up the SOC. While platforms are not required to use this model in
+order to boot the kernel, it is highly encouraged that all SOC
+implementations define as complete a flat-device-tree as possible to
+describe the devices on the SOC.  This will allow for the
+genericization of much of the kernel code.
+
+
+1) Defining child nodes of an SOC
+---------------------------------
+×÷ÎªSOCµÄÒ»²¿·ÖµÄÃ¿¸öÉè±¸ÔÚSOC½ÚµãÖĞ¶¼ÓĞ×Ô¼ºµÄ½ÚµãÌõÄ¿
+¶ÔÓÚ°üº¬ÔÚSOCÖĞµÄÃ¿¸öÉè±¸£¬µ¥ÔªµØÖ·ÊôĞÔ´ú±íÁË¸ÃÉè±¸ÔÚ¸¸µØÖ·¿Õ¼äÖĞµÄÄÚ´æÓ³Éä¼Ä´æÆ÷µÄµØÖ·Æ«ÒÆÁ¿¡£
+¸¸µØÖ·¿Õ¼äÊÇÓÉ¶¥¼¶soc½ÚµãµÄ¡°ranges¡±ÊôĞÔ¶¨ÒåµÄ¡
+¶ÔÓÚÖ±½ÓÔÚSOC½ÚµãÏÂ´æÔÚµÄÃ¿¸ö½ÚµãµÄ¡°reg¡±ÊôĞÔÓ¦¸Ã°üº¬´Ó×ÓµØÖ·¿Õ¼äµ½¸¸SOC
+µØÖ·¿Õ¼äµÄµØÖ·Ó³Éä£¬ÒÔ¼°Éè±¸µÄÄÚ´æÓ³Éä¼Ä´æÆ÷ÎÄ¼şµÄ´óĞ¡¡£
+Each device that is part of an SOC may have its own node entry inside
+the SOC node.  For each device that is included in the SOC, the unit
+address property represents the address offset for this device's
+memory-mapped registers in the parent's address space.  The parent's
+address space is defined by the "ranges" property in the top-level soc
+node. The "reg" property for each node that exists directly under the
+SOC node should contain the address mapping from the child address space
+to the parent SOC address space and the size of the device's
+memory-mapped register file.
+¶ÔÓÚ¿ÉÄÜ´æÔÚÓÚSOCÄÚ²¿µÄĞí¶àÉè±¸£¬¶ÔÓÚÉè±¸Ê÷½ÚµãµÄ¸ñÊ½ÓĞÔ¤¶¨ÒåµÄ¹æ·¶¡£ËùÓĞSOC
+×Ó½Úµã¶¼Ó¦¸Ã×ñÑ­ÕâĞ©¹æ·¶£¬³ı·ÇÔÚ±¾ÎÄµµÖĞ×¢Ã÷¡£
+For many devices that may exist inside an SOC, there are predefined
+specifications for the format of the device tree node.  All SOC child
+nodes should follow these specifications, except where noted in this
+document.
+Çë²ÎÔÄ¸½Â¼A£¬ÒÔ»ñµÃMPC8540µÄ²¿·ÖSOC½Úµã¶¨Òå¡£
+See appendix A for an example partial SOC node definition for the
+MPC8540.
+
+´ú±íÃ»ÓĞÍ¨ÓÃµÄOF ¹æÔòµÄÉè±¸
+2) Representing devices without a current OF specification
+----------------------------------------------------------
+Ä¿Ç°£¬ÔÚSoCsÖĞÓĞĞí¶àÉè±¸Ã»ÓĞ±ê×¼µÄ±íÊ¾ĞÎÊ½£¬ËüÃÇ±»¶¨ÒåÎª¿ª·Å¹Ì¼ş¹æ·¶µÄÒ»²¿·Ö£¬
+Ö÷ÒªÊÇÒòÎª°üº¬ÕâĞ©SoCsµÄ °å×Ó   Ä¿Ç°»¹Ã»ÓĞÊ¹ÓÃ¿ª·Å¹Ì¼şÒıµ¼¡£
+ÎªĞÂÉè±¸°ó¶¨ÎÄµµÓ¦¸Ã±»Ìí¼Óµ½ÎÄµµ Documentation/devicetree/bindings Ä¿Â¼¡£
+Ëæ×ÅÉè±¸Ê÷Ö§³Ö±»Ìí¼Óµ½Ô½À´Ô½¶àµÄSoCsÖĞ£¬Õâ¸öÄ¿Â¼½«»áÀ©Õ¹¡£
+Currently, there are many devices on SoCs that do not have a standard
+representation defined as part of the Open Firmware specifications,
+mainly because the boards that contain these SoCs are not currently
+booted using Open Firmware.  Binding documentation for new devices
+should be added to the Documentation/devicetree/bindings directory.
+That directory will expand as device tree support is added to more and
+more SoCs.
+
+ÎªÉè±¸Ö¸¶¨ÖĞ¶ÏĞÅÏ¢
+VII - Specifying interrupt information for devices
+===================================================
+Éè±¸Ê÷±íÊ¾Ó²¼şÏµÍ³µÄ×ÜÏßºÍÉè±¸£¬ÆäĞÎÊ½ÀàËÆÓÚÓ²¼şµÄÎïÀí×ÜÏßÍØÆË½á¹¹¡£
+The device tree represents the buses and devices of a hardware
+system in a form similar to the physical bus topology of the
+hardware.
+´ËÍâ£¬»¹´æÔÚÒ»¸öÂß¼­¡°ÖĞ¶ÏÊ÷¡±£¬Ëü±íÊ¾Ó²¼şÖĞµÄÖĞ¶ÏµÄ²ã´Î½á¹¹ºÍÂ·ÓÉ¡£
+In addition, a logical 'interrupt tree' exists which represents the
+hierarchy and routing of interrupts in the hardware.
+ÔÚÎÄµµ¡°Open Firmware Recommended Practice: Interrupt Mapping Version 0.9¡±ÖĞ£¬¶ÔÖĞ¶ÏÊ÷Ä£ĞÍ½øĞĞÁËÈ«ÃæµÄÃèÊö¡£
+The interrupt tree model is fully described in the
+document "Open Firmware Recommended Practice: Interrupt
+Mapping Version 0.9".  The document is available at:
+<http://www.openfirmware.org/ofwg/practice/>
+
+1) interrupts property
+----------------------
+µ¥¸öÖĞ¶Ï¿ØÖÆÆ÷²úÉúÖĞ¶ÏµÄÉè±¸Ó¦¸ÃÊ¹ÓÃ´«Í³µÄOF ÔÚOFÖĞ¶ÏÓ³ÉäÎÄµµÖĞÃèÊö
+Devices that generate interrupts to a single interrupt controller
+should use the conventional OF representation described in the
+OF interrupt mapping documentation.
+Ã¿Ò»¸ö²úÉúÖĞ¶ÏµÄÉè±¸¶¼±ØĞëÓĞÒ»¸ö¡°'interrupt¡±ÊôĞÔ¡£
+ÖĞ¶ÏÊôĞÔÖµÊÇÒ»¸öÈÎÒâÊıÁ¿µÄ¡°' interrupt specifier¡±Öµ
+ËüÃèÊöÁËÉè±¸µÄÖĞ¶Ï»òÖĞ¶Ï¡£
+Each device which generates interrupts must have an 'interrupt'
+property.  The interrupt property value is an arbitrary number of
+of 'interrupt specifier' values which describe the interrupt or
+interrupts for the device.
+ÖĞ¶ÏËµÃ÷·ûµÄ±àÂëÊÇÓÉÕâ¸öÉè±¸Î»ÓÚÖĞ¶ÏÊ÷ÉÏµÄÖĞ¶ÏÓòÀ´¾ö¶¨µÄ¡£
+Ò»¸öÖĞ¶ÏÓòµÄ¸ùÖ¸¶¨ÔÚËüµÄ#interrupt-cells ÊôĞÔ£¬32Î»cells
+The encoding of an interrupt specifier is determined by the
+interrupt domain in which the device is located in the
+interrupt tree.  The root of an interrupt domain specifies in
+its #interrupt-cells property the number of 32-bit cells
+required to encode an interrupt specifier.  See the OF interrupt
+mapping documentation for a detailed description of domains.
+ÀıÈç OpenPICÖĞ¶Ï¿ØÖÆÆ÷µÄ°ó¶¨Ö¸¶¨Ò»¸ö#interrupt-cells µÄÖµÊÇ2  È¥±àÂëÕâ¸öÖĞ¶ÏºÅºÍ
+Ë®Æ½/¹¦ÄÜĞÅÏ¢¡£ËùÓĞÖĞ¶ÏµÄ  ×Ó½Úµã ÔÚËûÃÇµÄÖĞ¶ÏÊôĞÔÖĞ¶¼Ê¹ÓÃÁË2¸öcell¡£
+For example, the binding for the OpenPIC interrupt controller
+specifies  an #interrupt-cells value of 2 to encode the interrupt
+number and level/sense information. All interrupt children in an
+OpenPIC interrupt domain use 2 cells per interrupt in their interrupts
+property.
+PCI×ÜÏß°ó¶¨ÁËÖ¸¶¨µÄ #interrupt-cell µÄÖµÊÇ1 È¥±àÂë(INTA,INTB,INTC,INTD)ÖĞ¶ÏÒı½Å
+The PCI bus binding specifies a #interrupt-cell value of 1 to encode
+which interrupt pin (INTA,INTB,INTC,INTD) is used.
+
+2) interrupt-parent property
+----------------------------
+interrupt-parentÊôĞÔ±»Ö¸¶¨ÔÚÖĞ¶ÏÊ÷ÖĞÉè±¸½ÚµãºÍËüµÄÖĞ¶Ï¸¸Ä¸ÖĞÏÔÊ¾Á´½Ó
+interrupt-parent µÄÖµÊÇ¸¸½ÚµãµÄphandle
+The interrupt-parent property is specified to define an explicit
+link between a device node and its interrupt parent in
+the interrupt tree.  The value of interrupt-parent is the
+phandle of the parent node.
+Èç¹û interrupt-parent  ÊôĞÔÃ»ÓĞ½Úµã¶¨Òå£¬ËüµÄÖĞ¶Ï¸¸½Úµã±»¼Ù¶¨³ÉÒ»¸ö×æÏÈÔÚÕâ¸ö½ÚµãµÄ_device tree_²ã´Î
+If the interrupt-parent property is not defined for a node, its
+interrupt parent is assumed to be an ancestor in the node's
+_device tree_ hierarchy.
+
+3) OpenPIC Interrupt Controllers
+--------------------------------
+OpenPICÖĞ¶Ï¿ØÖÆÆ÷ĞèÒªÁ½¸ö  cell  À´±àÂëÖĞ¶ÏĞÅÏ¢¡£
+µÚÒ»¸öµ¥Ôª¸ñ¶¨ÒåÁËÖĞ¶Ï±àºÅ¡£µÚ¶ş¸öµ¥Ôª¸ñ¶¨ÒåÁË ¹¦ÄÜ ºÍ ²ã´Î ĞÅÏ¢¡£
+OpenPIC interrupt controllers require 2 cells to encode
+interrupt information.  The first cell defines the interrupt
+number.  The second cell defines the sense and level
+information.
+¹¦ÄÜºÍ²ã´ÎĞÅÏ¢Ó¦¸Ã±»¶¨ÒåÈçÏÂ
+Sense and level information should be encoded as follows:
+µÍµ½¸ß
+	0 = low to high edge sensitive type enabled
+µÍ»îÔ¾	
+	1 = active low level sensitive type enabled
+¸ß»îÔ¾
+	2 = active high level sensitive type enabled
+¸ßµ½µÍ
+	3 = high to low edge sensitive type enabled
+
+4) ISA Interrupt Controllers
+----------------------------
+ISA PICÖĞ¶Ï¿ØÖÆÆ÷ĞèÒªÁ½¸öCELLS±àÂëÖĞ¶ÏĞÅÏ¢¡£
+µÚÒ»¸öCELL¶¨ÒåÕâ¸öÖĞ¶ÏºÅ£¬µøÈÈ¶¨Òå¹¦ÄÜºÍ²ã´ÎĞÅÏ¢
+ISA PIC interrupt controllers require 2 cells to encode
+interrupt information.  The first cell defines the interrupt
+number.  The second cell defines the sense and level
+information.
+
+ISA PIC interrupt controllers should adhere to the ISA PIC
+encodings listed below:
+
+	0 =  active low level sensitive type enabled
+	1 =  active high level sensitive type enabled
+	2 =  high to low edge sensitive type enabled
+	3 =  low to high edge sensitive type enabled
+Ö¸¶¨Éè±¸µçÔ´¹ÜÀíĞÅÏ¢(Ë¯ÃßÊôĞÔ)
+VIII - Specifying Device Power Management Information (sleep property)
+===================================================================
+ÔÚSOCs ÉÏµÄÉè±¸Í¨³£ÓĞ½«Éè±¸·ÅÖÃÓÚµÍ¹¦ºÄ×´Ì¬µÄ»úÖÆ£¬ÕâĞ©Éè±¸ÓëÉè±¸×ÔÉíµÄ¼Ä´æÆ÷¿éÊÇ·ÖÀë
+ÓĞÊ±£¬ÕâĞ©ĞÅÏ¢±ÈÒ»¸öcell-index ÊôĞÔÄÜ¹»ºÏÀíÃèÊöµÄÒª¸´ÔÓµÃ¶à
+Òò´Ë£¬ÒÔÕâÖÖ·½Ê½¿ØÖÆµÄÃ¿¸öÉè±¸¿ÉÄÜ°üº¬Ò»¸öÃèÊöÕâĞ©Á¬½ÓµÄ¡°sleep¡±ÊôĞÔ¡£
+Devices on SOCs often have mechanisms for placing devices into low-power
+states that are decoupled from the devices' own register blocks.  Sometimes,
+this information is more complicated than a cell-index property can
+reasonably describe.  Thus, each device controlled in such a manner
+may contain a "sleep" property which describes these connections.
+
+The sleep property consists of one or more sleep resources, each of
+which consists of a phandle to a sleep controller, followed by a
+controller-specific sleep specifier of zero or more cells.
+
+The semantics of what type of low power modes are possible are defined
+by the sleep controller.  Some examples of the types of low power modes
+that may be supported are:
+
+ - Dynamic: The device may be disabled or enabled at any time.
+ - System Suspend: The device may request to be disabled or remain
+   awake during system suspend, but will not be disabled until then.
+ - Permanent: The device is disabled permanently (until the next hard
+   reset).
+
+Some devices may share a clock domain with each other, such that they should
+only be suspended when none of the devices are in use.  Where reasonable,
+such nodes should be placed on a virtual bus, where the bus has the sleep
+property.  If the clock domain is shared among devices that cannot be
+reasonably grouped in this manner, then create a virtual sleep controller
+(similar to an interrupt nexus, except that defining a standardized
+sleep-map should wait until its necessity is demonstrated).
+
+IX - Specifying dma bus information
+
+Some devices may have DMA memory range shifted relatively to the beginning of
+RAM, or even placed outside of kernel RAM. For example, the Keystone 2 SoC
+worked in LPAE mode with 4G memory has:
+- RAM range: [0x8 0000 0000, 0x8 FFFF FFFF]
+- DMA range: [  0x8000 0000,   0xFFFF FFFF]
+and DMA range is aliased into first 2G of RAM in HW.
+
+In such cases, DMA addresses translation should be performed between CPU phys
+and DMA addresses. The "dma-ranges" property is intended to be used
+for describing the configuration of such system in DT.
+
+In addition, each DMA master device on the DMA bus may or may not support
+coherent DMA operations. The "dma-coherent" property is intended to be used
+for identifying devices supported coherent DMA operations in DT.
+
+* DMA Bus master
+Optional property:
+- dma-ranges: <prop-encoded-array> encoded as arbitrary number of triplets of
+	(child-bus-address, parent-bus-address, length). Each triplet specified
+	describes a contiguous DMA address range.
+	The dma-ranges property is used to describe the direct memory access (DMA)
+	structure of a memory-mapped bus whose device tree parent can be accessed
+	from DMA operations originating from the bus. It provides a means of
+	defining a mapping or translation between the physical address space of
+	the bus and the physical address space of the parent of the bus.
+	(for more information see ePAPR specification)
+
+* DMA Bus child
+Optional property:
+- dma-ranges: <empty> value. if present - It means that DMA addresses
+	translation has to be enabled for this device.
+- dma-coherent: Present if dma operations are coherent
+
+Example:
+soc {
+		compatible = "ti,keystone","simple-bus";
+		ranges = <0x0 0x0 0x0 0xc0000000>;
+		dma-ranges = <0x80000000 0x8 0x00000000 0x80000000>;
+
+		[...]
+
+		usb: usb@2680000 {
+			compatible = "ti,keystone-dwc3";
+
+			[...]
+			dma-coherent;
+		};
+};
+
+Appendix A - Sample SOC node for MPC8540
+========================================
+
+	soc@e0000000 {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		compatible = "fsl,mpc8540-ccsr", "simple-bus";
+		device_type = "soc";
+		ranges = <0x00000000 0xe0000000 0x00100000>
+		bus-frequency = <0>;
+		interrupt-parent = <&pic>;
+
+		ethernet@24000 {
+			#address-cells = <1>;
+			#size-cells = <1>;
+			device_type = "network";
+			model = "TSEC";
+			compatible = "gianfar", "simple-bus";
+			reg = <0x24000 0x1000>;
+			local-mac-address = [ 0x00 0xE0 0x0C 0x00 0x73 0x00 ];
+			interrupts = <0x29 2 0x30 2 0x34 2>;
+			phy-handle = <&phy0>;
+			sleep = <&pmc 0x00000080>;
+			ranges;
+
+			mdio@24520 {
+				reg = <0x24520 0x20>;
+				compatible = "fsl,gianfar-mdio";
+
+				phy0: ethernet-phy@0 {
+					interrupts = <5 1>;
+					reg = <0>;
+				};
+
+				phy1: ethernet-phy@1 {
+					interrupts = <5 1>;
+					reg = <1>;
+				};
+
+				phy3: ethernet-phy@3 {
+					interrupts = <7 1>;
+					reg = <3>;
+				};
+			};
+		};
+
+		ethernet@25000 {
+			device_type = "network";
+			model = "TSEC";
+			compatible = "gianfar";
+			reg = <0x25000 0x1000>;
+			local-mac-address = [ 0x00 0xE0 0x0C 0x00 0x73 0x01 ];
+			interrupts = <0x13 2 0x14 2 0x18 2>;
+			phy-handle = <&phy1>;
+			sleep = <&pmc 0x00000040>;
+		};
+
+		ethernet@26000 {
+			device_type = "network";
+			model = "FEC";
+			compatible = "gianfar";
+			reg = <0x26000 0x1000>;
+			local-mac-address = [ 0x00 0xE0 0x0C 0x00 0x73 0x02 ];
+			interrupts = <0x41 2>;
+			phy-handle = <&phy3>;
+			sleep = <&pmc 0x00000020>;
+		};
+
+		serial@4500 {
+			#address-cells = <1>;
+			#size-cells = <1>;
+			compatible = "fsl,mpc8540-duart", "simple-bus";
+			sleep = <&pmc 0x00000002>;
+			ranges;
+
+			serial@4500 {
+				device_type = "serial";
+				compatible = "ns16550";
+				reg = <0x4500 0x100>;
+				clock-frequency = <0>;
+				interrupts = <0x42 2>;
+			};
+
+			serial@4600 {
+				device_type = "serial";
+				compatible = "ns16550";
+				reg = <0x4600 0x100>;
+				clock-frequency = <0>;
+				interrupts = <0x42 2>;
+			};
+		};
+
+		pic: pic@40000 {
+			interrupt-controller;
+			#address-cells = <0>;
+			#interrupt-cells = <2>;
+			reg = <0x40000 0x40000>;
+			compatible = "chrp,open-pic";
+			device_type = "open-pic";
+		};
+
+		i2c@3000 {
+			interrupts = <0x43 2>;
+			reg = <0x3000 0x100>;
+			compatible  = "fsl-i2c";
+			dfsrr;
+			sleep = <&pmc 0x00000004>;
+		};
+
+		pmc: power@e0070 {
+			compatible = "fsl,mpc8540-pmc", "fsl,mpc8548-pmc";
+			reg = <0xe0070 0x20>;
+		};
+	};
