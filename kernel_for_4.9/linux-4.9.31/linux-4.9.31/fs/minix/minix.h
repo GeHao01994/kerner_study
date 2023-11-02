@@ -25,20 +25,36 @@ struct minix_inode_info {
  * minix super-block data in memory
  */
 struct minix_sb_info {
+	/* i节点数 */
 	unsigned long s_ninodes;
+	/* 逻辑块数（或称为区块数）*/
 	unsigned long s_nzones;
+	/* i节点位图所占块数 */
 	unsigned long s_imap_blocks;
+	/* 逻辑块位图所占块数 */
 	unsigned long s_zmap_blocks;
+	/* 数据区中的第一个逻辑块号 */
 	unsigned long s_firstdatazone;
+	/* log2(磁盘块数/逻辑块) */
 	unsigned long s_log_zone_size;
+	/* 最大文件长度（以自己为单位）*/
 	unsigned long s_max_size;
+	/* 目录项的长度（Minix文件系统的目录项包括文件名和对应的inode编号）*/
 	int s_dirsize;
+	/* 目录项中文件名的最大长度 */
 	int s_namelen;
+	/* 指向i节点位图缓冲头指针数组的指针，数组长度为i节点位图所占块数 */
 	struct buffer_head ** s_imap;
+	/* 指向逻辑块位图缓冲头指针数组的指针，数组长度为逻辑块位图所占块数*/
 	struct buffer_head ** s_zmap;
+	/* 指向超级块缓冲区头的指针*/
 	struct buffer_head * s_sbh;
+	/* 指向磁盘上超级块的指针（为兼容，这个指针指向minix_super_block）对象，
+	 * 但如果在读取魔数发现是minix3.0文件系统时，将对它按minix3_super_block 格式读取
+	 */
 	struct minix_super_block * s_ms;
 	unsigned short s_mount_state;
+	/* Minix文件系统版本 */
 	unsigned short s_version;
 };
 

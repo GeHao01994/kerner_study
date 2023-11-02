@@ -63,15 +63,23 @@ struct minix2_inode {
  * minix super-block data on disk
  */
 struct minix_super_block {
+	/* i节点数 */
 	__u16 s_ninodes;
 	__u16 s_nzones;
+	/* i节点位图所占块数 */
 	__u16 s_imap_blocks;
+	/* 逻辑块位图所占位数 */
 	__u16 s_zmap_blocks;
+	/* 数据区中第一个逻辑块号 */
 	__u16 s_firstdatazone;
+	/* log2(磁盘块数/逻辑块) */
 	__u16 s_log_zone_size;
+	/* 最大文件长度 */
 	__u32 s_max_size;
+	/* 文件系统魔数 */
 	__u16 s_magic;
 	__u16 s_state;
+	/* 磁盘上逻辑块长度 */
 	__u32 s_zones;
 };
 
