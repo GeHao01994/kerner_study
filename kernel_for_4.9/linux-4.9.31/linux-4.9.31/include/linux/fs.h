@@ -2025,21 +2025,41 @@ static inline void file_accessed(struct file *file)
 int sync_inode(struct inode *inode, struct writeback_control *wbc);
 int sync_inode_metadata(struct inode *inode, int wait);
 
+/* 
+ *linux支持多种文件系统，每种文件系统都有一个文件系统类型
+ *无聊是编译到内核，还是作为模块动态转载，文件系统类型需要
+ *调用register_filesystem向VFS核心注册，不再使用时，应该
+ *调用unregister_filesystem从VFS核心注销
+ */	
 struct file_system_type {
+	/*文件系统类型名字*/
 	const char *name;
+	/*文件系统类型标志*/
 	int fs_flags;
 #define FS_REQUIRES_DEV		1 
 #define FS_BINARY_MOUNTDATA	2
 #define FS_HAS_SUBTYPE		4
 #define FS_USERNS_MOUNT		8	/* Can be mounted by userns root */
 #define FS_RENAME_DOES_D_MOVE	32768	/* FS will handle d_move() during rename() internally. */
+	
+	/*在这种类型的文件系统实例被装载时被调用*/
 	struct dentry *(*mount) (struct file_system_type *, int,
 		       const char *, void *);
+	
+	/*在这种类型的文件系统实例被卸载时被调用*/
 	void (*kill_sb) (struct super_block *);
+	
+	/*指向实现了这个文件系统的模块的指针*/
 	struct module *owner;
+	
+	/*指向文件系统类型链表的下一个元素*/
 	struct file_system_type * next;
+	
+	/*该文件系统类型的所有超级快实例链表的表头*/
+	/*比如/dev/sda1被格式化成某种文件系统然后被mount的时候加入到这个队列里面来*/
 	struct hlist_head fs_supers;
 
+	/*用于调试锁依赖性*/
 	struct lock_class_key s_lock_key;
 	struct lock_class_key s_umount_key;
 	struct lock_class_key s_vfs_rename_key;
