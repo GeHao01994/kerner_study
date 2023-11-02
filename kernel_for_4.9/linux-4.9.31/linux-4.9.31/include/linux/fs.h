@@ -1334,52 +1334,105 @@ struct sb_writers {
 	wait_queue_head_t		wait_unfrozen;	/* for get_super_thawed() */
 	struct percpu_rw_semaphore	rw_sem[SB_FREEZE_LEVELS];
 };
-
+/* 超级块是整个文件系统的元数据的容器，对于基于磁盘的文件系统，超级块
+ *（确切地，是磁盘上超级块）是保存在磁盘设备上固定位置的一个或者多个块，
+ * 在装载该磁盘上的文件系统时，磁盘上超级块被读入内存，并根据它构造内存中
+ * 超级块，其中一部分是各自文件系统共有的，被提取出来，即VFS超级块。
+ * 在装载时，还根据文件系统类型设置超级块操作表,表示VFS超级块的结构就是
+ * super_block。
+ */
 struct super_block {
+	/* 链入到所有超级块对象链表的“连接件”*/
+	/* 所有的超级块对象被链接到一个循环双链表。链表的第一个元素由super_blocks变量表示，
+	 * 而超级块结构的s_list域保存了指向链表中相邻元素的指针
+	 */
 	struct list_head	s_list;		/* Keep this first */
+	/* 存储超级块信息的块设备*/
 	dev_t			s_dev;		/* search index; _not_ kdev_t */
+	/* 文件系统的块长度的位数*/
 	unsigned char		s_blocksize_bits;
+	/* 文件系统的块长度（以字节为单位）*/
 	unsigned long		s_blocksize;
+	/* 文件的最大长度*/
 	loff_t			s_maxbytes;	/* Max file size */
+	/* 指回到文件系统类型的指针 */
 	struct file_system_type	*s_type;
+	/* 超级块操作函数 */
 	const struct super_operations	*s_op;
+	/* 指向磁盘配额操作表的函数 */
 	const struct dquot_operations	*dq_op;
+	/* 指向磁盘配额管理操作表的函数 */
 	const struct quotactl_ops	*s_qcop;
+	/* 指向导出操作表的指针，被网络文件系统使用*/
 	const struct export_operations *s_export_op;
+	/* 装载标志 */
 	unsigned long		s_flags;
+	/* 内部标志 */
 	unsigned long		s_iflags;	/* internal SB_I_* flags */
+	/* 文件系统魔数 */
 	unsigned long		s_magic;
+	/* 指向文件系统根目录的dentry对象 */
 	struct dentry		*s_root;
+	/* 用于卸载的信号量 */
 	struct rw_semaphore	s_umount;
+	/* 引用计数器 */
 	int			s_count;
+	/* 活动引用计数。super_block的引用数中有两个，一个是s_count,另一个是
+	 *s_active。s_count是真正的引用数，表示这个super_block能否被释放，s_active
+	 * 表示被mount了多少次。不管s_active的值为多少，反映到s_count中，一律算做S_BIAS
+	 * 个s_count
+	 */
 	atomic_t		s_active;
 #ifdef CONFIG_SECURITY
+	/* 指向superblock 安全结构的指针 */
 	void                    *s_security;
 #endif
+	/* 指向超级块扩展属性结构的指针 */
 	const struct xattr_handler **s_xattr;
 
 	const struct fscrypt_operations	*s_cop;
 
+	/* 文件系统的匿名dentry哈希表头，用于处理远程网络文件系统 */
 	struct hlist_bl_head	s_anon;		/* anonymous dentries for (nfs) exporting */
-	struct list_head	s_mounts;	/* list of mounts; _not_ for fs use */
+	
+	struct list_head	s_mounts;		/* list of mounts; _not_ for fs use */
+	/* 在磁盘文件系统，为指向块设备描述符的指针；否则为NULL */
 	struct block_device	*s_bdev;
+	/* 指向后备设备信息描述符的指针。对于某些磁盘文件系统，指向块设备请求队列的
+	 * 内嵌设备信息;某些网络文件系统会定义自己的后备设备信息，而其他文件系统
+	 * 可能使用空操作
+	 */
 	struct backing_dev_info *s_bdi;
+	/* 对于基于MTD的超级块，该域为指向MTD信息结构的指针 */
 	struct mtd_info		*s_mtd;
+	/* 链入到所属文件系统类型的超级块实例链表的“链接件” */
 	struct hlist_node	s_instances;
+	/* 支持的配额类型位图 */
 	unsigned int		s_quota_types;	/* Bitmask of supported quota types */
+	/* 磁盘配额信息描述符号 */
 	struct quota_info	s_dquot;	/* Diskquota specific options */
 
 	struct sb_writers	s_writers;
 
+	/* 对于磁盘文件系统，为块设备名字；否则为文件类型名字 */
 	char s_id[32];				/* Informational name */
 	u8 s_uuid[16];				/* UUID */
-
+	
+	/* 因为super_block 结构体只表示VFS层面的超级块对象。对于具体的文件系统，
+	 * 需要定义自己的超级块对象，所以这个s_fs_info就是指向它的。
+	 * 一般来说，s_fs_info域所指向的数据为效率考虑而从磁盘上复制到内存中的信息。
+	 * 基于磁盘的文件系统在分配或释放磁盘块时会访问并更新位图。VFS允许这些
+	 * 文件系统直接在内存中，也就是s_fs_info域上进行操作，而无需访问磁盘
+	 */
 	void 			*s_fs_info;	/* Filesystem private info */
 	unsigned int		s_max_links;
+	
+	/* 对于磁盘文件系统，记录装载模式（只读、或读/写）*/
 	fmode_t			s_mode;
 
 	/* Granularity of c/m/atime in ns.
 	   Cannot be worse than a second */
+	/* 文件系统文件戳（访问/修改时间等）粒度，以ns为单位 */
 	u32		   s_time_gran;
 
 	/*
@@ -1392,11 +1445,21 @@ struct super_block {
 	 * Filesystem subtype.  If non-empty the filesystem type field
 	 * in /proc/mounts will be "type.subtype"
 	 */
+	/* 文件系统子类型 */
+	/* 基于FUSE（用户空间文件系统）的文件系统，文件系统的类型表示有点麻烦，
+	 * 从内核的角度看，只有两种文件系统类型：fuse和fuseblk。但是从用户的角度，
+	 * 可以用多种不同的文件系统类型。用户甚至不关心这个文件系统是不是基于FUSE。
+	 * 因此，基于FUSE的文件系统会用到子类型。在fstab、mtab和/proc/mounts等中显示
+	 * 为“type.subtype” 的形式。
+         */
 	char *s_subtype;
 
 	/*
 	 * Saved mount options for lazy filesystems using
 	 * generic_show_options()
+	 */
+	/* 保存装载选项，以便以后显示，配合generic_show_options()使用，为不想实现更
+	 *复杂的装载选项显示逻辑的文件系统提供
 	 */
 	char __rcu *s_options;
 	const struct dentry_operations *s_d_op; /* default d_op for dentries */
@@ -1429,6 +1492,7 @@ struct super_block {
 	 * Keep the lru lists last in the structure so they always sit on their
 	 * own individual cachelines.
 	 */
+	/* 文件系统的未使用的dentry 和 inode分别链入到一个最近最少使用链表（lru）中*/
 	struct list_lru		s_dentry_lru ____cacheline_aligned_in_smp;
 	struct list_lru		s_inode_lru ____cacheline_aligned_in_smp;
 	struct rcu_head		rcu;
@@ -1443,6 +1507,7 @@ struct super_block {
 
 	/* s_inode_list_lock protects s_inodes */
 	spinlock_t		s_inode_list_lock ____cacheline_aligned_in_smp;
+	/* 文件系统的所有inode链表的表头 */
 	struct list_head	s_inodes;	/* all inodes */
 
 	spinlock_t		s_inode_wblist_lock;
