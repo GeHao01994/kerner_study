@@ -1849,26 +1849,68 @@ extern int vfs_dedupe_file_range(struct file *file,
 				 struct file_dedupe_range *same);
 
 struct super_operations {
+	/* 分配具体文件系统的inode */
    	struct inode *(*alloc_inode)(struct super_block *sb);
+	/* 如果具体文件系统定义了自己的内存inode,则需要实现这个函数。
+	 * 在具体文件系统的内存inode定义中，应该将VFS inode作为它的一个域。
+	 * 如果具体文件系统没有定义自己的内存inode,则不需要实现这个函数
+	 */
 	void (*destroy_inode)(struct inode *);
 
+	/* 这个方法被VFS核心调用，以标记一个inode为脏。它只有一个参数，即
+	 * 指向对应的VFS inode的指针。某些具体的文件系统需要做特定的处理，
+	 * 因此需要实现这个方法。例如日志文件系统。
+	 */
    	void (*dirty_inode) (struct inode *, int flags);
+
+	/* 这个方法在VFS核心需要将inode信息写回到磁盘上时调。它有两个参数：
+	 * 第一个为指向VFS inode的指针，第二个为指向回写控制符的指针，通常
+	 * 包含表面写操作是否需要同步的标志，并非所有的文件系统都检查这个标志。
+	 * 因此典型的文件系统的write_inode函数实现中都不会执行I/O，只是将blockdev
+	 * 映射中的缓冲区标记为“脏”。我们希望首先将执行所有的“脏”动作，然后
+	 * 一次性通过blockdev mapping将所有的这些inode块回写到磁盘
+	 */
 	int (*write_inode) (struct inode *, struct writeback_control *wbc);
+	/* 这个方法在inode的最后一个引用释放时被调用。它只有一个参数，即指向VFS inode的指针。
+	 * 如果未定义该回调函数，将采用默认的语义，即在inode的链接数不为0时，将它保留到inode缓存，
+	 * 否则删除该inode.某些文件系统不想缓存inode，则可以将此回调函数设置为generic_delete_inode，
+	 * 这样不论inode的链接数为多少，总是删除inode.还有某些文件系统希望在删除
+	 * 之前做其他的善后工作，则应该实现这个回调函数.
+	 */
 	int (*drop_inode) (struct inode *);
+	/* 在 VFS 核心希望删除一个inode时被调用 */
 	void (*evict_inode) (struct inode *);
+	/* 在VFS核心释放超级块(即unmount）时被调用. */
 	void (*put_super) (struct super_block *);
+	/* 在VFS核心正在写出和一个超级块关联的所以“脏”数据时被调用。
+	 * 这里的第二个参数表明是否这个方法应该等到写操作已经完成之后返回
+	 */
 	int (*sync_fs)(struct super_block *sb, int wait);
 	int (*freeze_super) (struct super_block *);
+	/* 在VFS核心锁住一个文件系统，强制使它进入一致状态时被调用。逻辑卷管理器（LVM）
+	 * 目前使用这种方法.
+	 */
 	int (*freeze_fs) (struct super_block *);
 	int (*thaw_super) (struct super_block *);
+	/* 在VFS 核心解锁一个文件系统时被调用*/
 	int (*unfreeze_fs) (struct super_block *);
+	/* 在VFS 核心需要获得文件系统统计信息时被调用*/
 	int (*statfs) (struct dentry *, struct kstatfs *);
+	/*在文件系统被重新装载时被调用*/
 	int (*remount_fs) (struct super_block *, int *, char *);
+	/*在VFS 核心正在卸载一个文件系统时被调用*/
 	void (*umount_begin) (struct super_block *);
 
+	/* 如果文件系统接受装载选项，则必须实现这个回调函数，显示当前活动的选项。
+	 * 规则如下: 不是默认或者值和默认不同的选项必须被显示；默认启用或者有默认
+	 * 值的选项可以被显示
+	 */
 	int (*show_options)(struct seq_file *, struct dentry *);
 	int (*show_devname)(struct seq_file *, struct dentry *);
 	int (*show_path)(struct seq_file *, struct dentry *);
+	/* 显示文件系统信息，例如配置、性能等。第一个参数为统计数，第二个参数
+	 * 为指向已装载文件系统的指针。
+	 */
 	int (*show_stats)(struct seq_file *, struct dentry *);
 #ifdef CONFIG_QUOTA
 	ssize_t (*quota_read)(struct super_block *, int, char *, size_t, loff_t);
