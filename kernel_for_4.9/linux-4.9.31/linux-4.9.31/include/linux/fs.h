@@ -602,10 +602,14 @@ is_uncached_acl(struct posix_acl *acl)
  * of the 'struct inode'
  */
 struct inode {
+	/* 文件类型和访问权限 */
 	umode_t			i_mode;
 	unsigned short		i_opflags;
+	/* 创建该文件的用户ID */
 	kuid_t			i_uid;
+	/* 创建该文件的组ID */
 	kgid_t			i_gid;
+	/* 文件系统装载标志 */
 	unsigned int		i_flags;
 
 #ifdef CONFIG_FS_POSIX_ACL
@@ -613,14 +617,18 @@ struct inode {
 	struct posix_acl	*i_default_acl;
 #endif
 
+	/* 指向inode操作表的指针 */
 	const struct inode_operations	*i_op;
+	/* 指向所属super block对象的指针 */
 	struct super_block	*i_sb;
+	/* 指向address_space 的指针 */
 	struct address_space	*i_mapping;
 
 #ifdef CONFIG_SECURITY
 	void			*i_security;
 #endif
 
+	/* inode 编号 */
 	/* Stat data, not accessed from path walking */
 	unsigned long		i_ino;
 	/*
@@ -634,27 +642,41 @@ struct inode {
 		const unsigned int i_nlink;
 		unsigned int __i_nlink;
 	};
+	/* 设备号，如果本inode代表一个块设备或者是字符设备 */
 	dev_t			i_rdev;
+	/* 字节为单位的文件长度 */
 	loff_t			i_size;
+	/* 文件的最后访问时间 */
 	struct timespec		i_atime;
+	/* 文件的最后修改时间 */
 	struct timespec		i_mtime;
+	/* inode的最后修改时间 */
 	struct timespec		i_ctime;
+	/* 用于保护i_blocks、i_bytes和i_size等域的自旋锁 */
 	spinlock_t		i_lock;	/* i_blocks, i_bytes, maybe i_size */
+	/* 以512字节的块为单位，文件最后一个块的字节数 */
 	unsigned short          i_bytes;
 	unsigned int		i_blkbits;
+	/* 文件的块数 */
 	blkcnt_t		i_blocks;
 
 #ifdef __NEED_I_SIZE_ORDERED
+	/* 被smp系统用来正确获取和设置文件长度 */
 	seqcount_t		i_size_seqcount;
 #endif
 
 	/* Misc */
+	/* inode的状态标志 */
 	unsigned long		i_state;
 	struct rw_semaphore	i_rwsem;
 
+	/* dirtied_when 值表示这个文件第一次（即inode的某个page）“脏”的时间，以jiffie为单位。
+	 * 它被writeback代码用于确定是否将这个inode会写磁盘
+	 */
 	unsigned long		dirtied_when;	/* jiffies of first dirtying */
 	unsigned long		dirtied_time_when;
 
+	/* 链入到全局inode_hashtable 哈希表的“链接件” */
 	struct hlist_node	i_hash;
 	struct list_head	i_io_list;	/* backing dev IO list */
 #ifdef CONFIG_CGROUP_WRITEBACK
@@ -666,23 +688,44 @@ struct inode {
 	u16			i_wb_frn_history;
 #endif
 	struct list_head	i_lru;		/* inode LRU list */
+	/* 链入到所属文件系统超级块 inode链表的“链接件” */
 	struct list_head	i_sb_list;
 	struct list_head	i_wb_list;	/* backing dev writeback list */
 	union {
+		/* 引用这个inode的dentry链表的表头.
+		 * dentry结构的d_alias域链入到所属inode的i_dentry
+		 * 链表的“链接件”.
+		 */
 		struct hlist_head	i_dentry;
 		struct rcu_head		i_rcu;
 	};
+
+	/* 版本号，在每次使用后自动递增 */
 	u64			i_version;
+	/* 使用计数器 */
 	atomic_t		i_count;
 	atomic_t		i_dio_count;
+	/* 用于写进程的使用计数 */
 	atomic_t		i_writecount;
 #ifdef CONFIG_IMA
 	atomic_t		i_readcount; /* struct files open RO */
 #endif
+	/* 指向文件操作表的指针 */
 	const struct file_operations	*i_fop;	/* former ->i_op->default_file_ops */
 	struct file_lock_context	*i_flctx;
+	/* 文件的address_space对象 */
 	struct address_space	i_data;
+	/* 如果这个inode表示一个块设备，则该域为链入到块设备的slave inode链表（表头为block_device结构的bd_inodes域）的“链接件”。
+	 * 如果代表一个字符设备，则该域为链入到字符设备的inode链表（表头为cdev结构的list域）的“链接件”
+	 */
 	struct list_head	i_devices;
+	/* inode可以表示多种对象，包括目录、文件、符号链接、字符设备、块设备等
+	 * 如果inode表示块设备，则i_rdev保存了块设备编号，i_bdev为指向块设备
+	 * 描述符（block_device）的指针，同时可以通过“连接件” i_devices链入到
+	 * 块设备的inodes链表.
+	 * 如果inode表示字符设备，则i_rdev保存了字符设备编号，i_cdev为指向字符设备
+	 * 描述符（cdev）的指针，同时通过i_devices链入到字符设备的list链表
+	 */
 	union {
 		struct pipe_inode_info	*i_pipe;
 		struct block_device	*i_bdev;
@@ -691,8 +734,10 @@ struct inode {
 		unsigned		i_dir_seq;
 	};
 
+	/* inode版本号 （在某些文件系统中使用）*/
 	__u32			i_generation;
 
+	/* 这个inode关心的所有事件 */
 #ifdef CONFIG_FSNOTIFY
 	__u32			i_fsnotify_mask; /* all events this inode cares about */
 	struct hlist_head	i_fsnotify_marks;
