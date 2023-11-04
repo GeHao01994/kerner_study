@@ -1844,24 +1844,111 @@ struct file_operations {
 };
 
 struct inode_operations {
+	/* 从文件系统中由父节点（inode）代表的那个目录中寻找当前节点（dentry）的目录项
+	 * 并设置结构中的其他信息，且读入其索引节点，在内存中建立对应的inode结构。
+	 * 该过程因文件系统而异。所以要通过父节点inode结构中的指针i_op找到相应的inode_operations数据结构。
+	 * 该方法只对代表目录的inode有意义。
+	 * 第一个参数指向父目录的inode描述符的指针;
+	 * 第二个为指向子目录的dentry描述符的指针.
+	 * 在调用函数之前，已经为子节点分配了dentry,并且将它关联到父目录的dentry,
+	 * 但是它还没有被关联到inode
+	 */
 	struct dentry * (*lookup) (struct inode *,struct dentry *, unsigned int);
 	const char * (*get_link) (struct dentry *, struct inode *, struct delayed_call *);
+	/* 该方法适用于代表目录、常规文件和符号链接等的inode.
+	 * 用来检查对某个inode是否有指定的权限。
+	 * 第一个为指向vfs inode的指针
+	 * 第二个为访问模式
+	 */
 	int (*permission) (struct inode *, int);
 	struct posix_acl * (*get_acl)(struct inode *, int);
-
+	/* 该方法只对代表符号链接的inode有意义，用于读取符号链接内容。
+	 * 第一个参数为符号链接对应的dentry
+	 * 第二个参数用户空间传入的缓冲区
+	 * 第三个参数为缓冲区的长度。
+	 */
 	int (*readlink) (struct dentry *, char __user *,int);
 
+	/* 该方法只对代表目录的inode才有意义，用来在该目录下创建常规文件
+	 * 第一个参数为目录对应的inode;第二个参数为常规文件对应的dentry
+	 * 第三个参数为文件模式
+	 * 在调用这个函数之前，已经为常规文件分配了dentry描述符，但是inode还没有分配。
+	 * 并且常规文件的dentry->d_parent已经指向目录的dentry描述符（inode->i_dentry）
+	 */
 	int (*create) (struct inode *,struct dentry *, umode_t, bool);
+	/* 该方法只对代表目录的inode有意义，用来在该目录下创建硬链接。
+	 * 第一个参数为链接目标对应的dentry
+	 * 第二个参数为目录对应的inode
+	 * 第三个参数为硬链接对应的dentry.
+	 * 在调用这个函数之前，已经为硬链接分配了dentry,但是它还没有被关联到
+	 * 链接目标的inode.硬链接的dentry->d_parent已经指向目录的dentry描述符（inode->i_dentry）
+	 * 这个操作的实现应该: 1.递增链接目标的硬链接数（dentry->d_inode->i_nlink);
+	 * 2.修改目录内容，添加一项和硬链接相对应.
+	 * 3.将链接目标的inode和硬链接的dentry关联起来.
+	 */
 	int (*link) (struct dentry *,struct inode *,struct dentry *);
+	/* 该方法只对代表目录的inode有意义，用于从该目录中删除硬链接.
+	 * 函数有两个参数:第一个为目录对应的inode,第二个为硬链接对应的dentry.
+	 */
 	int (*unlink) (struct inode *,struct dentry *);
+	/* 该方法只对代表目录的inode有意义，用于在该目录下创建符号链接。
+	 * 注意这里和前面不一样 
+	 * 前面是硬链接，这里是符号链接。
+	 * 第一个为目录对应的inode
+	 * 第二个为符号链接对应的dentry
+	 * 第三个参数为符号名
+	 * 在调用这个函数之前，已经为符号链接分配了dentry，但它还没有为它
+	 * 分配inode,符号链接的dentry->d_parant已经指向目录的dentry描述符（inode->i_dentry）
+	 * 这个操作的实现应该：
+	 * 1、为符号链接新建一个具体的inode描述符.
+	 * 2、修改目录内容，添加一项和符号链接对应.
+	 * 3、将符号名写到符号链接对应的inode由（最终会被同步到磁盘上）
+	 * 4、将符号链接的vfs inode和dentry关联起来。
+	 */
 	int (*symlink) (struct inode *,struct dentry *,const char *);
+	/* 该方法只对代表目录的inode有意义，用来在该目录下创建子目录。
+	 * 第一个参数为目录对应的inode
+	 * 第二个参数为子目录对应的dentry
+	 * 第三个参数为子目录的模式
+	 * 在调用这个函数之前，已经为子目录分配了dentry,但是还没有为它分配inode,
+	 * 子目录的dentry->d_parent已经指向目录的dentry描述符（inode->i_dentry）
+	 * 这个操作的实现应该：
+	 * 1、为子目录新建一个具体的inode描述符
+	 * 2、修改目录内容，添加一项和子目录对应。
+	 * 3、江子目录的vfs inode和dentry关联起来
+	 */
 	int (*mkdir) (struct inode *,struct dentry *,umode_t);
+	/* 该方法只对代表目录的inode有意义，用来在目录中删除子目录.
+	 * 函数有两个参数
+	 * 第一个为目录对应的inode
+	 * 第二个为子目录对应的dentry
+	 */
 	int (*rmdir) (struct inode *,struct dentry *);
+	/* 该方法只对代表目录的inode有意义，用来在目录中创建一个块（或字符）special文件。
+	 * 同常规文件一样，块（或字符）special文件也有自己的inode,但其中只需要保存块（或字符）special的主设备号和次设备号。
+	 * 第一个参数为目录对应的inode
+	 * 第二个为块（或字符）设备文件对应的dentry
+	 * 第三个为文件模式
+	 * 第四个为设备号
+	 * 在调用这个函数之前，已经为块（或字符）设备分配了dentry,但是还没有为它分配inode.
+	 * 文件的dentry->d_parent已经指向目录的dentry描述符（inode->i_dentry)
+	 * 这个操作的实现应该：
+	 * 1、为块（或字符）设备文件新建一个具体的inode描述符
+	 * 2、修改目录内容，添加一项和块（字符）设备文件对应
+	 * 3、将块（或字符）设备文件的vfs inode的i_rdev设置成为块（或字符）
+设备的设备号
+	 * (这个设备号最终会被同步到磁盘)
+	 * 将块（或字符）设备文件的vfs inode和dentry关联起来
+	 */
 	int (*mknod) (struct inode *,struct dentry *,umode_t,dev_t);
+	/* 该方法只对代表目录的inode有意义 */
 	int (*rename) (struct inode *, struct dentry *,
 			struct inode *, struct dentry *, unsigned int);
+	/* 该方法适用于代表目录、常规文件和符号链接等的inode，用于设置其属性 */
 	int (*setattr) (struct dentry *, struct iattr *);
+	/* 该方法适用于代表目录、常规文件和符号链接等inode，用于获取其属性 */
 	int (*getattr) (struct vfsmount *mnt, struct dentry *, struct kstat *);
+	/* 该方法适用于代表目录、常规文件和符号链接等的inode，用于删除其扩展属性 */
 	ssize_t (*listxattr) (struct dentry *, char *, size_t);
 	int (*fiemap)(struct inode *, struct fiemap_extent_info *, u64 start,
 		      u64 len);
