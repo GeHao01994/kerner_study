@@ -80,34 +80,62 @@ extern struct dentry_stat_t dentry_stat;
 
 #define d_lock	d_lockref.lock
 
+/* dentry虽然翻译为目录项，但它和文件系统中的目录并不是同一个概念。
+ * 事实上，dentry属于所有文件系统对象，包括目录、常规文件、符号链接、块设备文件、字符设备文件等。
+ * 反映的是文件系统对象在内核中所在文件系统树中的位置
+ * 所有文件系统共有的内容被提炼处理，形成了vfs dentry,而对于具体文件系统，还可以有内存中
+ * 目录项和磁盘上目录项两种形式。在打开对象时，磁盘上目录项被读取，用来构造vfs dentry和内存目录项
+ * 因为inode反映的是文件系统对象的元数据，而dentry则表示文件系统对象在文件系统中的位置。
+ * dentry和inode是多对一的关系，每个dentry只有一个inode,由d_inode指向；
+ * 而一个inode可能对应多个dentry（例如硬链接），它将这些dentry组成以i_dentry的链表，每个dentry通过d_alias加入到所属inode的i_dentry链表中
+ */
 struct dentry {
 	/* RCU lookup touched fields */
+	/* dentry_cache 标志 */
 	unsigned int d_flags;		/* protected by d_lock */
 	seqcount_t d_seq;		/* per dentry seqlock */
+	/* 链入到全局dentry_hashtable或者超级块的匿名dentry哈希链表的“连接件”，根dentry除外。
+	 * 其哈希项的索引计算基于夫dentry描述符的地址以及它的文件名哈希值。
+	 * 因此，这个哈希表的作用就是方便查找给定目录下的文件。
+	 */
 	struct hlist_bl_node d_hash;	/* lookup hash list */
+	/* 父目录的dentry描述符，如果是根dentry,指向它自身 */
 	struct dentry *d_parent;	/* parent directory */
+	/* 本dentry所表示对象的文件名、长度、文件名的哈希值等信息 */
 	struct qstr d_name;
+	/* 这个dentry 对象所关联的inode描述符 */
 	struct inode *d_inode;		/* Where the name belongs to - NULL is
 					 * negative */
+	/* 用于保存短文件名。如果文件名长度超过36，则另外分配空间 */
 	unsigned char d_iname[DNAME_INLINE_LEN];	/* small names */
 
 	/* Ref lookup also touches following */
 	struct lockref d_lockref;	/* per-dentry lock and refcount */
+	/* 指向dentry操作表的指针 */
 	const struct dentry_operations *d_op;
+	/* 指向本dentry所属文件系统超级块描述符指针 */
 	struct super_block *d_sb;	/* The root of the dentry tree */
+	/* 被d_revalidate函数用来作为判断dentry是否还有效的依据 */
 	unsigned long d_time;		/* used by d_revalidate */
+	/* 指向具体文件系统的dentry信息的指针 */
 	void *d_fsdata;			/* fs-specific data */
 
 	union {
+		/* 文件系统的未使用dentry被链入到一个最近最少使用的链表（lru）中
+		 * 该域被链入此链表的连接件，super_block的s_dentry_lru域为表头
+		 */
 		struct list_head d_lru;		/* LRU list */
 		wait_queue_head_t *d_wait;	/* in-lookup ones only */
 	};
+	/* 链入到夫dentry的d_subdirs链表的“连接件” */
 	struct list_head d_child;	/* child of parent list */
+	/* 这个dentry的子dentry链表的表头 */
 	struct list_head d_subdirs;	/* our children */
 	/*
 	 * d_alias and d_rcu can share memory
 	 */
 	union {
+		/* 链入到所属inode的i_dentry(别名)链表的“连接件” */
 		struct hlist_node d_alias;	/* inode alias list */
 		struct hlist_bl_node d_in_lookup_hash;	/* only for in-lookup ones */
 	 	struct rcu_head d_rcu;
