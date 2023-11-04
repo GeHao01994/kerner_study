@@ -601,6 +601,11 @@ is_uncached_acl(struct posix_acl *acl)
  * the RCU path lookup and 'stat' data) fields at the beginning
  * of the 'struct inode'
  */
+
+ /* inode包含了文件系统各种对象（文件、目录、块设备文件、字符设备文件等）的元数据。
+  * 对于基于磁盘的文件系统，inode存在于磁盘上，其形式取决于文件系统的类型。
+  * 在打开该对象进行访问时，其inode被读入内存。内存中inode有一部分是各种文件系统共有的
+  */
 struct inode {
 	/* 文件类型和访问权限 */
 	umode_t			i_mode;
