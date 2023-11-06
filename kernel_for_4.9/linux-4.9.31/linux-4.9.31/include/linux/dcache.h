@@ -155,16 +155,59 @@ enum dentry_d_lock_class
 };
 
 struct dentry_operations {
+	/* 这个方法在路径查找时从dentry缓存中找到目标项之后，它被用来检查这个目录项
+	 * 是否依然有效，因为它们可能在VFS之外被删除。若无效，则需要作废缓存中的目录项，
+	 * 根据磁盘上的内容重新构造。
+	 * 第一个参数为指向父目录dentry描述符的指针
+	 * 如果未定义此回调函数，则默认认为dentry缓存中的信息是有效的，这适合于大多数文件系统。
+	 * 某些（例如NFS）文件系统需要对dentry缓存中找到dentry结构进行验证（和处理），则需要提供此回调函数的实现
+	 */
 	int (*d_revalidate)(struct dentry *, unsigned int);
 	int (*d_weak_revalidate)(struct dentry *, unsigned int);
+	/* 在路径查找时，为提高效率，首先比较目录项的哈希值，然后比较目录项的字符串。
+	 * 这个函数被用来计算给定名字字符串的哈希值。
+	 * 第一个参数为父目录的dentry的指针
+	 * 第二个为指向目标qstr描述符的指针，其中包含了目标的目录项名字、长度、并保存计算后的哈希值
+	 * 如果未定义此回调函数，将采用默认的行为，即使用固定算法（参见文件include/linux/dcache.h中的函数full_name_hash）
+	 * 对目标目录项名字中的所有字符串计算哈希值。
+	 * 如果某些文件系统希望采用不同的算法，或者有选择性地针对名字中某些字符（例如SYSV文件系统截取前14个字符），
+	 * 或者针对变换后的名字（例如JFS文件系统转换成小写）来计算哈希值，则实现这个函数
+	 */
 	int (*d_hash)(const struct dentry *, struct qstr *);
+	/* 这个函数被用在路径查找时比较两个字符串。
+	 * 第一个参数为父目录项dentry指针
+	 * 第二个和第三个为指向qstr描述符的指针，其中包含了待比较的目录项名字、长度
+	 * 如果未定义此回调函数，将采用默认的行为，即按内存比较方式，只有两个字符串在长度范围内
+	 * 的内容都相同，才认为这两个字符串相同。
+	 * 某些文件系统可能利用这个回调函数来实现特定的比较（例如JFS文件系统在比较时忽略名字字符串中的大小写）
+	 */
 	int (*d_compare)(const struct dentry *,
 			unsigned int, const char *, const struct qstr *);
+	/* 在dentry的最后一个引用被删除时调用。这个方法只有一个参数，即指向当时dentry描述符的指针。
+	 * 如果函数返回1，则表示该dentry无效，应该从缓存中丢掉。
+	 * 返回0则可以继续保留在dentry缓存中.
+	 */
 	int (*d_delete)(const struct dentry *);
 	int (*d_init)(struct dentry *);
+	/* 在dentry真正被销毁时调用。
+	 * 这个方法只有一个参数，即指向当时dentry描述符的指针。
+	 * 对于大多数文件系统，都不需要实现此函数。
+	 * 但是某些文件系统在dentry带有特定信息（由d_fsdada指向），
+	 * 则应该在这个回调函数中处理
+	 */
 	void (*d_release)(struct dentry *);
 	void (*d_prune)(struct dentry *);
+	/* 在dentry失去和inode的关联时被调用。
+	 * 第一个参数为指向dentry的指针
+	 * 第二个参数为指向inode的指针
+	 * 如果为定义这个函数，则采取默认的行为，即调用iput递减inode的引用，并在引用计数值为0时，准备释放、甚至销毁这个inode.
+	 * 某些文件系统需要做一些其他的处理，例如sysfs文件系统需要释放关联sysfs_dirent的引用，
+	 * 则必须实现此回调函数，在回调函数最后仍然调用iput.
+	 */
 	void (*d_iput)(struct dentry *, struct inode *);
+	/* 在需要为dentry生成路径名时被调用。
+	 * 在某些伪文件系统（sockfs、pipefs等）中使用延迟路径名生成。
+	 */
 	char *(*d_dname)(struct dentry *, char *, int);
 	struct vfsmount *(*d_automount)(struct path *);
 	int (*d_manage)(struct dentry *, bool);
