@@ -63,9 +63,18 @@ struct mnt_namespace;
 #define MNT_MARKED		0x4000000
 #define MNT_UMOUNT		0x8000000
 
+/* 在linux中，文件系统在使用前，必须先装载。
+ * vfsmount对象反映了一已装载的文件系统实例。
+ * Linux内核代码可以通过vfsmount访问这个文件系统实例（例如bdev文件系统等）。
+ * 但是，如果要被用户空间访问，则需要将它装载到全局文件系统树，形成其中的一个子数。
+ * 这个时候vfsmount对象就变成了用于将每个局部文件系统链接到全局文件系统树的“连接件”
+ */
 struct vfsmount {
+	/* 指向这个文件系统的根目录的dentry的指针 */
 	struct dentry *mnt_root;	/* root of the mounted tree */
+	/* 指向这个文件系统的根目录的dentry的指针 */
 	struct super_block *mnt_sb;	/* pointer to superblock */
+	/* 装载标志 */
 	int mnt_flags;
 };
 
