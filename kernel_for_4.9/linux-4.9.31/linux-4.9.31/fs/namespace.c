@@ -961,6 +961,11 @@ static struct mount *skip_mnt_tree(struct mount *p)
 	return p;
 }
 
+/* 第一个参数为文件系统类型
+ * 第二个参数为经过处理之后的flag标志
+ * 第四个参数为设备文件名
+ * 第五个参数为特定装载选项
+ */
 struct vfsmount *
 vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void *data)
 {
@@ -970,6 +975,7 @@ vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void 
 	if (!type)
 		return ERR_PTR(-ENODEV);
 
+	/* 分配并初始化一个mount结构体 */
 	mnt = alloc_vfsmnt(name);
 	if (!mnt)
 		return ERR_PTR(-ENOMEM);
@@ -977,6 +983,10 @@ vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void 
 	if (flags & MS_KERNMOUNT)
 		mnt->mnt.mnt_flags = MNT_INTERNAL;
 
+	/* 具体文件系统的 mount 函数
+	 * root = type->mount(type, flags, name, data);
+	 * 返回 mount 后的 dentry
+	 */
 	root = mount_fs(type, flags, name, data);
 	if (IS_ERR(root)) {
 		mnt_free_id(mnt);
@@ -984,6 +994,13 @@ vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void 
 		return ERR_CAST(root);
 	}
 
+	/* 这里是设置vfsmount里面的数据
+	 * struct vfsmount {
+	 *  struct dentry *mnt_root;		root of the mounted tree
+	 *  struct super_block *mnt_sb;		pointer to superblock
+	 *  int mnt_flags;
+         * } __randomize_layout;
+	 */
 	mnt->mnt.mnt_root = root;
 	mnt->mnt.mnt_sb = root->d_sb;
 	mnt->mnt_mountpoint = mnt->mnt.mnt_root;
@@ -2470,6 +2487,12 @@ static bool mount_too_revealing(struct vfsmount *mnt, int *new_mnt_flags);
  * create a new mount for userspace and request it to be added into the
  * namespace's tree
  */
+/* 第一个参数为装载节点的路径
+ * 第二个参数为文件系统类型
+ * 第三个参数为经过处理之后的flag标志
+ * 第四个参数为设备文件名
+ * 第五个参数为特定装载选项
+ */
 static int do_new_mount(struct path *path, const char *fstype, int flags,
 			int mnt_flags, const char *name, void *data)
 {
@@ -2480,6 +2503,10 @@ static int do_new_mount(struct path *path, const char *fstype, int flags,
 	if (!fstype)
 		return -EINVAL;
 
+	/* 通过文件类型的名字在全局的file_systems里面找到对应的文件类型
+	 * file_systems中所有的成员都可以通过cat /proc/filesystems 查看
+	 * (可看相关函数实现 filesystems_proc_show)
+	 */
 	type = get_fs_type(fstype);
 	if (!type)
 		return -ENODEV;
@@ -2673,6 +2700,11 @@ static long exact_copy_from_user(void *to, const void __user * from,
 		return n;
 
 	while (n) {
+		/* 在内核空间和用户空间交换数据时，get_user和put_user是两个两用的函数。
+		 * 相对于copy_to_user和copy_from_user，这两个函数主要用于完成一些简单类型变量(char、int、long等)的拷贝任务
+		 * 对于一些复合类型的变量，比如数据结构或者数组类型，get_user和put_user函数还是无法胜任，
+		 * 这两个函数内部将对指针指向的对象长度进行检查，在arm平台上只支持长度为1，2，4，8的变量
+		 */
 		if (__get_user(c, f)) {
 			memset(t, 0, n);
 			break;
@@ -2702,6 +2734,8 @@ void *copy_mount_options(const void __user * data)
 	 * the remainder of the page.
 	 */
 	/* copy_from_user cannot cross TASK_SIZE ! */
+
+	/* 这里很经典，为了访问到TASK_SIZE之外的数据这里做了判断 ,然后清0*/
 	size = TASK_SIZE - (unsigned long)data;
 	if (size > PAGE_SIZE)
 		size = PAGE_SIZE;
@@ -2735,6 +2769,12 @@ char *copy_mount_string(const void __user *data)
  * Therefore, if this magic number is present, it carries no information
  * and must be discarded.
  */
+/* 第一个参数为设备文件名
+ * 第二个参数为目标路径名
+ * 第三个参数为文件系统类型
+ * 第四个参数为装载标志
+ * 第五个为特定装载选项
+ */
 long do_mount(const char *dev_name, const char __user *dir_name,
 		const char *type_page, unsigned long flags, void *data_page)
 {
@@ -2743,14 +2783,23 @@ long do_mount(const char *dev_name, const char __user *dir_name,
 	int mnt_flags = 0;
 
 	/* Discard magic */
+	/* When the flags word was introduced its top half was required to have the magic value 0xC0ED,
+	 * and this remained so until 2.4.0-test9.
+	 * Therefore, if this magic number is present, it carries no information and must be discarded.
+	 */
 	if ((flags & MS_MGC_MSK) == MS_MGC_VAL)
 		flags &= ~MS_MGC_MSK;
 
 	/* Basic sanity checks */
+	/* data is a (void *) that can point to any structure up to
+	 * PAGE_SIZE-1 bytes, which can contain arbitrary fs-dependent
+	 * information (or be NULL).
+	 */
 	if (data_page)
 		((char *)data_page)[PAGE_SIZE - 1] = 0;
 
 	/* ... and get the mountpoint */
+	/* 获得装载点的路径*/
 	retval = user_path(dir_name, &path);
 	if (retval)
 		return retval;
@@ -2806,6 +2855,7 @@ long do_mount(const char *dev_name, const char __user *dir_name,
 	else if (flags & MS_MOVE)
 		retval = do_move_mount(&path, dev_name);
 	else
+		/* 新建装载 */
 		retval = do_new_mount(&path, type_page, flags, mnt_flags,
 				      dev_name, data_page);
 dput_out:
@@ -2999,6 +3049,14 @@ struct dentry *mount_subtree(struct vfsmount *mnt, const char *name)
 }
 EXPORT_SYMBOL(mount_subtree);
 
+/* 装载文件系统的系统调用入口函数为sys_mount.
+ * 第一个参数dev_name为包含文件系统的设备文件路径名
+ * 第二个dir_name为文件系统被装载到的目标路径名
+ * 第三个type为文件系统类型名，必须在系统中已经注册
+ * 第四个flag为装载标志
+ * 第五个data为文件系统特定的数据
+ * 例子： mount -t FILE_SYSTEM_TYPE_B /dev/sda3 /mnt/d
+ */
 SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name,
 		char __user *, type, unsigned long, flags, void __user *, data)
 {
@@ -3007,16 +3065,20 @@ SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name,
 	char *kernel_dev;
 	void *options;
 
+	/* 从用户空间复制文件系统类型到局部变量kernel_type 中*/
 	kernel_type = copy_mount_string(type);
 	ret = PTR_ERR(kernel_type);
 	if (IS_ERR(kernel_type))
 		goto out_type;
 
+	/* 从用户空间复制dev_name到局部变量kernel_dev 中 */
 	kernel_dev = copy_mount_string(dev_name);
 	ret = PTR_ERR(kernel_dev);
 	if (IS_ERR(kernel_dev))
 		goto out_dev;
 
+	/* 将用户空间的data复制到局部变量options中 */
+	/* */
 	options = copy_mount_options(data);
 	ret = PTR_ERR(options);
 	if (IS_ERR(options))
