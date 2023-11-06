@@ -19,6 +19,7 @@ struct mnt_namespace {
 };
 
 struct mnt_pcp {
+	/* 使用计数器？*/
 	int mnt_count;
 	int mnt_writers;
 };
@@ -31,8 +32,11 @@ struct mountpoint {
 };
 
 struct mount {
+	/* 链入全局已装载文件系统哈希表的“连接件” */
 	struct hlist_node mnt_hash;
+	/* 指向这个文件系统被装载到的父文件系统的指针 */
 	struct mount *mnt_parent;
+	/* 指向这个文件系统被装载到的装载点目录的dentry的指针 */
 	struct dentry *mnt_mountpoint;
 	struct vfsmount mnt;
 	union {
@@ -45,25 +49,42 @@ struct mount {
 	int mnt_count;
 	int mnt_writers;
 #endif
+	/* 装载到这个文件系统的目录上所有子文件系统的链表的表头 */
 	struct list_head mnt_mounts;	/* list of children, anchored here */
+	/* 链接到被装载到的父文件系统mnt_mounts链表的“连接件” */
 	struct list_head mnt_child;	/* and going through their mnt_child */
+	/*链接到其相关的super block的“连接件” */
 	struct list_head mnt_instance;	/* mount instance on sb->s_mounts */
+	/* 保存文件系统的块设备的设备文件名（或者特殊文件系统的文件系统类型名）*/
 	const char *mnt_devname;	/* Name of device e.g. /dev/dsk/hda1 */
+	/* 链入到进程名字空间中已装载文件系统链表的“连接件”，链表头为mnt_namespace结构的list域 */
 	struct list_head mnt_list;
+	/* 链入到文件系统专有的过期链表的连接件，用于NFS、CIFS、AFS等网络文件系统*/
 	struct list_head mnt_expire;	/* link in fs-specific expiry list */
+	/* 链入到共享装载循环链表的连接件。阐述propagation的概念。
+	 * 所有在一个对等组（peer Group）中共享中的vfsmount通过mnt_share构成一个循环链表
+	 */
 	struct list_head mnt_share;	/* circular list of shared mounts */
+	/* 这个文件系统的slave mount链表的表头 */
 	struct list_head mnt_slave_list;/* list of slave mounts */
+	/* 链入到master文件系统的slave mount链表的“连接件” */
 	struct list_head mnt_slave;	/* slave list entry */
+	/* 指向master文件系统的指针？*/
 	struct mount *mnt_master;	/* slave is on master->mnt_slave_list */
+	/* 所在的namespace */
 	struct mnt_namespace *mnt_ns;	/* containing namespace */
+	/* 挂载点相关的信息 */
 	struct mountpoint *mnt_mp;	/* where is it mounted */
 	struct hlist_node mnt_mp_list;	/* list mounts with the same mountpoint */
 #ifdef CONFIG_FSNOTIFY
 	struct hlist_head mnt_fsnotify_marks;
 	__u32 mnt_fsnotify_mask;
 #endif
+	/* 装载id,mnt_id=ida_alloc(&mnt_id_ida, GFP_KERNEL); */
 	int mnt_id;			/* mount identifier */
+	/* 组id */
 	int mnt_group_id;		/* peer group identifier */
+	/* 如果为1，表示这个已装载文件系统被标记为过期 */
 	int mnt_expiry_mark;		/* true if marked for expiry */
 	struct hlist_head mnt_pins;
 	struct fs_pin mnt_umount;
