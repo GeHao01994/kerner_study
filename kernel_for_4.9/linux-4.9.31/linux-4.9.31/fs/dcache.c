@@ -1562,6 +1562,7 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 	char *dname;
 	int err;
 
+	/* 分配一个dentry对象 */
 	dentry = kmem_cache_alloc(dentry_cache, GFP_KERNEL);
 	if (!dentry)
 		return NULL;
@@ -1572,12 +1573,23 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 	 * will still always have a NUL at the end, even if we might
 	 * be overwriting an internal NUL character
 	 */
+	/* 我们保证内联名称始终以NUL结尾。
+	 * 通过这种方式，在重命名中通过名称切换完成的memcpy（）仍然会在末尾有一个NULL
+	 * 即使我们可能正在覆盖一个内部NUL字符
+	 */
 	dentry->d_iname[DNAME_INLINE_LEN-1] = 0;
+	/* 如果传进来的name是空的，就定义这个名字为/
+	 * #define QSTR_INIT(n,l) { { { .len = l } }, .name = n }
+	 */
 	if (unlikely(!name)) {
 		static const struct qstr anon = QSTR_INIT("/", 1);
 		name = &anon;
 		dname = dentry->d_iname;
 	} else if (name->len > DNAME_INLINE_LEN-1) {
+		/* 如果name的长度大于DNAME_INLINE_LEN-1，name就需要开辟空间开存储这个name了
+		 * 先算出name[1] 相对于结构体external_name的偏移，为什么要跨过name[0]呢
+		 * 其实就是为了多一位，最后一位赋值为0；
+		 */
 		size_t size = offsetof(struct external_name, name[1]);
 		struct external_name *p = kmalloc(size + name->len,
 						  GFP_KERNEL_ACCOUNT);
@@ -1585,6 +1597,7 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 			kmem_cache_free(dentry_cache, dentry); 
 			return NULL;
 		}
+		/* 设置external_name 的count为1 */
 		atomic_set(&p->u.count, 1);
 		dname = p->name;
 		if (IS_ENABLED(CONFIG_DCACHE_WORD_ACCESS))
@@ -1596,27 +1609,43 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 
 	dentry->d_name.len = name->len;
 	dentry->d_name.hash = name->hash;
+	/* 将name->name拷贝到dname中去,且结尾设置为0 */
 	memcpy(dname, name->name, name->len);
 	dname[name->len] = 0;
 
 	/* Make sure we always see the terminating NUL character */
 	smp_wmb();
+	/* 这样整个dentry的d_name就设置完了 */
 	dentry->d_name.name = dname;
 
+	/* dentry的引用计数赋值成1 */
 	dentry->d_lockref.count = 1;
+	/* dentry的标志位为0 */
 	dentry->d_flags = 0;
 	spin_lock_init(&dentry->d_lock);
 	seqcount_init(&dentry->d_seq);
 	dentry->d_inode = NULL;
+	/* 把dentry的父指向自己 */
 	dentry->d_parent = dentry;
+	/* 设置相应的super_block对象 */
 	dentry->d_sb = sb;
+	/* 这里暂时现将dentry操作表的指针设置为NULL */
 	dentry->d_op = NULL;
+	/* 将 fs-specific data 也先赋值为NULL */
 	dentry->d_fsdata = NULL;
+	/* 初始化d_hash成员，用来链入到全局dentry_hashtable或者超级块的匿名dentry哈希链表的“连接件” */
 	INIT_HLIST_BL_NODE(&dentry->d_hash);
+	/* 初始化d_lru成员，用来链接到最近最少使用的链表（lru）中 */
 	INIT_LIST_HEAD(&dentry->d_lru);
+	/* 初始化d_subdirs成员，这个dentry的子dentry链表的表头*/
 	INIT_LIST_HEAD(&dentry->d_subdirs);
+	/* 初始化d_alias，用来链入到所属inode的i_dentry(别名)链表的“连接件” */
 	INIT_HLIST_NODE(&dentry->d_u.d_alias);
+	/* 初始化d_child，用来链入到父dentry的d_subdirs链表的“连接件” */
 	INIT_LIST_HEAD(&dentry->d_child);
+	/* 这里主要是将super_block的s_d_op(dentry_operations)赋值给dentry的dentry->d_op
+	 * 并根据是否有相关函数来设置相应的flag
+	 */
 	d_set_d_op(dentry, dentry->d_sb->s_d_op);
 
 	if (dentry->d_op && dentry->d_op->d_init) {
@@ -1629,6 +1658,7 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 		}
 	}
 
+	/* 本地cpu的nr_dentry +1 */
 	this_cpu_inc(nr_dentry);
 
 	return dentry;
@@ -1784,8 +1814,10 @@ static void __d_instantiate(struct dentry *dentry, struct inode *inode)
 	WARN_ON(d_in_lookup(dentry));
 
 	spin_lock(&dentry->d_lock);
+	/* 将dentry的d_alias加入到所属inode的i_dentry链表中*/
 	hlist_add_head(&dentry->d_u.d_alias, &inode->i_dentry);
 	raw_write_seqcount_begin(&dentry->d_seq);
+	/* 这里就是将dentry->d_inode = inode,设置好inode */
 	__d_set_inode_and_type(dentry, inode, add_flags);
 	raw_write_seqcount_end(&dentry->d_seq);
 	fsnotify_update_flags(dentry);
@@ -1851,8 +1883,10 @@ struct dentry *d_make_root(struct inode *root_inode)
 	struct dentry *res = NULL;
 
 	if (root_inode) {
+		/* 分配并初始化dentry */
 		res = __d_alloc(root_inode->i_sb, NULL);
 		if (res)
+			/* 这里就是让新建的dentry和root_inode关联起来 */
 			d_instantiate(res, root_inode);
 		else
 			iput(root_inode);

@@ -414,15 +414,39 @@ const struct inode_operations proc_link_inode_operations = {
 	.get_link	= proc_get_link,
 };
 
+/* 第二个参数的成员具体如下
+ struct proc_dir_entry proc_root = {
+	.low_ino	= PROC_ROOT_INO,
+	.namelen	= 5,
+	.mode		= S_IFDIR | S_IRUGO | S_IXUGO,
+	.nlink		= 2,
+	.refcnt		= REFCOUNT_INIT(1),
+	.proc_iops	= &proc_root_inode_operations,
+	.proc_fops	= &proc_root_operations,
+	.parent		= &proc_root,
+	.subdir		= RB_ROOT,
+	.name		= "/proc",
+};
+*/
+
 struct inode *proc_get_inode(struct super_block *sb, struct proc_dir_entry *de)
 {
+	/* 分配一个inode结构体
+	 * 初始化其中的i_state为0
+	 * 初始化了链入到所属super_block的连接件i_sb_list
+	 */
 	struct inode *inode = new_inode_pseudo(sb);
 
 	if (inode) {
+		/* 设置inode的编号i_node编号为PROC_ROOT_INO */
 		inode->i_ino = de->low_ino;
+		/* 设置inode的文件的最后修改时间、文件的最后访问时间、inode的最后修改时间为当前时间
+		 * 为什么要个inode作为参数，因为inode里面inode->i_sb->s_time_gran有个精度
+		 * 这边把它换算了
+		 */
 		inode->i_mtime = inode->i_atime = inode->i_ctime = current_time(inode);
 		PROC_I(inode)->pde = de;
-
+		/* 如果这是一个空的目录节点，就创建一个空的目录节点之后就返回 */
 		if (is_empty_pde(de)) {
 			make_empty_dir_inode(inode);
 			return inode;
@@ -432,13 +456,16 @@ struct inode *proc_get_inode(struct super_block *sb, struct proc_dir_entry *de)
 			inode->i_uid = de->uid;
 			inode->i_gid = de->gid;
 		}
+		/* 如果有文件长度，设置其文件长度，单位为字节 */
 		if (de->size)
 			inode->i_size = de->size;
+		/* 如果有链接数，设置其链接数 */
 		if (de->nlink)
 			set_nlink(inode, de->nlink);
 		WARN_ON(!de->proc_iops);
 		inode->i_op = de->proc_iops;
 		if (de->proc_fops) {
+			/* 如果inode代表的是一个文件，设置其相关的文件操作表的指针 */
 			if (S_ISREG(inode->i_mode)) {
 #ifdef CONFIG_COMPAT
 				if (!de->proc_fops->compat_ioctl)
@@ -452,6 +479,7 @@ struct inode *proc_get_inode(struct super_block *sb, struct proc_dir_entry *de)
 			}
 		}
 	} else
+		/* 减少pde的引用计数 */
 	       pde_put(de);
 	return inode;
 }
@@ -466,12 +494,21 @@ int proc_fill_super(struct super_block *s, void *data, int silent)
 		return -EINVAL;
 
 	/* User space would break if executables or devices appear on proc */
+	/* 将super_block的内部flag（即iflags）赋值为用户可见的、不可执行的
+	 * 因为proc实际上没有实际的设备，所以这里还需要添加NODEV */
 	s->s_iflags |= SB_I_USERNS_VISIBLE | SB_I_NOEXEC | SB_I_NODEV;
 	s->s_flags |= MS_NODIRATIME | MS_NOSUID | MS_NOEXEC;
+	/* 设置块大小为1024 */
 	s->s_blocksize = 1024;
+	/* 设置文件系统的块长度的位数为10 */
 	s->s_blocksize_bits = 10;
+	/* 设置文件系统魔数为PROC_SUPER_MAGIC */
 	s->s_magic = PROC_SUPER_MAGIC;
+	/* 设置超级块操作函数为proc_sops */
 	s->s_op = &proc_sops;
+	/* s_time_gran 文件系统文件戳（访问/修改时间等）粒度，以ns为单位
+	 * 这里把它修改成1 ns
+	 */
 	s->s_time_gran = 1;
 
 	/*
@@ -480,23 +517,34 @@ int proc_fill_super(struct super_block *s, void *data, int silent)
 	 * top of it
 	 */
 	s->s_stack_depth = FILESYSTEM_MAX_STACK_DEPTH;
-	
+
+	/* 这里将proc_root的refcnt加1,因为下面要用到，所以避免其释放*/
 	pde_get(&proc_root);
+
+	/* 这里实际就是根据已经初始化的全局变量proc_root，来分配和填充root_inode */
 	root_inode = proc_get_inode(s, &proc_root);
 	if (!root_inode) {
 		pr_err("proc_fill_super: get root inode failed\n");
 		return -ENOMEM;
 	}
 
+	/* 根据root_inode节点创建相关的dentry */
 	s->s_root = d_make_root(root_inode);
 	if (!s->s_root) {
 		pr_err("proc_fill_super: allocate dentry failed\n");
 		return -ENOMEM;
 	}
 
+	/* 这个是在s_root节点下分配一个 名字为self的dentry，dentry的父dentry为root
+	 * /proc/self
+	 */
 	ret = proc_setup_self(s);
 	if (ret) {
 		return ret;
 	}
+
+	/* 这个是在s_root节点下分配一个 名字为thread-self的dentry，dentry的父dentry为root
+	 * /proc/thread-self
+	 */
 	return proc_setup_thread_self(s);
 }

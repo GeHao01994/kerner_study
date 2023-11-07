@@ -51,6 +51,9 @@ int proc_setup_self(struct super_block *s)
 	struct dentry *self;
 	
 	inode_lock(root_inode);
+	/* 这个是在s_root节点下分配一个 名字为self的dentry，dentry的父dentry为root
+	 * /proc/self
+	 */
 	self = d_alloc_name(s->s_root, "self");
 	if (self) {
 		struct inode *inode = new_inode_pseudo(s);

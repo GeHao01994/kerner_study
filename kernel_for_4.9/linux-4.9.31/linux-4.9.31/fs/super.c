@@ -191,7 +191,10 @@ static struct super_block *alloc_super(struct file_system_type *type, int flags,
 	if (!s)
 		return NULL;
 
+	/* 初始化这个s_mounts链表头 */
 	INIT_LIST_HEAD(&s->s_mounts);
+
+	/* 设置user_namespace */
 	s->s_user_ns = get_user_ns(user_ns);
 
 	if (security_sb_alloc(s))
@@ -203,16 +206,25 @@ static struct super_block *alloc_super(struct file_system_type *type, int flags,
 					&type->s_writers_key[i]))
 			goto fail;
 	}
+
+	/* 初始化wait_unfrozen 等待队列头 */
 	init_waitqueue_head(&s->s_writers.wait_unfrozen);
+	/* 设置默认的后备设备信息描述符 */
 	s->s_bdi = &noop_backing_dev_info;
+	/* 设置flags */
 	s->s_flags = flags;
+	/* 还需要理解，记录一下？*/
 	if (s->s_user_ns != &init_user_ns)
 		s->s_iflags |= SB_I_NODEV;
+	/* 初始化链入到所属文件系统类型的超级块实例链接节点 */
 	INIT_HLIST_NODE(&s->s_instances);
+	/* 文件系统的匿名dentry哈希表头，用于处理远程网络文件系统 */
 	INIT_HLIST_BL_HEAD(&s->s_anon);
 	mutex_init(&s->s_sync_lock);
+	/* 文件系统的所有inode链表的表头 */
 	INIT_LIST_HEAD(&s->s_inodes);
 	spin_lock_init(&s->s_inode_list_lock);
+	/* 文件系统的所有回写inode链表的表头 */
 	INIT_LIST_HEAD(&s->s_inodes_wb);
 	spin_lock_init(&s->s_inode_wblist_lock);
 
@@ -239,14 +251,23 @@ static struct super_block *alloc_super(struct file_system_type *type, int flags,
 	 * subclass.
 	 */
 	down_write_nested(&s->s_umount, SINGLE_DEPTH_NESTING);
+	/* 设置相关引用计数为1 */
 	s->s_count = 1;
+	/* 设置活动引用计数为1 */
 	atomic_set(&s->s_active, 1);
 	mutex_init(&s->s_vfs_rename_mutex);
 	lockdep_set_class(&s->s_vfs_rename_mutex, &type->s_vfs_rename_key);
 	mutex_init(&s->s_dquot.dqio_mutex);
 	mutex_init(&s->s_dquot.dqonoff_mutex);
+	/* 设置文件的最大长度为 MAX_NON_LFS
+	 * #define	MAX_NON_LFS	((1UL<<31) - 1)
+	 */
 	s->s_maxbytes = MAX_NON_LFS;
+	/* 设置默认的超级块操作函数 */
 	s->s_op = &default_op;
+	/* 设置 文件系统文件戳（访问/修改时间等）粒度，以ns为单位
+	 * 所以这里是1s
+	 */
 	s->s_time_gran = 1000000000;
 	s->cleancache_poolid = CLEANCACHE_NO_POOL;
 
@@ -254,6 +275,7 @@ static struct super_block *alloc_super(struct file_system_type *type, int flags,
 	s->s_shrink.scan_objects = super_cache_scan;
 	s->s_shrink.count_objects = super_cache_count;
 	s->s_shrink.batch = 1024;
+	/* 设置相关的内存回收为感知内存节点和感知MEMCG */
 	s->s_shrink.flags = SHRINKER_NUMA_AWARE | SHRINKER_MEMCG_AWARE;
 	return s;
 
@@ -359,9 +381,13 @@ EXPORT_SYMBOL(deactivate_super);
  */
 static int grab_super(struct super_block *s) __releases(sb_lock)
 {
+	/* 增加其引用计数器 */
 	s->s_count++;
 	spin_unlock(&sb_lock);
 	down_write(&s->s_umount);
+	/* 如果s->flags 有MS_BORN 并且s->active不等于0，则将s->active+1
+	 * 所以这个函数最终的目的想让active这个活跃引用计数+1
+	 */
 	if ((s->s_flags & MS_BORN) && atomic_inc_not_zero(&s->s_active)) {
 		put_super(s);
 		return 1;
@@ -477,9 +503,18 @@ struct super_block *sget_userns(struct file_system_type *type,
 retry:
 	spin_lock(&sb_lock);
 	if (test) {
+		/* 查找这个文件系统类型的所有超级块 */
 		hlist_for_each_entry(old, &type->fs_supers, s_instances) {
+			/* sb->s_fs_info == data
+			 * 判断是不是指向同一块内存
+			 * 如果是的话，有可能是同一块super_block
+			 */
 			if (!test(old, data))
 				continue;
+			/* 判断user_namespace 是不是一样的
+			 * 如果不是一样的且如果有这个super_block就销毁这个super_block
+			 * 然后返回一个-EBUSY
+			 */
 			if (user_ns != old->s_user_ns) {
 				spin_unlock(&sb_lock);
 				if (s) {
@@ -488,6 +523,10 @@ retry:
 				}
 				return ERR_PTR(-EBUSY);
 			}
+			/* 这里就是想让active+1.
+			 * 如果原本active为0或者说s->s_flags 没有SB_BORN
+			 * 那么这边就会返回0
+			 */
 			if (!grab_super(old))
 				goto retry;
 			if (s) {
@@ -495,9 +534,12 @@ retry:
 				destroy_super(s);
 				s = NULL;
 			}
+			/* 这边就返回这一个super_block，内核认为这个super_block就找到了，不需要重新弄了 */
 			return old;
 		}
 	}
+
+	/* 如果到这里super_block为空，那么就分配并初始化一个super_block */
 	if (!s) {
 		spin_unlock(&sb_lock);
 		s = alloc_super(type, (flags & ~MS_SUBMOUNT), user_ns);
@@ -505,7 +547,15 @@ retry:
 			return ERR_PTR(-ENOMEM);
 		goto retry;
 	}
-		
+
+	/* 这里和上面那个get是对应的
+	 * sb->s_fs_info = data;
+	 * set_anon_super(sb, NULL);
+	 * set_anon_super的作用如下
+	 * Allocate a block device for filesystems which don't have one.
+	 * Filesystems which don't use real block devices can call this function
+	 * to allocate a virtual block device.
+	 */
 	err = set(s, data);
 	if (err) {
 		spin_unlock(&sb_lock);
@@ -513,11 +563,20 @@ retry:
 		destroy_super(s);
 		return ERR_PTR(err);
 	}
+	/* 设置超级块的文件系统类型 */
 	s->s_type = type;
+
+	/* 将文件系统类型名字赋值给s->s_id
+	 * 对于磁盘文件系统，为块设备名字；否则为文件类型名字
+	 */
 	strlcpy(s->s_id, type->name, sizeof(s->s_id));
+	/* 将新生成的super_block链入到全局的super_blocks链表中 */
 	list_add_tail(&s->s_list, &super_blocks);
+	/* 将新生成的fs_supers链入到所属文件系统类型的fs_supers链表中 */
 	hlist_add_head(&s->s_instances, &type->fs_supers);
+
 	spin_unlock(&sb_lock);
+
 	get_filesystem(type);
 	register_shrinker(&s->s_shrink);
 	return s;
@@ -972,6 +1031,14 @@ static int ns_set_super(struct super_block *sb, void *data)
 	return set_anon_super(sb, NULL);
 }
 
+/* 第一个参数为文件系统类型
+ * 第二个参数为文件系统装载标志
+ * 第三个参数为装载选项
+ * 第四个为namespace
+ * 第五个为user_namespace
+ * 第六个参数为fill_super函数
+ * 其实这个函数的作用就是构造并填充super_block
+ */
 struct dentry *mount_ns(struct file_system_type *fs_type,
 	int flags, void *data, void *ns, struct user_namespace *user_ns,
 	int (*fill_super)(struct super_block *, void *, int))
@@ -989,6 +1056,7 @@ struct dentry *mount_ns(struct file_system_type *fs_type,
 	if (IS_ERR(sb))
 		return ERR_CAST(sb);
 
+	/* 如果super block没有根目录的dentry对象，在这里就填充一个 */
 	if (!sb->s_root) {
 		int err;
 		err = fill_super(sb, data, flags & MS_SILENT ? 1 : 0);
@@ -997,9 +1065,13 @@ struct dentry *mount_ns(struct file_system_type *fs_type,
 			return ERR_PTR(err);
 		}
 
+		/* 至此该super_block就被激活了 */
 		sb->s_flags |= MS_ACTIVE;
 	}
 
+	/* 将这里的sb->s_root 的refcount进行+1 
+	 * 然后返回dentry
+	 */
 	return dget(sb->s_root);
 }
 

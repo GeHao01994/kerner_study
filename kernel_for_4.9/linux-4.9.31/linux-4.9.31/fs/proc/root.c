@@ -81,7 +81,16 @@ int proc_remount(struct super_block *sb, int *flags, char *data)
 	sync_filesystem(sb);
 	return !proc_parse_options(data, pid);
 }
-
+/* 接上篇我们用/proc 来分析
+ * 加载命令为mount -t proc proc /proc
+ * grep proc /proc/mounts
+ * proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+ */
+/* 第一个参数为文件系统类型
+ * 第二个参数为装载标志
+ * 第三个参数为设备名字
+ * 第四个参数为装载选项
+ */
 static struct dentry *proc_mount(struct file_system_type *fs_type,
 	int flags, const char *dev_name, void *data)
 {
@@ -91,6 +100,7 @@ static struct dentry *proc_mount(struct file_system_type *fs_type,
 		ns = data;
 		data = NULL;
 	} else {
+		/* 得到当前进程的pid_namespace结构体*/
 		ns = task_active_pid_ns(current);
 	}
 
