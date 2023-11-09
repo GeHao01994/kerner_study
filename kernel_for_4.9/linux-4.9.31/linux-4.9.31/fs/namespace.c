@@ -598,12 +598,20 @@ int __legitimize_mnt(struct vfsmount *bastard, unsigned seq)
 	struct mount *mnt;
 	if (read_seqretry(&mount_lock, seq))
 		return 1;
+	/* 如果传建立的vfsmount是NULL，说明是不合法的 */
 	if (bastard == NULL)
 		return 0;
+	/* 通过vfsmount得到mount结构体 */
 	mnt = real_mount(bastard);
+	/* 将mnt_count +1
+	 * 如果有SMP,那么就在当前的percpu mntmount+1
+	 */
 	mnt_add_count(mnt, 1);
 	if (likely(!read_seqretry(&mount_lock, seq)))
 		return 0;
+	/* 如果这个mnt_flags已经设置了unmount的标志位
+	 * 那么这里就将刚刚的+1 减去
+	 */
 	if (bastard->mnt_flags & MNT_SYNC_UMOUNT) {
 		mnt_add_count(mnt, -1);
 		return 1;
@@ -633,7 +641,9 @@ struct mount *__lookup_mnt(struct vfsmount *mnt, struct dentry *dentry)
 {
 	struct hlist_head *head = m_hash(mnt, dentry);
 	struct mount *p;
-
+	/* 这个其实就是找mount到dentry下面的mount节点
+	 * 例如你带入/mnt，如果你的/mnt/sda，那么会返回/sda
+	 */
 	hlist_for_each_entry_rcu(p, head, mnt_hash)
 		if (&p->mnt_parent->mnt == mnt && p->mnt_mountpoint == dentry)
 			return p;
@@ -666,7 +676,15 @@ struct vfsmount *lookup_mnt(struct path *path)
 	do {
 		seq = read_seqbegin(&mount_lock);
 		child_mnt = __lookup_mnt(path->mnt, path->dentry);
+		/* 这里的m或者child_mnt并没有带到上面lookup_mnt的函数里面去
+		 * 所以这里如同上面的注释一样
+		 * Then lookup_mnt() on the base /mnt dentry in the root mount will
+		 * return successively the root dentry and vfsmount of /dev/sda1, then
+		 * /dev/sda2, then /dev/sda3, then NULL.
+		 */
 		m = child_mnt ? &child_mnt->mnt : NULL;
+		/* 合法的 mnt ？
+		 */
 	} while (!legitimize_mnt(m, seq));
 	rcu_read_unlock();
 	return m;
@@ -728,16 +746,20 @@ static struct mountpoint *get_mountpoint(struct dentry *dentry)
 {
 	struct mountpoint *mp, *new = NULL;
 	int ret;
-
+	/* 如果它是一个mount节点
+	 * dentry为挂载点 （当dentry为挂载点时 会设置dentry->d_flags 的DCACHE_MOUNTED标志）
+	 */
 	if (d_mountpoint(dentry)) {
 mountpoint:
 		read_seqlock_excl(&mount_lock);
+		/* 从mountpoint hash表 查找mountpoint （dentry计算hash）*/
 		mp = lookup_mountpoint(dentry);
 		read_sequnlock_excl(&mount_lock);
 		if (mp)
 			goto done;
 	}
 
+	/* 如果new为空，则分配一个mountpoint */
 	if (!new)
 		new = kmalloc(sizeof(struct mountpoint), GFP_KERNEL);
 	if (!new)
@@ -745,6 +767,7 @@ mountpoint:
 
 
 	/* Exactly one processes may set d_mounted */
+	/* 将这个dentry设置成mount节点 */
 	ret = d_set_mounted(dentry);
 
 	/* Someone else set d_mounted? */
@@ -760,6 +783,7 @@ mountpoint:
 	read_seqlock_excl(&mount_lock);
 	new->m_dentry = dentry;
 	new->m_count = 1;
+	/* 把它添加到全局的hash表里面去 */
 	hlist_add_head(&new->m_hash, mp_hash(dentry));
 	INIT_HLIST_HEAD(&new->m_list);
 	read_sequnlock_excl(&mount_lock);
@@ -1001,11 +1025,16 @@ vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void 
 	 *  int mnt_flags;
          * } __randomize_layout;
 	 */
+	/* 设置mnt的vfsmount的根dentry */
 	mnt->mnt.mnt_root = root;
+	/* 设置mnt的vfsmount的根super_block */
 	mnt->mnt.mnt_sb = root->d_sb;
+	/* 设置mnt的mountpoint为mnt_root,也就是刚刚赋值的根dentry */
 	mnt->mnt_mountpoint = mnt->mnt.mnt_root;
+	/* 设置mnt_parent 为自己 */
 	mnt->mnt_parent = mnt;
 	lock_mount_hash();
+	/* 把这个mnt链接到对应的super_block的s_mounts链表里 */
 	list_add_tail(&mnt->mnt_instance, &root->d_sb->s_mounts);
 	unlock_mount_hash();
 	return &mnt->mnt;
@@ -1930,6 +1959,7 @@ int count_mounts(struct mnt_namespace *ns, struct mount *mnt)
  *  		   store the parent mount and mountpoint dentry.
  *  		   (done when source_mnt is moved)
  *
+ *  下表解释了将给定类型的源装载附加到给定类型的目标装载时的语义。
  *  NOTE: in the table below explains the semantics when a source mount
  *  of a given type is attached to a destination mount of a given type.
  * ---------------------------------------------------------------------------
@@ -1944,9 +1974,11 @@ int count_mounts(struct mnt_namespace *ns, struct mount *mnt)
  * |          |               |                |                |            |
  * |non-shared| shared (+)    |      private   |      slave (*) |  invalid   |
  * ***************************************************************************
+ * 绑定操作克隆了原装载并装载了这个克隆在目的装载上
  * A bind operation clones the source mount and mounts the clone on the
  * destination mount.
  *
+ * 克隆的装载将传播到目标装载的传播树中的所有装载，并将克隆的装载添加到源装载的对等组中.
  * (++)  the cloned mount is propagated to all the mounts in the propagation
  * 	 tree of the destination mount and the cloned mount is added to
  * 	 the peer group of the source mount.
@@ -1986,6 +2018,11 @@ int count_mounts(struct mnt_namespace *ns, struct mount *mnt)
  * Must be called without spinlocks held, since this function can sleep
  * in allocations.
  */
+
+/* 第一个参数为新的需要挂在的mnt
+ * 第二个参数为path所对应的mount
+ * 第三个传入的path所对应的mountpoint
+ */
 static int attach_recursive_mnt(struct mount *source_mnt,
 			struct mount *dest_mnt,
 			struct mountpoint *dest_mp,
@@ -2001,6 +2038,7 @@ static int attach_recursive_mnt(struct mount *source_mnt,
 	/* Preallocate a mountpoint in case the new mounts need
 	 * to be tucked under other mounts.
 	 */
+	/* 预先分配一个mountpoint，已防新的装载点需要隐藏在其他的挂在下 */
 	smp = get_mountpoint(source_mnt->mnt.mnt_root);
 	if (IS_ERR(smp))
 		return PTR_ERR(smp);
@@ -2012,10 +2050,17 @@ static int attach_recursive_mnt(struct mount *source_mnt,
 			goto out;
 	}
 
+	/* 一般mount默认都是shared属性 */
 	if (IS_MNT_SHARED(dest_mnt)) {
+		//遍历source_mnt树下的mount结构，如果这些mount不支持shared属性并且没有mount group id，那分配一个mount group id
 		err = invent_group_ids(source_mnt, true);
 		if (err)
 			goto out;
+		//遍历dest mount树下的slave  mount组或者share mount组的所有mount，每个这种mount作为dest mount, 同时以source mount为克隆母体
+		//克隆生成一个mount，作为source mount，dest mount和source mount构成父子关系，二者不是本次mount 挂载的原始source mount和dest mount
+		//只是中途生成的，有区别。这个就是传播mount:本次与dest mount同一个slave 或者share mount组的mount，要作为dest mount，本次mount挂载的
+		//原始source mount要作为克隆母体，一一为dest mount们克隆生成一个source mount，这就是mount组传播mount的原理。克隆生成的mount
+		//添加到tree_list链表，下边执行commit_tree()再把这些mount链表添加到各个mount结构有关的链表。
 		err = propagate_mnt(dest_mnt, dest_mp, source_mnt, &tree_list);
 		lock_mount_hash();
 		if (err)
@@ -2025,12 +2070,15 @@ static int attach_recursive_mnt(struct mount *source_mnt,
 	} else {
 		lock_mount_hash();
 	}
+	//一般parent_path为NULL
 	if (parent_path) {
 		detach_mnt(source_mnt, parent_path);
 		attach_mnt(source_mnt, dest_mnt, dest_mp);
 		touch_mnt_namespace(source_mnt->mnt_ns);
 	} else {
+	//设置source_mnt的挂载点目录dentry、mnt_parent竟然为挂点目录所在文件系统的mount，即dest_mnt，还有设置mountpoint
 		mnt_set_mountpoint(dest_mnt, dest_mp, source_mnt);
+	//把source_mnt这个mount结构添加到各个链表，设置mount的文件系统命名空间为父mount的命名空间
 		commit_tree(source_mnt);
 	}
 
@@ -2072,12 +2120,47 @@ static struct mountpoint *lock_mount(struct path *path)
 	struct dentry *dentry = path->dentry;
 retry:
 	inode_lock(dentry->d_inode);
+	/* 如果此dentry不能被mount，直接返回ENOENT
+	 * No such file or directory
+	 */
 	if (unlikely(cant_mount(dentry))) {
 		inode_unlock(dentry->d_inode);
 		return ERR_PTR(-ENOENT);
 	}
 	namespace_lock();
+	/* 找到这个path下面的第一个mnt,如果没有返回NULL
+	 * 这里主要考虑的情况就是一个目录被多个mount
+	 * lookup_mnt - Return the first child mount mounted at path
+	 *
+	 * "First" means first mounted chronologically.  If you create the
+	 * following mounts:
+	 *
+	 * mount /dev/sda1 /mnt
+	 * mount /dev/sda2 /mnt
+	 * mount /dev/sda3 /mnt
+	 *
+	 * Then lookup_mnt() on the base /mnt dentry in the root mount will
+	 * return successively the root dentry and vfsmount of /dev/sda1, then
+	 * /dev/sda2, then /dev/sda3, then NULL.
+	 */
 	mnt = lookup_mnt(path);
+	/* 这里会一直找，直到找到最后一个挂载点
+	 * 其实这里考虑的就是两个不同的文件系统装载实例被装载到同一个
+	 * 目标路径的情况。
+	 * mount -t FILE_SYSTEM_TYPE_A /dev/sda2 /mnt/d
+	 * mount -t FILE_SYSTEM_TYPE_B /dev/sda3 /mnt/d
+	 * 在装载时，原来的装载点目录不一定为空，它可能包含其他的子目录或文件.
+	 * 装载的动作将使得这些子目录和文件被“隐藏”起来，无法访问这些子目录和文件，
+	 * 除非文件系统被卸载，它们再次被“显现”.
+	 * 如果文件系统B和文件系统C先后被装载到文件系统A的同一个装载点的情况
+	 * 那么文件系统B被装载到文件系统A的装载点，而文件系统C则被装载到文件系统B的根节点.
+	 * 当B装载时，vfsmount描述符的mnt_mountpoint域指向文件系统A的装载点所对应的dentry值
+	 * mnt_parent域指向文件系统A装载实例的vfsmount描述符，并通过mnt_child
+	 * 域连接到后者的以mnt_mounts为表头的链表中.
+	 * 文件系统C的装载实例被装载时，实际上它不是被装载到文件系统A的dentry下
+	 * 而是被装载到文件系统B的装载实例上的根dentry上。因此，它的vfsmount
+	 * 描述符的mnt_mountpoint域指向文件系统B的根dentry.
+	 */
 	if (likely(!mnt)) {
 		struct mountpoint *mp = get_mountpoint(dentry);
 		if (IS_ERR(mp)) {
@@ -2090,6 +2173,11 @@ retry:
 	namespace_unlock();
 	inode_unlock(path->dentry->d_inode);
 	path_put(path);
+	/* 如果这个patch已经被mount了，那么这里就拿到他的vfsmount
+	 * 譬如mount /dev/sda1 /mnt
+	 * 这里就拿这个/dev/sda1的mount point
+	 * 同时更改这个时候的dentry
+	 */
 	path->mnt = mnt;
 	dentry = path->dentry = dget(mnt->mnt_root);
 	goto retry;
@@ -2107,6 +2195,10 @@ static void unlock_mount(struct mountpoint *where)
 	inode_unlock(dentry->d_inode);
 }
 
+/* 第一个参数为新的需要挂在的mnt
+ * 第二个参数为path所对应的mount
+ * 第三个传入的path所对应的mountpoint
+ */
 static int graft_tree(struct mount *mnt, struct mount *p, struct mountpoint *mp)
 {
 	if (mnt->mnt.mnt_sb->s_flags & MS_NOUSER)
@@ -2448,10 +2540,12 @@ static int do_add_mount(struct mount *newmnt, struct path *path, int mnt_flags)
 
 	mnt_flags &= ~MNT_INTERNAL_FLAGS;
 
+	/* 得到这个path的最后一个mount点 */
 	mp = lock_mount(path);
 	if (IS_ERR(mp))
 		return PTR_ERR(mp);
 
+	/* 得到path的mount结构体，也确实是我们接下来要mount的parent */
 	parent = real_mount(path->mnt);
 	err = -EINVAL;
 	if (unlikely(!check_mnt(parent))) {
@@ -2464,12 +2558,18 @@ static int do_add_mount(struct mount *newmnt, struct path *path, int mnt_flags)
 	}
 
 	/* Refuse the same filesystem on the same mount point */
+	/* 重复mount是没有意义的
+	 * 将同一个super_block mount到同一目录
+	 */
 	err = -EBUSY;
 	if (path->mnt->mnt_sb == newmnt->mnt.mnt_sb &&
 	    path->mnt->mnt_root == path->dentry)
 		goto unlock;
 
 	err = -EINVAL;
+	/* 如果新的文件系统装载实例的根inode是个符号链接
+	 * 这也是不允许的
+	 */
 	if (d_is_symlink(newmnt->mnt.mnt_root))
 		goto unlock;
 
@@ -2524,7 +2624,7 @@ static int do_new_mount(struct path *path, const char *fstype, int flags,
 		mntput(mnt);
 		return -EPERM;
 	}
-
+	/* real_mount就是通过vfsmount得到mnt结构体 */
 	err = do_add_mount(real_mount(mnt), path, mnt_flags);
 	if (err)
 		mntput(mnt);

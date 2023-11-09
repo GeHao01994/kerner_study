@@ -25,9 +25,13 @@ struct mnt_pcp {
 };
 
 struct mountpoint {
+	/* 散列链表节点成员,将实例链接到全局散列链表 */
 	struct hlist_node m_hash;
+	/* 指向挂载点 dentry 实例(根文件系统中目录项) */
 	struct dentry *m_dentry;
+	/* 链接 mount 实例 */
 	struct hlist_head m_list;
+	/* 挂载点挂载操作的次数 */
 	int m_count;
 };
 
