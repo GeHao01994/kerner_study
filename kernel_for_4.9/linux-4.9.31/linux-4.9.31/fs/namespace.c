@@ -936,42 +936,79 @@ void mnt_change_mountpoint(struct mount *parent, struct mountpoint *mp, struct m
 
 /*
  * vfsmount lock must be held for write
+ *
  */
 static void commit_tree(struct mount *mnt)
 {
+	/* 获取我们source_mnt的父mount */
 	struct mount *parent = mnt->mnt_parent;
 	struct mount *m;
 	LIST_HEAD(head);
+	/* 获取我们父mount的mnt命名空间 */
 	struct mnt_namespace *n = parent->mnt_ns;
 
 	BUG_ON(parent == mnt);
-
+	/* 把head添加到mnt->mnt_list的链表
+	 * 这里的mnt_list是链入到进程名字空间中已装载文件系统链表的“连接件”,
+	 * 链表头为mnt_namespace结构的list域
+	 * 这个head即将是这里的大哥,也就是新的头
+	 */
 	list_add_tail(&head, &mnt->mnt_list);
+	/* 这里是设置新要mount的下面的所有mount过的namespace为父的namespace
+	 * 包括它自己
+	 */
 	list_for_each_entry(m, &head, mnt_list)
 		m->mnt_ns = n;
-
+	/*  然后把它链入到整个mount_namespace的链表里面 */
 	list_splice(&head, n->list.prev);
-
+	/* 因为这里已经入mount了，所以这里可以加上这个数了,然后mounts归0*/
 	n->mounts += n->pending_mounts;
 	n->pending_mounts = 0;
+	/*static void __attach_mnt(struct mount *mnt, struct mount *parent)
+	  {
+		hlist_add_head_rcu(&mnt->mnt_hash,m_hash(&parent->mnt, mnt->mnt_mountpoint));
+		list_add_tail(&mnt->mnt_child, &parent->mnt_mounts);
+	  }
+	 * 所以这里就是链入到全局的hash链表
+	 * 链入到父mount节点的子文件系统的链表
+	 */
+	__attach_mnt(mnt, parent;
+	/* static void touch_mnt_namespace(struct mnt_namespace *ns)
+	 {
+		if (ns) {
+			ns->event = ++event;
+			wake_up_interruptible(&ns->poll);
+		}
+	 }
+	 * 将全局event+1 然后赋值给这个mnt_namespace
+	 * 然后唤醒对应poll函数
+	 */
 
-	__attach_mnt(mnt, parent);
 	touch_mnt_namespace(n);
 }
 
+/* 这段代码虽然很绕，但是考虑到了很多，譬如这个mount下所有的mount */
 static struct mount *next_mnt(struct mount *p, struct mount *root)
 {
+	/* next 就是装载到这个文件系统的目录上所有子文件系统的链表的第一个元素 */
 	struct list_head *next = p->mnt_mounts.next;
+	/* 如果next等于它自己，说明没有东西mount到这个节点下 */
 	if (next == &p->mnt_mounts) {
 		while (1) {
+			/* 如果说它就是root节点，那么就退出了 */
 			if (p == root)
 				return NULL;
+			/* 如果说它不是root节点，也就代表这个子mount下的所有mount都循环了一遍，
+			 * 那么就要给下一个成员了
+			 */
 			next = p->mnt_child.next;
+			/* 如果下一个成员不是p的父亲下的子mount的头，那么退出 */
 			if (next != &p->mnt_parent->mnt_mounts)
 				break;
 			p = p->mnt_parent;
 		}
 	}
+	/* 得到下一个节点的mount结构体 */
 	return list_entry(next, struct mount, mnt_child);
 }
 
@@ -1932,22 +1969,29 @@ static int invent_group_ids(struct mount *mnt, bool recurse)
 
 int count_mounts(struct mnt_namespace *ns, struct mount *mnt)
 {
+	/* 拿到最大的mount数 */
 	unsigned int max = READ_ONCE(sysctl_mount_max);
 	unsigned int mounts = 0, old, pending, sum;
 	struct mount *p;
-
+	/* 算这个下面的所有mount的数目 */
 	for (p = mnt; p; p = next_mnt(p, mnt))
 		mounts++;
-
+	/* 老的mounts的数目 */
 	old = ns->mounts;
+	/* 老的pending的数目 */
 	pending = ns->pending_mounts;
+	/* 算总和 */
 	sum = old + pending;
+	/* 检查还有没有空间可以用 */
 	if ((old > sum) ||
 	    (pending > sum) ||
 	    (max < sum) ||
 	    (mounts > (max - sum)))
 		return -ENOSPC;
-
+	/* 把pending_mounts加上我们的mounts
+	 * 毕竟我们还没有mount上去
+	 * 所以只能算成pending
+	 */
 	ns->pending_mounts = pending + mounts;
 	return 0;
 }
@@ -2018,10 +2062,9 @@ int count_mounts(struct mnt_namespace *ns, struct mount *mnt)
  * Must be called without spinlocks held, since this function can sleep
  * in allocations.
  */
-
 /* 第一个参数为新的需要挂在的mnt
  * 第二个参数为path所对应的mount
- * 第三个传入的path所对应的mountpoint
+ * 第三个参数为我们要mount的mountpoint
  */
 static int attach_recursive_mnt(struct mount *source_mnt,
 			struct mount *dest_mnt,
@@ -2044,12 +2087,16 @@ static int attach_recursive_mnt(struct mount *source_mnt,
 		return PTR_ERR(smp);
 
 	/* Is there space to add these mounts to the mount namespace? */
+	/* 检测namespace有没有空间去添加新的mounts */
 	if (!parent_path) {
 		err = count_mounts(ns, source_mnt);
 		if (err)
 			goto out;
 	}
-
+	/* 这部分还不了解，需要了解的看如下link
+	 * https://lwn.net/Articles/689856/
+	 * https://www.kernel.org/doc/Documentation/filesystems/sharedsubtree.txt
+	 */
 	/* 一般mount默认都是shared属性 */
 	if (IS_MNT_SHARED(dest_mnt)) {
 		//遍历source_mnt树下的mount结构，如果这些mount不支持shared属性并且没有mount group id，那分配一个mount group id
@@ -2061,7 +2108,7 @@ static int attach_recursive_mnt(struct mount *source_mnt,
 		//只是中途生成的，有区别。这个就是传播mount:本次与dest mount同一个slave 或者share mount组的mount，要作为dest mount，本次mount挂载的
 		//原始source mount要作为克隆母体，一一为dest mount们克隆生成一个source mount，这就是mount组传播mount的原理。克隆生成的mount
 		//添加到tree_list链表，下边执行commit_tree()再把这些mount链表添加到各个mount结构有关的链表。
-		err = propagate_mnt(dest_mnt, dest_mp, source_mnt, &tree_list);
+		err = penableropagate_mnt(dest_mnt, dest_mp, source_mnt, &tree_list);
 		lock_mount_hash();
 		if (err)
 			goto out_cleanup_ids;
@@ -2076,7 +2123,26 @@ static int attach_recursive_mnt(struct mount *source_mnt,
 		attach_mnt(source_mnt, dest_mnt, dest_mp);
 		touch_mnt_namespace(source_mnt->mnt_ns);
 	} else {
-	//设置source_mnt的挂载点目录dentry、mnt_parent竟然为挂点目录所在文件系统的mount，即dest_mnt，还有设置mountpoint
+	/*
+	 * vfsmount lock must be held for write
+	 *
+	 * void mnt_set_mountpoint(struct mount *mnt,
+			struct mountpoint *mp,
+			struct mount *child_mnt)
+	 * {
+	 *	将这个挂载点下面的挂在数量+1，对应到我们这情景就是dest_mp，也就是我们要mount的mount_point
+	 *	mp->m_count++;
+	 *	将这个patch对应的mount的count+1
+	 *	mnt_add_count(mnt, 1);	essentially, that's mntget
+		这里设置我们所要mount的挂在节点、父母、以及对应的mount节点
+	 *	child_mnt->mnt_mountpoint = dget(mp->m_dentry);
+	 *	child_mnt->mnt_parent = mnt;
+	 *	child_mnt->mnt_mp = mp;
+	 *	将我们要mount的地方的mount链接到此mount链表下
+	 *	hlist_add_head(&child_mnt->mnt_mp_list, &mp->m_list);
+	 *}
+	 * 
+	 */
 		mnt_set_mountpoint(dest_mnt, dest_mp, source_mnt);
 	//把source_mnt这个mount结构添加到各个链表，设置mount的文件系统命名空间为父mount的命名空间
 		commit_tree(source_mnt);
@@ -2197,7 +2263,7 @@ static void unlock_mount(struct mountpoint *where)
 
 /* 第一个参数为新的需要挂在的mnt
  * 第二个参数为path所对应的mount
- * 第三个传入的path所对应的mountpoint
+ * 第三个参数为我们要mount的mountpoint
  */
 static int graft_tree(struct mount *mnt, struct mount *p, struct mountpoint *mp)
 {
@@ -2540,7 +2606,7 @@ static int do_add_mount(struct mount *newmnt, struct path *path, int mnt_flags)
 
 	mnt_flags &= ~MNT_INTERNAL_FLAGS;
 
-	/* 得到这个path的最后一个mount点 */
+	/* 得到我们关于path的mount点*/
 	mp = lock_mount(path);
 	if (IS_ERR(mp))
 		return PTR_ERR(mp);

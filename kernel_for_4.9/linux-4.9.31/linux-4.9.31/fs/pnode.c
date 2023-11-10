@@ -275,6 +275,11 @@ static int propagate_one(struct mount *m)
  * @source_mnt: source mount.
  * @tree_list : list of heads of trees to be attached.
  */
+/* 第一个参数为path所对应的mount
+ * 第二个参数为我们要mount的mount point
+ * 第三个参数为新的需要挂在的mnt
+ * 第四个为树的链表头
+ */
 int propagate_mnt(struct mount *dest_mnt, struct mountpoint *dest_mp,
 		    struct mount *source_mnt, struct hlist_head *tree_list)
 {
@@ -286,14 +291,25 @@ int propagate_mnt(struct mount *dest_mnt, struct mountpoint *dest_mp,
 	 * propagate_one(); everything is serialized by namespace_sem,
 	 * so globals will do just fine.
 	 */
+	/* 我们不想麻烦地将大量的参数传递给propagate_one（）；
+	 * 所有内容都是由namespace_sem序列化的，所以全局变量会做得很好。
+	 */
 	user_ns = current->nsproxy->mnt_ns->user_ns;
+	/* 将我们last_dest设置成我们path所对应的mount */
 	last_dest = dest_mnt;
+	/* 将我们需要mount的设置成第一个元 */
 	first_source = source_mnt;
+	/*将我们需要mount的设置成最后一个元 */
 	last_source = source_mnt;
+	/* 将我们需要挂在的mnt设置到这里 */
 	mp = dest_mp;
 	list = tree_list;
+	/* mnt_master指向包含从属挂载链表头的mount实例 */
 	dest_master = dest_mnt->mnt_master;
-
+	/* 对每个平等共享装载都调用propagate_one */
+	/* 链入到共享装载循环链表的连接件。阐述propagation的概念。
+	 * 所有在一个对等组（peer Group）中共享中的vfsmount通过mnt_share构成一个循环链表
+	 */
 	/* all peers of dest_mnt, except dest_mnt itself */
 	for (n = next_peer(dest_mnt); n != dest_mnt; n = next_peer(n)) {
 		ret = propagate_one(n);

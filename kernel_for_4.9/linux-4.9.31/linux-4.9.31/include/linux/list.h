@@ -446,6 +446,9 @@ static inline void list_splice_tail_init(struct list_head *list,
  * @head:	the head for your list.
  * @member:	the name of the list_head within the struct.
  */
+/* #define list_first_entry(ptr, type, member) \
+	list_entry((ptr)->next, type, member)
+*/
 #define list_for_each_entry(pos, head, member)				\
 	for (pos = list_first_entry(head, typeof(*pos), member);	\
 	     &pos->member != (head);					\
