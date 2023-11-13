@@ -538,21 +538,40 @@ void path_put(const struct path *path)
 EXPORT_SYMBOL(path_put);
 
 #define EMBEDDED_LEVELS 2
+/* 路径查找使用一个上下文来辅助，这个上下文有两个作用：
+ * 在查找过程中，记录当前查找所作用的路径
+ * 在查找结束后，记录最终的目标路径
+ * 路径查找上下文使用数据结构nameidata，被称为路径查找上下文描述符
+ */
 struct nameidata {
-	/* 保存已找到的路径 */
+	/* 保存已找到的路径
+	 * 它反应了到目前为止的中间结果，也是后续进一步查找的依据.
+	 * 在路径查找之初，将它设置为初始路径。
+	 * 以后每次解析一个分量时，需要更新它以便为解析下一个分量做准备.
+	 * 这样，在最后一个分量解析完毕，它里面记录的就是最终的查找结果.
+	 */
 	struct path	path;
 	/* 路径名中最后一个组件的名字（文件名或目录名，在LOOKUP_PARENT标志位设置时使用）*/
 	struct qstr	last;
-	/* 查询的根路径.一般情况下使用当前进程的根目录，也就是相对某个目录查找，
-	 * 这时该目录作为根目录 */
+	/* 查询的根路径.一般情况下使用当前进程的根目录，也就是相对某个目录查找，这时该目录作为根路径
+	 * 在路径名解析希望知道根路径，检查nd->root.mnt是否为空；
+	 * 如果是，使用nd->root;
+	 * 否则，复制current->fs->root到那里.
+	 */
 	struct path	root;
 	struct inode	*inode; /* path.dentry.d_inode */
 	/* 查询的标志 */
 	unsigned int	flags;
 	unsigned	seq, m_seq;
-	/* 路径名最后一个组件的类型（在LOOKUP_PARENT标志设置时使用）*/
+	/* 路径名最后一个组件的类型（在LOOKUP_PARENT标志设置时使用）
+	 * 如果设置了LOOKUP_PARENT标志，路径查找函数需要关注的是路径中最后分量之前的一个分量，
+	 * 而将最后分量保存下来供调用者处理.这就需要用到路径查找上下文结构的lash域和last_type域，
+	 * 前者纪录路径名最后一个分量的名字，而后者表面最后一个分量的类型.
+	 */
 	int		last_type;
 	/* 当前正在查找的符号链接的嵌套深度 */
+	/* depth域和saved_names域是用于支持符号链接的域，它考虑了符号链接可能出现嵌套的情况。
+	 */
 	unsigned	depth;
 	int		total_link_count;
 	struct saved {
@@ -570,12 +589,19 @@ struct nameidata {
 
 static void set_nameidata(struct nameidata *p, int dfd, struct filename *name)
 {
+	/* 拿到当前的nameidata */
 	struct nameidata *old = current->nameidata;
+	/* 将nameidata的stack指向nameidata的internal */
 	p->stack = p->internal;
+	/* 设置p的dfd */
 	p->dfd = dfd;
+	/* 设置p的filename */
 	p->name = name;
+	/* 将老的total_link_count复制给新的 */
 	p->total_link_count = old ? old->total_link_count : 0;
+	/* 把老的nameidata复制给新的saved */
 	p->saved = old;
+	/* 然后设置当前进程的nameidata为p */
 	current->nameidata = p;
 }
 
@@ -858,7 +884,7 @@ static void set_root(struct nameidata *nd)
 
 	if (nd->flags & LOOKUP_RCU) {
 		unsigned seq;
-
+	/* 设置根目录路径 */
 		do {
 			seq = read_seqcount_begin(&fs->seq);
 			nd->root = fs->root;
@@ -2179,11 +2205,14 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 {
 	int retval = 0;
 	const char *s = nd->name->name;
-
+	/* 如果这里只有一个斜杠 */
+	/* 设置最后一个的类型为ROOT */
 	nd->last_type = LAST_ROOT; /* if there are only slashes... */
 	nd->flags = flags | LOOKUP_JUMPED | LOOKUP_PARENT;
 	nd->depth = 0;
+	/*如果是从root开始查找 */
 	if (flags & LOOKUP_ROOT) {
+		/* 将root的dentry等填充到nd，然后返回name*/
 		struct dentry *root = nd->root.dentry;
 		struct inode *inode = root->d_inode;
 		if (*s) {
@@ -2211,6 +2240,7 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 	nd->path.dentry = NULL;
 
 	nd->m_seq = read_seqbegin(&mount_lock);
+	/* 绝对路径 */
 	if (*s == '/') {
 		if (flags & LOOKUP_RCU)
 			rcu_read_lock();
@@ -2326,6 +2356,9 @@ static int path_lookupat(struct nameidata *nd, unsigned flags, struct path *path
 	return err;
 }
 
+/* filename_lookup(dfd, getname_flags(name, flags, empty),flags, path, NULL);
+ * 从user_path调用下来是filename_lookup(AT_FDCWD,filename,LOOKUP_FOLLOW,patch,NULL)
+ */
 static int filename_lookup(int dfd, struct filename *name, unsigned flags,
 			   struct path *path, struct path *root)
 {
