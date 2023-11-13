@@ -55,6 +55,9 @@ static inline int user_path_at(int dfd, const char __user *name, unsigned flags,
 	return user_path_at_empty(dfd, name, flags, path, NULL);
 }
 
+/* 这里实际上的作用就是将用户传入的路径，譬如/root/mnt 转换成内核专门
+ * 表示文件的path
+ */
 static inline int user_path(const char __user *name, struct path *path)
 {
 	return user_path_at_empty(AT_FDCWD, name, LOOKUP_FOLLOW, path, NULL);

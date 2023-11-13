@@ -2587,10 +2587,15 @@ static inline int break_layout(struct inode *inode, bool wait)
 /* fs/open.c */
 struct audit_names;
 struct filename {
+	/* 指向内嵌的字符串，如果字符串的数目大于PATH_MAX-iname[1]的大小的话就设置为空*/ 
 	const char		*name;	/* pointer to actual string */
+	/* 指向用户空间的字符串的filename */
 	const __user char	*uptr;	/* original userland pointer */
 	struct audit_names	*aname;
+	/* 引用计数 */
 	int			refcnt;
+	/* 如果字符串过小，那么存储内嵌的字符串内存
+	 * 如果大于上述所的，那么就指向从新开辟空间的文件名 */
 	const char		iname[];
 };
 

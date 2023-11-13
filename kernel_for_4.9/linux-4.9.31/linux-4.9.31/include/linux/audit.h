@@ -272,8 +272,13 @@ static inline void audit_syscall_exit(void *pt_regs)
 		__audit_syscall_exit(success, return_code);
 	}
 }
+
+/* 如果定义了CONFIG_AUDITSYSCALL */
 static inline struct filename *audit_reusename(const __user char *name)
 {
+	/* 这里主要是想去current->audit_context下面的names_list链表里面去找name
+	 * 如果找到了就直接返回，没有的话就直接返回NULL
+	 */
 	if (unlikely(!audit_dummy_context()))
 		return __audit_reusename(name);
 	return NULL;

@@ -123,6 +123,11 @@
 
 #define EMBEDDED_NAME_MAX	(PATH_MAX - offsetof(struct filename, iname))
 
+/* 第一个参数为用户空间传进来的文件名
+ * 第二个参数为flag
+ * 第三个参数为空？
+ * 从user_path调用下来是getname_flags(filename,LOOKUP_FOLLOW,NULL)
+ */
 struct filename *
 getname_flags(const char __user *filename, int flags, int *empty)
 {
@@ -130,10 +135,15 @@ getname_flags(const char __user *filename, int flags, int *empty)
 	char *kname;
 	int len;
 
+	/* 这里主要是想去current->audit_context下面的names_list链表里面去找name,
+	 * 如果找到了就直接返回，没有的话就直接返回NULL
+	 */
 	result = audit_reusename(filename);
 	if (result)
 		return result;
-
+	/* 分一个大小为#define PATH_MAX        4096的
+	 * names_cachep的对象
+	 */
 	result = __getname();
 	if (unlikely(!result))
 		return ERR_PTR(-ENOMEM);
@@ -141,10 +151,22 @@ getname_flags(const char __user *filename, int flags, int *empty)
 	/*
 	 * First, try to embed the struct filename inside the names_cache
 	 * allocation
+	 * struct filename {
+	 * const char		*name;     pointer to actual string
+	 * const __user char	*uptr;	   original userland pointer
+	 * int			refcnt;
+	 * struct audit_names	*aname;
+	 * const char		iname[];
+	 *};
 	 */
+	/* 把result的iname赋值给kname */
 	kname = (char *)result->iname;
+	/* 又把kname赋值给name */
+	/* 所以经过上面的两次赋值得到的效果是
+	 * result->name 和 result->iname 指向同一块地址空间
+	 */
 	result->name = kname;
-
+	/* 将filename填充到kname即刚开辟的result的iname块 */
 	len = strncpy_from_user(kname, filename, EMBEDDED_NAME_MAX);
 	if (unlikely(len < 0)) {
 		__putname(result);
@@ -157,8 +179,14 @@ getname_flags(const char __user *filename, int flags, int *empty)
 	 * names_cache allocation for the pathname, and re-do the copy from
 	 * userland.
 	 */
+	/*
+	 * 如果说filename大于EMBEDDED_NAME_MAX的个字符数，name我们就需要
+	 * 重开一段内存来保存
+	 */
 	if (unlikely(len == EMBEDDED_NAME_MAX)) {
+		/* 计算filename的iname[1]成员的便宜，为什么是1呢 */
 		const size_t size = offsetof(struct filename, iname[1]);
+		/* 将result赋值给kname */
 		kname = (char *)result;
 
 		/*
@@ -166,26 +194,31 @@ getname_flags(const char __user *filename, int flags, int *empty)
 		 * result->iname[0] is within the same object and that
 		 * kname can't be equal to result->iname, no matter what.
 		 */
+		/* 分配大小为filename到iname[0]的大小的空间 */
 		result = kzalloc(size, GFP_KERNEL);
 		if (unlikely(!result)) {
 			__putname(kname);
 			return ERR_PTR(-ENOMEM);
 		}
+		/* 所以上面分配的result就接手了filename结构体，让开始分配的空间存储filename字串 */
 		result->name = kname;
+		/* 将其filename拷贝到kname中 */
 		len = strncpy_from_user(kname, filename, PATH_MAX);
 		if (unlikely(len < 0)) {
 			__putname(kname);
 			kfree(result);
 			return ERR_PTR(len);
 		}
+		/* 如果还是不够，说明太长了 */
 		if (unlikely(len == PATH_MAX)) {
 			__putname(kname);
 			kfree(result);
 			return ERR_PTR(-ENAMETOOLONG);
 		}
 	}
-
+	/* 将result的引用计数 +1 */
 	result->refcnt = 1;
+	/* 空的文件名是特别的 */
 	/* The empty path is special. */
 	if (unlikely(!len)) {
 		if (empty)
@@ -195,9 +228,11 @@ getname_flags(const char __user *filename, int flags, int *empty)
 			return ERR_PTR(-ENOENT);
 		}
 	}
-
+	/* 保存原来用户空间的文件名 */
 	result->uptr = filename;
+	/* 设置result->aname为空 */
 	result->aname = NULL;
+	/* 对应上面的audit_reusename,把相关的东西放入current->audit_context下面的names_list链表里面去 */
 	audit_getname(result);
 	return result;
 }
@@ -504,13 +539,20 @@ EXPORT_SYMBOL(path_put);
 
 #define EMBEDDED_LEVELS 2
 struct nameidata {
+	/* 保存已找到的路径 */
 	struct path	path;
+	/* 路径名中最后一个组件的名字（文件名或目录名，在LOOKUP_PARENT标志位设置时使用）*/
 	struct qstr	last;
+	/* 查询的根路径.一般情况下使用当前进程的根目录，也就是相对某个目录查找，
+	 * 这时该目录作为根目录 */
 	struct path	root;
 	struct inode	*inode; /* path.dentry.d_inode */
+	/* 查询的标志 */
 	unsigned int	flags;
 	unsigned	seq, m_seq;
+	/* 路径名最后一个组件的类型（在LOOKUP_PARENT标志设置时使用）*/
 	int		last_type;
+	/* 当前正在查找的符号链接的嵌套深度 */
 	unsigned	depth;
 	int		total_link_count;
 	struct saved {
@@ -2547,6 +2589,16 @@ int path_pts(struct path *path)
 }
 #endif
 
+/* 第一个参数为dfd
+ * 如果给出的路径为相对路径，它被解释为相对基目录dfd所指向的目录（而不是
+ * 相对于调用进程的当前工作目录）
+ * 如果给出的路径为相对路径，并且dfd为特殊值AT_FDCWD，它被解释为相对于调用进程的当前工作目录
+ * 如果给出的路径为绝对路径，dfd被忽略
+ * static inline int user_path(const char __user *name, struct path *path)
+ * {
+ *	 return user_path_at_empty(AT_FDCWD, name, LOOKUP_FOLLOW, path, NULL);
+ * }
+ */
 int user_path_at_empty(int dfd, const char __user *name, unsigned flags,
 		 struct path *path, int *empty)
 {

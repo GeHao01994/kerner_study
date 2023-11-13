@@ -10,7 +10,9 @@ struct vfsmount;
  * 这就是所谓在linux内核中确定文件位置的路径
  */
 struct path {
+	/* 指向文件系统装载对象的指针 */
 	struct vfsmount *mnt;
+	/* 指向目录项对象的指针 */
 	struct dentry *dentry;
 };
 
