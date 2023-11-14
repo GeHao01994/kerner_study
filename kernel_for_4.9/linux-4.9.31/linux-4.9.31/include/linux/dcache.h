@@ -47,8 +47,10 @@ struct qstr {
 		struct {
 			HASH_LEN_DECLARE;
 		};
+		/* 字符串的hash长度 */
 		u64 hash_len;
 	};
+	/* 字符串*/
 	const unsigned char *name;
 };
 

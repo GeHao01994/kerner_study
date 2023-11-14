@@ -1383,46 +1383,69 @@ static int follow_dotdot_rcu(struct nameidata *nd)
 	struct inode *inode = nd->inode;
 
 	while (1) {
+		/* 如果说当前的nameidata等于nameidata的根，那么直接退出 */
 		if (path_equal(&nd->path, &nd->root))
 			break;
+		/* 如果说当前dentry不等于root的dentry */
 		if (nd->path.dentry != nd->path.mnt->mnt_root) {
+			/* 获取当前path的dentry，将其设置到old变量里面去 */
 			struct dentry *old = nd->path.dentry;
+			/* 获得当前dentry的父dentry */
 			struct dentry *parent = old->d_parent;
 			unsigned seq;
-
+			/* 获得父dentry的inode */
 			inode = parent->d_inode;
 			seq = read_seqcount_begin(&parent->d_seq);
 			if (unlikely(read_seqcount_retry(&old->d_seq, nd->seq)))
 				return -ECHILD;
+			/* 将父dentry设置到nameidata的path */
 			nd->path.dentry = parent;
 			nd->seq = seq;
+			/* Verify that a path->dentry is below path->mnt.mnt_root */
 			if (unlikely(!path_connected(&nd->path)))
 				return -ENOENT;
 			break;
 		} else {
+			/* 如果说当前的nameidata等于nameidata的根,说明已经到顶了，需要从一个文件系统装载实例
+			 * 跨越到另外一个文件系统装载实例里面去了
+			 */
+			/* 得到nameidata的mount结构体 */
 			struct mount *mnt = real_mount(nd->path.mnt);
+			/* 得到 mnt的父mount结构体 */
 			struct mount *mparent = mnt->mnt_parent;
+			/* 得到mountpoint的inode */
 			struct dentry *mountpoint = mnt->mnt_mountpoint;
 			struct inode *inode2 = mountpoint->d_inode;
+
 			unsigned seq = read_seqcount_begin(&mountpoint->d_seq);
 			if (unlikely(read_seqretry(&mount_lock, nd->m_seq)))
 				return -ECHILD;
+			/* 如果说parent的文件装载实例vfsmount已经和现在path里面的vfsmount实例一样的
+			 * 说明到顶了
+			 */
 			if (&mparent->mnt == nd->path.mnt)
 				break;
 			/* we know that mountpoint was pinned */
+			/* 我们就切换到另外一个文件装载实例下面去 */
 			nd->path.dentry = mountpoint;
 			nd->path.mnt = &mparent->mnt;
 			inode = inode2;
 			nd->seq = seq;
 		}
 	}
+	/* 判断当前的path下的dentry是不是一个装载节点
+	 * 这里主要考虑的是多个文件系统先后被装载到同一个目录的可能性
+	 * 循环的条件就是当dentry不是装载点为止
+	 */
 	while (unlikely(d_mountpoint(nd->path.dentry))) {
 		struct mount *mounted;
+		/* 在mount_hashtable哈希表中找到装载在当前路径上的文件系统装载实例 */
 		mounted = __lookup_mnt(nd->path.mnt, nd->path.dentry);
 		if (unlikely(read_seqretry(&mount_lock, nd->m_seq)))
 			return -ECHILD;
 		if (!mounted)
 			break;
+		/* 如果找到了，更新path的mnt、dentry inode */
 		nd->path.mnt = &mounted->mnt;
 		nd->path.dentry = mounted->mnt.mnt_root;
 		inode = nd->path.dentry->d_inode;
@@ -1745,6 +1768,7 @@ static inline int may_lookup(struct nameidata *nd)
 
 static inline int handle_dots(struct nameidata *nd, int type)
 {
+	/* 处理..的情况 */
 	if (type == LAST_DOTDOT) {
 		if (!nd->root.mnt)
 			set_root(nd);
@@ -1825,6 +1849,7 @@ static int walk_component(struct nameidata *nd, int flags)
 	 * to be able to know about the current root directory and
 	 * parent relationships.
 	 */
+	/* 如果last_type不是普通路径名 那么就说明里面有. */
 	if (unlikely(nd->last_type != LAST_NORM)) {
 		err = handle_dots(nd, nd->last_type);
 		if (flags & WALK_PUT)
@@ -2101,12 +2126,32 @@ static inline u64 hash_name(const void *salt, const char *name)
  * Returns 0 and nd will have valid dentry and mnt on success.
  * Returns error and drops reference to input namei data on failure.
  */
+/* 名称解析。
+ * 这是一个基本的名称解析函数，将路径名转换为最终的dentry。
+ * 我们期望“base”是正的并且是一个目录。成功时，返回0和nd将具有有效的dentry和mnt。
+ * 返回错误并在失败时删除对输入namei数据的引用
+ */
+/* 第一个参数为指向路径字符串的指针 如/root/mnt
+ * 第二个参数为路径查找上下文
+ * 进入时，上下文设定了最初源路径.
+ * 退出时，函数返回0表示查找成功，这时上下文记录了最终的查找结果.
+ * 在查找出现错误时，函数返回负的错误码.
+ * 查找是一个循环的过程.从保存在上下文的最初查找路径开始，每次都在查找路径
+ * 里查找目标路径名的第一个分量，前一次成功查找完成时，更新上下文的查找路径
+ * 推进目标路径名分量，为后一次继续查找准备.
+ * 不断在内存中构建dentry和inode描述符并设置与父目录dentry和inode之间的关联
+ * 这样逐渐在内存中描述了一个dentry和inode的目录树
+ */
 static int link_path_walk(const char *name, struct nameidata *nd)
 {
 	int err;
-
+	
+	/* 消除要查找的路径中的前导‘/’字符.
+	 * 多个‘/’的作用只相当于一个‘/’.
+	 */
 	while (*name=='/')
 		name++;
+	/*如果路径名只由‘/’组成，那么可以直接返回结果*/
 	if (!*name)
 		return 0;
 
@@ -2118,25 +2163,40 @@ static int link_path_walk(const char *name, struct nameidata *nd)
 		err = may_lookup(nd);
 		if (err)
 			return err;
-
+		/* Calculate the length and hash of the path component, and return the "hash_len" as the result. */
+		/* 得到这个这个组件的name的hash_len */
+		/* 计算当前目录的hash_len，这个变量高4 byte是当前目录name字串长度，
+		 * 低4byte是当前目录（路径）的hash值，hash值的计算是基于当前目录的父目录dentry（nd->path.dentry）来计算的，
+		 * 所以它跟其目录（路径）dentry是关联的
+		 */
 		hash_len = hash_name(nd->path.dentry, name);
-
+		/* LAST_NORM 就是普通的路径名;LAST_ROOT 是“/”;LAST_DOT 和 LAST_DOTDOT 分别代表了 “.”和“..” */
 		type = LAST_NORM;
+		/* 如果name去掉前导‘/’后的第一个字符是.的话 计算其长度来看看是"."，还是“..” */
 		if (name[0] == '.') switch (hashlen_len(hash_len)) {
 			case 2:
+				/* 如果长度等于2，并且第二个也是.，那就是说这个路径名是“..” */
 				if (name[1] == '.') {
+					/* 设置其type为LAST_DOTDOT,也就是.. */
 					type = LAST_DOTDOT;
+					/* 将其flag补上LOOKUP_JUMPED */
 					nd->flags |= LOOKUP_JUMPED;
 				}
 				break;
+				/* 如果长度等于一，那就说明它是. */
 			case 1:
 				type = LAST_DOT;
 		}
+		/* 如果类型是普通路径名的话 */
 		if (likely(type == LAST_NORM)) {
+			/* 设置parent为现在nameidata下面的path的dentry */
 			struct dentry *parent = nd->path.dentry;
+			/* 将flags的LOOKUP_JUMPED 拿掉 */
 			nd->flags &= ~LOOKUP_JUMPED;
+			/* 如果这个dentry_operation具有d_hash函数指针 */
 			if (unlikely(parent->d_flags & DCACHE_OP_HASH)) {
 				struct qstr this = { { .hash_len = hash_len }, .name = name };
+				/* 通过相应文件系统函数parent->d_op->d_hash计算路径节点名的哈希值 */
 				err = parent->d_op->d_hash(parent, &this);
 				if (err < 0)
 					return err;
@@ -2144,26 +2204,33 @@ static int link_path_walk(const char *name, struct nameidata *nd)
 				name = this.name;
 			}
 		}
-
+		/* 将hash_len、name、type 设置到nd的last域里面 */
 		nd->last.hash_len = hash_len;
 		nd->last.name = name;
 		nd->last_type = type;
-
+		/* 让name偏移hash_len个字节，得到下一个路径 */
 		name += hashlen_len(hash_len);
+		/* 如果是空的话，直接返回了 */
 		if (!*name)
 			goto OK;
 		/*
 		 * If it wasn't NUL, we know it was '/'. Skip that
 		 * slash, and continue until no more slashes.
 		 */
+		 /* 如果不是空，跳过所有的/ */
 		do {
 			name++;
 		} while (unlikely(*name == '/'));
+		/* 如果跳过之后是空的,也就是说name是最后一个节点*/
 		if (unlikely(!*name)) {
 OK:
 			/* pathname body, done */
+			/* 如果nd->depth是0 那么这个就是pathname的主体，然后完成了 
+			 * 如果完整路径上没有任何symlink，nd->depth等于0
+			 */
 			if (!nd->depth)
 				return 0;
+			/* 如果depth有数，说明这里面有软链接 */
 			name = nd->stack[nd->depth - 1].name;
 			/* trailing symlink, done */
 			if (!name)
@@ -2171,6 +2238,7 @@ OK:
 			/* last component of nested symlink */
 			err = walk_component(nd, WALK_GET | WALK_PUT);
 		} else {
+			/* 如果说是中间节点 */
 			err = walk_component(nd, WALK_GET);
 		}
 		if (err < 0)
@@ -2216,6 +2284,7 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 		struct dentry *root = nd->root.dentry;
 		struct inode *inode = root->d_inode;
 		if (*s) {
+			/* 如果root不是目录，即不可查找 */
 			if (!d_can_lookup(root))
 				return ERR_PTR(-ENOTDIR);
 			retval = inode_permission(inode, MAY_EXEC);
@@ -2245,11 +2314,13 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 		if (flags & LOOKUP_RCU)
 			rcu_read_lock();
 		set_root(nd);
+		/* 跳到root */
 		if (likely(!nd_jump_root(nd)))
 			return s;
 		nd->root.mnt = NULL;
 		rcu_read_unlock();
 		return ERR_PTR(-ECHILD);
+	/* 如果dfd为AT_FDCWD,且名字为相对路径，则将nd的path域设置为当前进程的工作目录*/
 	} else if (nd->dfd == AT_FDCWD) {
 		if (flags & LOOKUP_RCU) {
 			struct fs_struct *fs = current->fs;
@@ -2269,6 +2340,10 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 		}
 		return s;
 	} else {
+		/* 其他情况，则相对基目录dfd所指向的目录，而不是相对于调用进程的当前工作目录.
+		 * 调用fget_light函数获得对应的文件描述符，取出其f_path域保存在nd的path域，
+		 * 再调用fput_light以便必要时释放对文件描述符的引用
+		 */
 		/* Caller must check execute permissions on the starting path component */
 		struct fd f = fdget_raw(nd->dfd);
 		struct dentry *dentry;
