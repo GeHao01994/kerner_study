@@ -75,18 +75,65 @@ static inline void arch_spin_lock(arch_spinlock_t *lock)
 	unsigned long tmp;
 	u32 newval;
 	arch_spinlock_t lockval;
-
+	/* prefetchw 提前把原子变量的值加载到cache中，以便提高性能 */
 	prefetchw(&lock->slock);
+	/* ARM 使用ldrex 和 strex指令来保证add操作的原子性，指令后缀ex表示exclusive.
+	 * ldrex Rt,[Rn] 把Rn寄存器指向的内存地址的内容加载到Rt寄存器中，监视器会把这个内存地址标记
+	 * 为独占访问，保证其独占的方式来访问。
+	 * strex Rd,Rt,[Rn] 把Rt寄存器的值保存到Rn寄存器指向的内存地址中，Rd保存更新的结果
+	 * 0表示更新成功，1表示失败
+	 * strex是有条件地存储内存，刚才ldrex标志的内存地址被独占的方式存储了
+	 */
+	/* asm它是一个关键字，它表面是一个GNU的扩展.你写的asm，编译器一看到这个关键字就知道
+	 * 你是一个GNU的扩展
+	 * 第二个volatile就是告诉编译器，后面这些汇编指令你就关闭优化.
+	 ******
+	 * 输出部：用于描述在指令部中可以被修改的C语言变量以及约束条件。
+	 * 这里面大家不要被output给迷惑了，看名字还以为是输出的C语言变量呢，其实不是，
+	 * 它这里的output意思是说这个C语言的变量，它能不能在指令部里面被修改。
+	 * 如果它能被修改的话，我们就把它放到OutputOperands里面。
+	 * 它如果是只读的，就把它放到输入部里面，输入部是只读的。
+	 * 所以输出部是用于描述在指令部中可以被修改的C语言变量以及约束条件。
+	 * 怎么去描述输出部呢，实际上它有一个比较特殊的约束条件的，
+	 * 每个输出约束（constraint）通常以“=”号开头，接着的字母表示对操作数类型的说明，然后是关于变量结合的约束。
+	 * 如 “=/+” + 约束修饰符 + 变量
+	 * 输出部通常使用“=”或者“+”作为输出约束，
+	 * 其中“=”表示被修饰的操作符只具有可写属性，
+	 * “+”表示被修饰的操作数只具有可读可写属性，输出部可以是空的
+	 * *****
+	 * 输入部描述的参数是只有只读属性的，不要试图去修改输入部参数的内容，
+	 * 因为GCC编译器假定，输入部的参数的内容在内嵌汇编之前和之后都是一致的。
+	 * 在输入部中不能使用“=”或者“+”约束条件，否则编译器会报错。输入部可以是空的
+	 *******
+	 * 损坏部:“memory”告诉gcc编译器内联汇编指令改变了内存中的值，强迫编译器在执行该汇编代码前存储所有缓存的值,
+	 * 在执行完汇编代码之后重新加载该值，目的是防止编译乱序.
+	 * “cc”表示内嵌汇编代码修改了状态寄存器相关的标志位.
+	 *******
+	 * 指令部中的参数表示：在内嵌汇编代码中，使用%0对应输出部和输入部的第一个参数，使用%1表示第二个参数，依次类推
+	 */
 	__asm__ __volatile__(
+	/* 把&lock->slock 地址的值读入到lockval中去 */
 "1:	ldrex	%0, [%3]\n"
+	/* 将lockval的值 + 1 << TICKET_SHIFT,也就是next+1 */
 "	add	%1, %0, %4\n"
+	/* 将新的lockval的值写到spinlock的slock里面去 */
 "	strex	%2, %1, [%3]\n"
+	/* 如果返回值为0，表示成功，可以退出来了，如果为1表示失败，那么跳到1接着弄 */
 "	teq	%2, #0\n"
 "	bne	1b"
 	: "=&r" (lockval), "=&r" (newval), "=&r" (tmp)
 	: "r" (&lock->slock), "I" (1 << TICKET_SHIFT)
 	: "cc");
-
+	/* 判断变量lockval中的next域和owner域是否相等，如果不相等，则调用wfe
+	 * 指令让CPU进入等待状态。
+	 * 当有CPU唤醒本CPU时，说明该spinlock锁的owner域发生了变化，即有人释放了锁
+	 * 当新的owner域的值和next相等时，即onwer等于该CPU持有的等号牌(lockval.next)时
+	 * 说明该CPU成功获取了spinlock锁，然后返回
+	 */
+	/* ARM体系结构中的WFI(Wait for interrupt)和WFE(Wait for event)指令都是让ARM核进入
+	 * standby睡眠模式.WFI是直到有WFI唤醒事件发生才会唤醒CPU，WFE是直到有WFE唤醒事件发生，
+	 * 这两类事件大部分相同，唯一不同在于WFE可以被其他CPU上的SEV指令唤醒，SEV指令用于修改EVENT寄存器的指令
+	 */
 	while (lockval.tickets.next != lockval.tickets.owner) {
 		wfe();
 		lockval.tickets.owner = ACCESS_ONCE(lock->tickets.owner);
@@ -121,6 +168,13 @@ static inline int arch_spin_trylock(arch_spinlock_t *lock)
 	}
 }
 
+/* arch_spin_unlock函数实现比较简单，首先调用smp_mb内存屏蔽指令
+ * 在ARM中smp_mb函数也是调用dmb指令来保证把调用该函数之前所有的
+ * 访问内存指令都执行完成，然后给lock->owner域加1.
+ * 最后调用dsb_sev函数，该函数有两个作用，一个是调用dsb指令保证
+ * owner域已经写入内存中，二是执行SEV指令来唤醒通过WFE指令进入
+ * 睡眠状态CPU
+ */
 static inline void arch_spin_unlock(arch_spinlock_t *lock)
 {
 	smp_mb();

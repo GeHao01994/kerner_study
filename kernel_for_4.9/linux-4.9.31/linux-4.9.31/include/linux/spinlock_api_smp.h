@@ -122,7 +122,18 @@ static inline unsigned long __raw_spin_lock_irqsave(raw_spinlock_t *lock)
 #endif
 	return flags;
 }
-
+/* 在驱动代码编写过程中常常会遇到这样一个问题，假设某个驱动程序中
+ * 有一个链表a_driver_list，在驱动中很多操作都需要访问和更新该链表
+ * 例如open、ioctl等，因此操作链表的地方就是一个临界区，需要spinlock来保护。
+ * 当处于临界区时发生了外部硬件中断，此时系统暂停当前进程的执行而转去处理该中断。
+ * 假设中断处理程序恰巧也要操作该链表，链表的操作是一个临界区，所以在操作之前
+ * 要调用spin_lock函数来对该链表进行保护.
+ * 中断处理函数试图去获取该spinlock，但因为它已经被别人持有了，于是导致中断处理函数
+ * 进入忙等待状态或者WFE睡眠状态.在中断上下文出现忙等待或者睡眠等待是致命的
+ * 中断处理程序要求“短”和“快”，锁的持有者因为被中断打断而不能尽快释放锁，而中断处理程序
+ * 一直都在忙等待锁，从而导致死锁的发生。Linux内核的spinlock的变种spin_lock_irq函数在
+ * 获取spinlock时关闭本地CPU中断，可以解决该问题
+ */
 static inline void __raw_spin_lock_irq(raw_spinlock_t *lock)
 {
 	local_irq_disable();
@@ -140,6 +151,12 @@ static inline void __raw_spin_lock_bh(raw_spinlock_t *lock)
 
 static inline void __raw_spin_lock(raw_spinlock_t *lock)
 {
+	/* 首先要关闭内核抢占，这是spinlock锁的实现关键点之一.
+	 * 如果spinlock临界区内发生中断，中断返回时会去检查抢占调度，
+	 * 这里有两个问题，一是抢占调度相当于持有锁的进程睡眠，违背了spinlock
+	 * 锁不能睡眠和快速执行完成的设计语义；
+	 * 二是抢占调度进程也有可能会去申请spinlock锁，那么会导致发生死锁
+	 */
 	preempt_disable();
 	spin_acquire(&lock->dep_map, 0, 0, _RET_IP_);
 	LOCK_CONTENDED(lock, do_raw_spin_trylock, do_raw_spin_lock);
