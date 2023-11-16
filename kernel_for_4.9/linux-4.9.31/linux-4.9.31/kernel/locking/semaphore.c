@@ -76,8 +76,15 @@ int down_interruptible(struct semaphore *sem)
 {
 	unsigned long flags;
 	int result = 0;
-
+	/* 这是一个临界区，注意后面的操作会临时打开spinlock，涉及到对信号量中最重要的
+	 * count计数的操作，需要spinlock锁来保护，并且在某些中断处理函数里
+	 * 也可能会操作该信号量，所以需要关闭本地CPU中断，因此这里采用raw_spin_lock_irqsave()函数
+	 */
 	raw_spin_lock_irqsave(&sem->lock, flags);
+	/* 但成功进入该临界区之后，首先判断sem->count是否大于0，如果大于0，则表明
+	 * 当前进程可以成功获取信号量，并将sem->count值减一，然后退出。
+	 * 如果sem->count小于等于0，表明当前进程无法获得该信号量，则调用__down_interruptible函数来执行睡眠等待操作。
+	 */
 	if (likely(sem->count > 0))
 		sem->count--;
 	else
@@ -178,7 +185,10 @@ EXPORT_SYMBOL(down_timeout);
 void up(struct semaphore *sem)
 {
 	unsigned long flags;
-
+	/* 如果信号量上的等待队列sem->wait_list为空，则说明没有进程在等待该信号量，
+	 * 那么直接把sem->count加1即可。
+	 * 如果有进程在等待队列里面睡眠，需要调用_up函数唤醒他们
+	 */
 	raw_spin_lock_irqsave(&sem->lock, flags);
 	if (likely(list_empty(&sem->wait_list)))
 		sem->count++;
@@ -205,12 +215,15 @@ static inline int __sched __down_common(struct semaphore *sem, long state,
 								long timeout)
 {
 	struct task_struct *task = current;
+	/* struct semaphore_waiter 数据结构用于描述获取信号量失败的进程，每个进程会有一个struct semaphore_waiter数据结构，
+	 * 并把当前进程放到信号量sem的成员变量wait_list链表中。
 	struct semaphore_waiter waiter;
 
 	list_add_tail(&waiter.list, &sem->wait_list);
 	waiter.task = task;
 	waiter.up = false;
-
+	/* 接下来的for循环将当前进程task_struct状态设置成TASK_INTERRUPTIBLE，然后调用schedule_timeout主动让出CPU，相当于当前进程睡眠
+	 */
 	for (;;) {
 		if (signal_pending_state(state, task))
 			goto interrupted;
@@ -218,6 +231,12 @@ static inline int __sched __down_common(struct semaphore *sem, long state,
 			goto timed_out;
 		__set_task_state(task, state);
 		raw_spin_unlock_irq(&sem->lock);
+		/* 注意schedule_timeout的参数是MAX_SCHEDULE_TIMEOUT，它并没有实际等待MAX_SCHEDULE_TIMEOUT的时间。
+		 * 当进程在再次被调度回来执行时，schedule_timeout返回并判断
+		 * 在此被调度原因，例如waiter.up为true时，说明睡眠在wait_list队列中的进程被该信号量的UP操作唤醒,
+		 * 进程可以获取该信号量。
+		 * 如果进程是被其他人发送信号（signal）或者超时等原因引发的唤醒，则跳转到timed_out或interrupted标签处，并返回错误码
+		 */
 		timeout = schedule_timeout(timeout);
 		raw_spin_lock_irq(&sem->lock);
 		if (waiter.up)
@@ -237,7 +256,9 @@ static noinline void __sched __down(struct semaphore *sem)
 {
 	__down_common(sem, TASK_UNINTERRUPTIBLE, MAX_SCHEDULE_TIMEOUT);
 }
-
+/* __down_interruptible函数内部调用__down_common函数来实现，state参数为
+ * TASK_INTERRUPTIBLE,timeout参数MAX_SCHEDULE_TIMEOUT是个很大的值LONG_MAX
+ */
 static noinline int __sched __down_interruptible(struct semaphore *sem)
 {
 	return __down_common(sem, TASK_INTERRUPTIBLE, MAX_SCHEDULE_TIMEOUT);
@@ -255,6 +276,12 @@ static noinline int __sched __down_timeout(struct semaphore *sem, long timeout)
 
 static noinline void __sched __up(struct semaphore *sem)
 {
+	/* sem—>wait_list等待队列中第一个成员waiter，这个等待队列是先进先出队列
+	 * 在down操作时通过list_add_tail函数添加到等待队列尾部。
+	 * waiter—>up设置为true，然后调用wake_up_process函数唤醒waiter->task
+	 * 进程。在down函数中，waiter->task进程醒来后会判断waiter->up变量是否为true，如果为true，则直接返回0
+	 * 表示该进程成功获取了信号量
+	 */
 	struct semaphore_waiter *waiter = list_first_entry(&sem->wait_list,
 						struct semaphore_waiter, list);
 	list_del(&waiter->list);
