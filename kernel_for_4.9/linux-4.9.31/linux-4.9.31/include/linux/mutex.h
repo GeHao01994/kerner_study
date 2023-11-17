@@ -48,14 +48,27 @@
  *   locks and tasks (and only those tasks)
  */
 struct mutex {
+	/* 原子计数，
+	 * 1表示没人持有锁；
+	 * 0表示锁被持有
+	 * 负数表示锁被持有有且有人在等待队列中等待
+	 */
 	/* 1: unlocked, 0: locked, negative: locked, possible waiters */
 	atomic_t		count;
+	/* spinlock锁，用于保护wait_list睡眠等待队列 */
 	spinlock_t		wait_lock;
+	/* 用于管理所有在该mutex上睡眠的进程，没有成功获取锁的进程会睡眠在
+	 * 此链表上
+	 */
 	struct list_head	wait_list;
 #if defined(CONFIG_DEBUG_MUTEXES) || defined(CONFIG_MUTEX_SPIN_ON_OWNER)
+	/* 要打开CONFIG_MUTEX_SPIN_ON_OWNER选项才会有owner，用于指向锁
+	 * 持有者的task_struct数据结构
+	 */
 	struct task_struct	*owner;
 #endif
 #ifdef CONFIG_MUTEX_SPIN_ON_OWNER
+	/* 用于实现MCS锁机制 */
 	struct optimistic_spin_queue osq; /* Spinner MCS lock */
 #endif
 #ifdef CONFIG_DEBUG_MUTEXES
