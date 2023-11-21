@@ -21,14 +21,27 @@
 
 struct rw_semaphore;
 
+/* 信号量、spinlock这些有一个明显的缺点，没有区分临界区的读写属性.
+ * 读写锁通常允许多个线程并发地访问临界区，但是写访问只限制一个线程。
+ * 读写锁能有效的提高并发性，在多处理器系统中允许同时有多个读者访问
+ * 共享资源，但写者是排他性，读写锁具有如下特征
+ * 1、允许多个读者同时进入临界区，但同一时刻写者不能进入。
+ * 2、同一时刻只允许一个写着进入临界区。
+ * 3、读者和写者不能同时进入临界区
+ */
 #ifdef CONFIG_RWSEM_GENERIC_SPINLOCK
 #include <linux/rwsem-spinlock.h> /* use a generic implementation */
 #define __RWSEM_INIT_COUNT(name)	.count = RWSEM_UNLOCKED_VALUE
 #else
 /* All arch specific implementations share the same struct */
 struct rw_semaphore {
+	/* count用于表示读写信号量的计数。以前读写信号量的实现用activity来表示,
+	 * activity=0表示没有读者和写者，activety=-1表示有写者，activety>0表示有读者
+	 */
 	atomic_long_t count;
+	/* 链表用于管理所有在该信号量上睡眠的进程，没有成功获得锁的进程会睡眠在这个链表上 */
 	struct list_head wait_list;
+	/* wait_lock 是spinlock变量，用于实现对读写信号量数据结构中count成员的原子操作和保护 */
 	raw_spinlock_t wait_lock;
 #ifdef CONFIG_RWSEM_SPIN_ON_OWNER
 	struct optimistic_spin_queue osq; /* spinner MCS lock */

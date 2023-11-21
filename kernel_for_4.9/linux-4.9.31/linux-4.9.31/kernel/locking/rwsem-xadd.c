@@ -103,8 +103,11 @@ struct rwsem_waiter {
 };
 
 enum rwsem_wake_type {
+	/* 唤醒等待队列头部的waiter(一个writer或者若干个reader) */
 	RWSEM_WAKE_ANY,		/* Wake whatever's at head of wait list */
+	/* 唤醒等待队列头部的若干reader */
 	RWSEM_WAKE_READERS,	/* Wake readers only */
+	/* 同RWSEM_WAKE_READERS,只不过唤醒者已经持有了读写锁 */
 	RWSEM_WAKE_READ_OWNED	/* Waker thread holds the read lock */
 };
 
@@ -132,8 +135,9 @@ static void __rwsem_mark_wake(struct rw_semaphore *sem,
 	 * Take a peek at the queue head waiter such that we can determine
 	 * the wakeup(s) to perform.
 	 */
+	/* 首先从sem->wait_list等待队列中取出第一个排队的waiter,等待队列是先进先出队列 */
 	waiter = list_first_entry(&sem->wait_list, struct rwsem_waiter, list);
-
+	/* 如果第一个排队者是写者，那么直接唤醒它即可，因为只能一个写者独占临界区，具有排他性 */
 	if (waiter->type == RWSEM_WAITING_FOR_WRITE) {
 		if (wake_type == RWSEM_WAKE_ANY) {
 			/*
@@ -154,16 +158,24 @@ static void __rwsem_mark_wake(struct rw_semaphore *sem,
 	 * We prefer to do the first reader grant before counting readers
 	 * so we can bail out early if a writer stole the lock.
 	 */
+	/* 当前进程申请读者锁失败才进入了rwsem_down_read_failed中来，恰好有一个写锁释放了锁。
+	 * 这里有一个关键点，如果有另外一个写者又来申请锁，那么会比较麻烦，代码把这个写者称为“小偷”.
+	 */
 	if (wake_type != RWSEM_WAKE_READ_OWNED) {
 		adjustment = RWSEM_ACTIVE_READ_BIAS;
  try_reader_grant:
+		/* 这里想先下手为强，人为的假装先申请一个读者锁，oldcount反应的是真实的值 */
 		oldcount = atomic_long_fetch_add(adjustment, &sem->count);
+		/* 如果sem->count值小于RWSEM_WAITING_BIAS，说明这个锁被小偷偷走了 */
 		if (unlikely(oldcount < RWSEM_WAITING_BIAS)) {
 			/*
 			 * If the count is still less than RWSEM_WAITING_BIAS
 			 * after removing the adjustment, it is assumed that
 			 * a writer has stolen the lock. We have to undo our
 			 * reader grant.
+			 */
+			/* 既然已经被小偷偷走了，那么只能无法继续唤醒睡眠在等待队列的读者了
+			 * 这里就是sem->count -1,因为上面+1了，所以这里减去1
 			 */
 			if (atomic_long_add_return(-adjustment, &sem->count) <
 			    RWSEM_WAITING_BIAS)
@@ -188,10 +200,15 @@ static void __rwsem_mark_wake(struct rw_semaphore *sem,
 	 */
 	list_for_each_entry_safe(waiter, tmp, &sem->wait_list, list) {
 		struct task_struct *tsk;
-
+		/* 接下来就到了爽局
+		 * 我们开始唤醒了，如果等待者不是RWSEM_WAITING_FOR_WRITE，那说明是读者
+		 * 其实这里就是拉出连续个读者，有这么一种情况
+		 * 读 读 读 写 读
+		 * 那么就捞出前面3个连续的读者
+		 */
 		if (waiter->type == RWSEM_WAITING_FOR_WRITE)
 			break;
-
+		/* 计数，计有多少个读者 */
 		woken++;
 		tsk = waiter->task;
 
@@ -205,7 +222,7 @@ static void __rwsem_mark_wake(struct rw_semaphore *sem,
 		 */
 		smp_store_release(&waiter->task, NULL);
 	}
-
+	/* 更新一下 sem->count的值 */
 	adjustment = woken * RWSEM_ACTIVE_READ_BIAS - adjustment;
 	if (list_empty(&sem->wait_list)) {
 		/* hit end of list above */
@@ -222,22 +239,38 @@ static void __rwsem_mark_wake(struct rw_semaphore *sem,
 __visible
 struct rw_semaphore __sched *rwsem_down_read_failed(struct rw_semaphore *sem)
 {
+	/* adjustmen = -RWSEM_ACTIVE_READ_BIAS = -0x1 = 0xffffffff */
 	long count, adjustment = -RWSEM_ACTIVE_READ_BIAS;
+	/* rwsem_waiter数据结构描述一个获取读写锁失败的"失意者",
+	 * 当前情景是获取读者锁失败 */
 	struct rwsem_waiter waiter;
 	struct task_struct *tsk = current;
 	WAKE_Q(wake_q);
 
 	waiter.task = tsk;
+	/* waiter.type = RWSEM_WAITING_FOR_READ = 1 */
 	waiter.type = RWSEM_WAITING_FOR_READ;
 
 	raw_spin_lock_irq(&sem->wait_lock);
+	/* 如果等待队列没有人，即sem->wait_list链表为空，那么就adjustment加上RWSEM_WAITING_BIAS 0xffff0000
+	 * 为什么等待队列的第一个人要加上RWSEM_WAITING_BIAS，RWSEM_WAITING_BIAS通常用于等待队列中还有其他正在排队的人
+	 * 持有锁和释放锁对count的操作是成对出现的，当判断count值等于RWSEM_WAITING_BIAS时，
+	 * 表面当前已经没有活跃的锁，即没有人持有锁，但有人在等待队列中
+	 */
 	if (list_empty(&sem->wait_list))
 		adjustment += RWSEM_WAITING_BIAS;
 	list_add_tail(&waiter.list, &sem->wait_list);
-
+	/* 函数atomic_add_return()的功能是将原子类型的变量v的值原子地增加i，并返回增加i后的v的值
+	 * count = adjustment + sem->count;
+	 * 其实这里进来的条件是写者拥有了锁,所以这里的初始值count应该是RWSEM_ACTIVE_WRITE_BIAS 加上进入这个函数的条件的时候加了1
+	 * 所以这里就是 -RWSEM_ACTIVE_READ_BIAS + RWSEM_WAITING_BIAS + RWSEM_ACTIVE_WRITE_BIAS + 1 = RWSEM_WAITING_BIAS + RWSEM_ACTIVE_WRITE_BIAS
+	 */
 	/* we're now waiting on the lock, but no longer actively locking */
 	count = atomic_long_add_return(adjustment, &sem->count);
-
+	/* 这里的意思是如果执行上面这行代码之前，
+	 * sem被写锁给释放掉了，那么这里就会返回RWSEM_WAITING_BIAS，
+	 * 所以这里的代码正好捕捉到了这个细节部分
+	 */
 	/*
 	 * If there are no active locks, wake the front queued process(es).
 	 *
@@ -247,6 +280,7 @@ struct rw_semaphore __sched *rwsem_down_read_failed(struct rw_semaphore *sem)
 	if (count == RWSEM_WAITING_BIAS ||
 	    (count > RWSEM_WAITING_BIAS &&
 	     adjustment != -RWSEM_ACTIVE_READ_BIAS))
+		/* __rwsem_mark_wake 函数去唤醒在等待队列中的人们 */
 		__rwsem_mark_wake(sem, RWSEM_WAKE_ANY, &wake_q);
 
 	raw_spin_unlock_irq(&sem->wait_lock);
@@ -304,9 +338,11 @@ static inline bool rwsem_try_write_lock_unqueued(struct rw_semaphore *sem)
 	long old, count = atomic_long_read(&sem->count);
 
 	while (true) {
+		/* 写者释放了锁，那么该锁的sem->count的值应该是0或者是RWSEM_WAITING_BIAS. */
 		if (!(count == 0 || count == RWSEM_WAITING_BIAS))
 			return false;
-
+		/* 为什么要这样，因为有可能锁在这两行中间被偷了 */
+		/* 如果sem->count和count相等，那么加上RWSEM_ACTIVE_WRITE_BIAS的值，返回原来的count的值 */
 		old = atomic_long_cmpxchg_acquire(&sem->count, count,
 				      count + RWSEM_ACTIVE_WRITE_BIAS);
 		if (old == count) {
@@ -325,7 +361,13 @@ static inline bool rwsem_can_spin_on_owner(struct rw_semaphore *sem)
 
 	if (need_resched())
 		return false;
-
+	/* 程序运行到这里并发现sem->owner指向NULL，那么申请写者信号量失败的原因是
+	 * 有一个读者已经持有了该锁，而不是一个写者。因为如果写者成功获取了该锁，那么sem->owner应该指向写者线程的task_struct,
+	 * 该函数返回false,并且应该进入rwsem_down_write_failed函数里的慢车道
+	 * 而不应该在这里自旋等待。另外一种情况是sem->owner成员有设置，说明在这之前
+	 * 有一个线程持有了该写者锁，那就返回该线程的on_cpu值，如果on_cpu为1，说明该线程正在临界区
+	 * 执行中，正是自旋等待的好时机
+	 */
 	rcu_read_lock();
 	owner = READ_ONCE(sem->owner);
 	if (!rwsem_owner_is_writer(owner)) {
@@ -348,11 +390,12 @@ done:
 static noinline bool rwsem_spin_on_owner(struct rw_semaphore *sem)
 {
 	struct task_struct *owner = READ_ONCE(sem->owner);
-
+	/* 如果此时锁的拥有者不是写者呢，那么退出自旋 */
 	if (!rwsem_owner_is_writer(owner))
 		goto out;
 
 	rcu_read_lock();
+	/* 这里会一直监听sem->onwer值是否有修改 */
 	while (sem->owner == owner) {
 		/*
 		 * Ensure we emit the owner->on_cpu, dereference _after_
@@ -361,7 +404,10 @@ static noinline bool rwsem_spin_on_owner(struct rw_semaphore *sem)
 		 * the rcu_read_lock() ensures the memory stays valid.
 		 */
 		barrier();
-
+		/* 如果拥有锁的进程没有在临界区运行，或者说当前进程需要被调度出去
+		 * 如果当前进程有被调度出去的需求时，那么一直自旋下去会浪费CPU；
+		 * 另外也是为了减低系统的延迟
+		 */
 		/* abort spinning when need_resched or owner is not running */
 		if (!owner->on_cpu || need_resched()) {
 			rcu_read_unlock();
@@ -376,6 +422,9 @@ out:
 	 * If there is a new owner or the owner is not set, we continue
 	 * spinning.
 	 */
+	/* 判断拿到新锁的是不是个读者，如果不是读者则返回true
+	 * 也有可能这个锁空出来了
+	 */
 	return !rwsem_owner_is_reader(READ_ONCE(sem->owner));
 }
 
@@ -388,7 +437,7 @@ static bool rwsem_optimistic_spin(struct rw_semaphore *sem)
 	/* sem->wait_lock should not be held when doing optimistic spinning */
 	if (!rwsem_can_spin_on_owner(sem))
 		goto done;
-
+	/* osq_lock函数获取OSQ锁，这和mutex机制里相同 */
 	if (!osq_lock(&sem->osq))
 		goto done;
 
@@ -399,10 +448,16 @@ static bool rwsem_optimistic_spin(struct rw_semaphore *sem)
 	 *  2) readers own the lock as we can't determine if they are
 	 *     actively running or not.
 	 */
+	/* 前面可以看到自旋的前提是被另外一个写者锁抢先成功获取了锁(sem->owner指向写者的task_struct数据结构)
+	 * 并且该写者线程正在临界区中执行，那么期待写者应该尽快释放锁，
+	 * 从而避免进程切换的开销
+	 */
+	 /* rwsem_spin_on_owner 会一直等待写者释放锁 */
 	while (rwsem_spin_on_owner(sem)) {
 		/*
 		 * Try to acquire the lock
 		 */
+		/* 尝试获取锁 */
 		if (rwsem_try_write_lock_unqueued(sem)) {
 			taken = true;
 			break;
@@ -414,6 +469,7 @@ static bool rwsem_optimistic_spin(struct rw_semaphore *sem)
 		 * we're an RT task that will live-lock because we won't let
 		 * the owner complete.
 		 */
+		/* 如果锁被拥有然后需要调度出去，或者当前进程是rt线程 */
 		if (!sem->owner && (need_resched() || rt_task(current)))
 			break;
 
@@ -462,11 +518,12 @@ __rwsem_down_write_failed_common(struct rw_semaphore *sem, int state)
 	struct rwsem_waiter waiter;
 	struct rw_semaphore *ret = sem;
 	WAKE_Q(wake_q);
-
+	/* 因为没有成功获取锁，这里首先把刚才增加的RWSEM_ACTIVE_WRITE_BIAS值再减回去 */
 	/* undo write bias from down_write operation, stop active locking */
 	count = atomic_long_sub_return(RWSEM_ACTIVE_WRITE_BIAS, &sem->count);
 
 	/* do optimistic spinning and steal lock if possible */
+	/* rwsem_optimistic_spin 函数的作用是一直在门外自旋，有机会就下手偷锁 */
 	if (rwsem_optimistic_spin(sem))
 		return sem;
 
@@ -474,6 +531,7 @@ __rwsem_down_write_failed_common(struct rw_semaphore *sem, int state)
 	 * Optimistic spinning failed, proceed to the slowpath
 	 * and block until we can acquire the sem.
 	 */
+	/* 进入慢车道 */
 	waiter.task = current;
 	waiter.type = RWSEM_WAITING_FOR_WRITE;
 
@@ -493,6 +551,9 @@ __rwsem_down_write_failed_common(struct rw_semaphore *sem, int state)
 		 * If there were already threads queued before us and there are
 		 * no active writers, the lock must be read owned; so we try to
 		 * wake any read locks that were queued ahead of us.
+		 */
+		/* 如果count大于RWSEM_WAITING_BIAS说明现在没有活跃的写者锁，即写者已经释放了锁
+		 * 但是有读者已经成功抢先获得了锁，因此调用__rwsem_mark_wake唤醒排在等待队列前面的读者锁
 		 */
 		if (count > RWSEM_WAITING_BIAS) {
 			WAKE_Q(wake_q);

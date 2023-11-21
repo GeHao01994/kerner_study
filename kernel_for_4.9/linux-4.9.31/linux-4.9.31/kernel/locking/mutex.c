@@ -94,10 +94,17 @@ __visible void __sched __mutex_lock_slowpath(atomic_t *lock_count);
  */
 void __sched mutex_lock(struct mutex *lock)
 {
+	/* might_sleep说明有可能会因为未能获取到mutex锁睡眠
+	 * 所以为了避免在spinlock、irq等原子上下文使用
+	 */
 	might_sleep();
 	/*
 	 * The locking fastpath is the 1->0 transition from
 	 * 'unlocked' into 'locked' state.
+	 */
+	/* 进入申请mutex锁的开车道的条件是count计数原子地减1后等于0.
+	 * 如果count计数原子地减1后小于0，说明该锁已经被人持有，那么
+	 * 要进入慢车道__mutex_lock_slowpath
 	 */
 	__mutex_fastpath_lock(&lock->count, __mutex_lock_slowpath);
 	mutex_set_owner(lock);
@@ -221,12 +228,19 @@ ww_mutex_set_context_slowpath(struct ww_mutex *lock,
  * Look out! "owner" is an entirely speculative pointer
  * access and not reliable.
  */
+/* 为什么mutex_spin_on_owner函数可以判断持有锁是否释放了锁？
+ * 在mutex_lock代码中，成功获取了之后会设置lock->owner指向持有锁
+ * 的进程的task_stcuct数据结构，当释放锁时会把lock->owner设置为NULL
+ */
 static noinline
 bool mutex_spin_on_owner(struct mutex *lock, struct task_struct *owner)
 {
 	bool ret = true;
 
 	rcu_read_lock();
+	/* 如果持有者释放了锁，即lock->onwer不指向锁持有者或者说锁持有者
+	 * 发生了变化
+	 */
 	while (lock->owner == owner) {
 		/*
 		 * Ensure we emit the owner->on_cpu, dereference _after_
@@ -235,7 +249,13 @@ bool mutex_spin_on_owner(struct mutex *lock, struct task_struct *owner)
 		 * the rcu_read_lock() ensures the memory stays valid.
 		 */
 		barrier();
-
+		/* 锁持有者没有释放锁，但是锁持有者在领截取被调度出去了，也就是睡眠了.
+		 * 即on_cpu=0
+		 */
+		/* 上面说的这两种情况下，当前进程都应该积极主动退出自旋等待机制.
+		 * 除此之外，如果这个过程中调度器需要调度其他进程，那么当前进程也只能被迫
+		 * 退出自选等待
+		 */
 		if (!owner->on_cpu || need_resched()) {
 			ret = false;
 			break;
@@ -258,6 +278,13 @@ static inline int mutex_can_spin_on_owner(struct mutex *lock)
 
 	if (need_resched())
 		return 0;
+	/* 当进程持有mutex锁时，lock->owner指向该进程的task_struct数据结构，
+	 * task_struct->on_cpu为1时表示锁持有者正在运行，也就是正在临界区中执行，
+	 * 因为锁持有者释放该锁后lock->owner指向NULL。
+	 * 使用RCU机制来构造一个读临界区，主要是为了保护owner指针指向的struct task_struct
+	 * 数据结构不会因为进程被杀之后导致访问ower指针出错，RCU读临界区可以保护
+	 * owner指向的task_struct数据结构在读临界区内不被释放
+	 */
 
 	rcu_read_lock();
 	owner = READ_ONCE(lock->owner);
@@ -276,10 +303,15 @@ static inline int mutex_can_spin_on_owner(struct mutex *lock)
  */
 static inline bool mutex_try_to_acquire(struct mutex *lock)
 {
+	/* 先判断lock->count是否为1，如果是1，那么使用atomic_cmpxchg_acquire
+	 * 函数把count设置为0，成功释放锁
+	 * 为什么不直接调用atomic_cmpxchg_acquire
+	 * 首先atomit_read韩式只是一个简单的读内存，而atomic_cmpxchg函数是
+	 * read-modify-write指令，比atomic_read函数执行时间长很多，并且导致很多cachey一致性问题.
+	 */
 	return !mutex_is_locked(lock) &&
 		(atomic_cmpxchg_acquire(&lock->count, 1, 0) == 1);
 }
-
 /*
  * Optimistic spinning.
  *
@@ -308,6 +340,9 @@ static bool mutex_optimistic_spin(struct mutex *lock,
 {
 	struct task_struct *task = current;
 
+	/* 返回0说明锁持有者并没有正在运行，不符合自旋等待机制的条件.
+	 * 自选等待的条件是持有锁者正在临界区执行，自选等待才有价值.
+	 */
 	if (!mutex_can_spin_on_owner(lock))
 		goto done;
 
@@ -316,9 +351,16 @@ static bool mutex_optimistic_spin(struct mutex *lock,
 	 * acquire the mutex all at once, the spinners need to take a
 	 * MCS (queued) lock first before spinning on the owner field.
 	 */
+	/* 获取一个OSQ锁来进行保护，OSQ锁是自旋锁的一种优化方案，为什么要申请
+	 * OSQ锁呢？因为接下来要自旋等待该锁尽快释放，因此不希望有其他人参与进来一起自旋等待，多人参与自旋等待
+	 * 会导致验证的CPU高速缓存行颠簸。这里把所有在这里等待mutex的参与者放入OSQ锁的队列中，
+	 * 只有队列的第一个等待着可以参与自旋等待
+	 */
 	if (!osq_lock(&lock->osq))
 		goto done;
-
+	/* while循环会一直自旋并判断锁持有者是否释放了锁.
+	 * mutex_spin_on_onwer函数一直自旋等待锁持有者尽快释放锁
+	 */
 	while (true) {
 		struct task_struct *owner;
 
@@ -347,16 +389,16 @@ static bool mutex_optimistic_spin(struct mutex *lock,
 			break;
 
 		/* Try to acquire the mutex if it is unlocked. */
+		/* */
 		if (mutex_try_to_acquire(lock)) {
 			lock_acquired(&lock->dep_map, ip);
 
 			if (use_ww_ctx) {
 				struct ww_mutex *ww;
 				ww = container_of(lock, struct ww_mutex, base);
-
 				ww_mutex_set_context_fastpath(ww, ww_ctx);
 			}
-
+			/* 获得锁之后调用mutex_set_owner函数把owner指向为当前进程的task_struck数据结构 */
 			mutex_set_owner(lock);
 			osq_unlock(&lock->osq);
 			return true;
@@ -368,15 +410,19 @@ static bool mutex_optimistic_spin(struct mutex *lock,
 		 * we're an RT task that will live-lock because we won't let
 		 * the owner complete.
 		 */
+		/* 如果获取锁失败，则只能继续while循环，如果owner为NULL，
+		 * 也有可能是持有锁在成功获取锁和设置owner的间隙中被抢占调度出去，
+		 * 如果当前进程是实时进程或者当前进程需要调度，那么也要退出自旋等待
+		 */
 		if (!owner && (need_resched() || rt_task(task)))
 			break;
-
-		/*
+		 /*
 		 * The cpu_relax() call is a compiler barrier which forces
 		 * everything in this loop to be re-loaded. We don't need
 		 * memory barriers as we'll eventually observe the right
 		 * values at the cost of a few extra spins.
 		 */
+		/* 设置了内存屏障指令，保证每次while循环时都能重新加载变量的值 */
 		cpu_relax_lowlatency();
 	}
 
@@ -516,10 +562,11 @@ __mutex_lock_common(struct mutex *lock, long state, unsigned int subclass,
 		if (unlikely(ww_ctx == READ_ONCE(ww->ctx)))
 			return -EALREADY;
 	}
-
+	/* 关闭抢占 */
 	preempt_disable();
-	mutex_acquire_nest(&lock->dep_map, subclass, 0, nest_lock, ip);
 
+	mutex_acquire_nest(&lock->dep_map, subclass, 0, nest_lock, ip);
+	/* 这里实现了自旋等待的机制 */
 	if (mutex_optimistic_spin(lock, ww_ctx, use_ww_ctx)) {
 		/* got the lock, yay! */
 		preempt_enable();
@@ -532,6 +579,7 @@ __mutex_lock_common(struct mutex *lock, long state, unsigned int subclass,
 	 * Once more, try to acquire the lock. Only try-lock the mutex if
 	 * it is unlocked to reduce unnecessary xchg() operations.
 	 */
+	/* 再尝试获取一次锁，也许可以幸运地成功获取锁，那么就不需要走睡眠唤醒的慢车道 */
 	if (!mutex_is_locked(lock) &&
 	    (atomic_xchg_acquire(&lock->count, 0) == 1))
 		goto skip_wait;
@@ -540,6 +588,7 @@ __mutex_lock_common(struct mutex *lock, long state, unsigned int subclass,
 	debug_mutex_add_waiter(lock, &waiter, task);
 
 	/* add waiting tasks to the end of the waitqueue (FIFO): */
+	/* 把waiter加入mutex等待队列wait_list中，这里实现的是先进先出队列 */
 	list_add_tail(&waiter.list, &lock->wait_list);
 	waiter.task = task;
 
@@ -556,6 +605,9 @@ __mutex_lock_common(struct mutex *lock, long state, unsigned int subclass,
 		 * other waiters. We only attempt the xchg if the count is
 		 * non-negative in order to avoid unnecessary xchg operations:
 		 */
+		/* 每次循环首先尝试是否可以获取锁，如果获取失败，接着往下走
+		 * 注意atomic_xchg_acquire把count值设置为-1，在后面代码中会判断等待队列中是否有等待者
+		 */
 		if (atomic_read(&lock->count) >= 0 &&
 		    (atomic_xchg_acquire(&lock->count, -1) == 1))
 			break;
@@ -564,6 +616,7 @@ __mutex_lock_common(struct mutex *lock, long state, unsigned int subclass,
 		 * got a signal? (This code gets eliminated in the
 		 * TASK_UNINTERRUPTIBLE case.)
 		 */
+		/* 收到了异常信号 此代码在TASK_UNINTERRUPTIBLE情况下被删除 */
 		if (unlikely(signal_pending_state(state, task))) {
 			ret = -EINTR;
 			goto err;

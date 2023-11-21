@@ -119,12 +119,23 @@ static inline void mutex_destroy(struct mutex *lock) {}
 # define __DEP_MAP_MUTEX_INITIALIZER(lockname)
 #endif
 
+
+/* 将mutex的原子计数设置为1，1表示没有人持有锁
+ * 0表示锁被持有
+ * 负数表示锁被持有有且有人在等待队列中等待
+ *****
+ * 初始化mutex的spinlock锁，用于保护wait_list睡眠等待队列
+ *****
+ *初始化mutex的wait_list睡眠等待队列
+ *****
+ */
 #define __MUTEX_INITIALIZER(lockname) \
 		{ .count = ATOMIC_INIT(1) \
 		, .wait_lock = __SPIN_LOCK_UNLOCKED(lockname.wait_lock) \
 		, .wait_list = LIST_HEAD_INIT(lockname.wait_list) \
 		__DEBUG_MUTEX_INITIALIZER(lockname) \
 		__DEP_MAP_MUTEX_INITIALIZER(lockname) }
+
 
 #define DEFINE_MUTEX(mutexname) \
 	struct mutex mutexname = __MUTEX_INITIALIZER(mutexname)

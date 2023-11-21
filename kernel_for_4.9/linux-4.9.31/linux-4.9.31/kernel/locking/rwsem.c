@@ -52,6 +52,19 @@ void __sched down_write(struct rw_semaphore *sem)
 	rwsem_acquire(&sem->dep_map, 0, 0, _RET_IP_);
 
 	LOCK_CONTENDED(sem, __down_write_trylock, __down_write);
+	/* down_write函数在成功获取写者锁后会调用rwsem_set_owner设置sem->owner成员
+	 * 指向当前进程的task_struct数据结构，这要在配置内核打开CONFIG_RWSEM_SPIN_ON_OWNER选项。
+	 * 这个选项的作用在于假设进程A首先持有了sem写者锁，进程B也想获取该锁，那么进程B理应要在
+	 * 等待队列中睡眠等待，但是RWSEM_SPIN_ON_OWNER功能可以让进程一直自旋在门外,等待进程A把锁释放，
+	 * 这样可以避免进程在等待队列睡眠等一系列的开销。比较常见的例子是内存管理的数据结构
+	 * struct mm_struct中有一个类似全局的读写锁mmap_sem,它用于保护进程地址空间的一个读写信号量，
+	 * 很多内存相关的系统调用都需要这个锁来保护，例如sys_mprotect、sys_madvise、sys_brk、
+	 * sys_mmap和缺页中断处理函数do_page_fault等。如果进程A有两个线程，线程1调用mprotect系统调用时
+	 * 在内核空间通过down_write函数成功获取mm_struct->mmap_sem写者锁，这时线程2
+	 * 调用brk系统调用时也同样会调用down_write函数尝试去获取mm_struct->mmap_sem锁，由于线程1还没释放该锁，
+	 * 那么线程2会自旋等待。因为线程2坚信线程1会很快释放mm_struct->mmap_sem锁，线程2没必要走一遍
+	 * 睡眠然后被叫醒的过程，因为这个过程存在一定的开销
+	 */
 	rwsem_set_owner(sem);
 }
 
