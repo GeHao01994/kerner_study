@@ -554,6 +554,11 @@ __rwsem_down_write_failed_common(struct rw_semaphore *sem, int state)
 		 */
 		/* 如果count大于RWSEM_WAITING_BIAS说明现在没有活跃的写者锁，即写者已经释放了锁
 		 * 但是有读者已经成功抢先获得了锁，因此调用__rwsem_mark_wake唤醒排在等待队列前面的读者锁
+		 * 这是怎么推导出来的
+		 * 1、T0 时刻有个写者1持有锁count就等于RWSEM_ACTIVE_WRITE_BIAS，然后T1时刻有个读者获取锁失败，然后他进入了等待队列中
+		 * 因为它是等待队列第一个成员，所以这里需要count=RWSEM_ACTIVE_WRITE_BIAS + RWSEM_WAITING_BIAS,然后这个时候此写者出现了，跑到了这里
+		 * 但是从count还是RWSEM_ACTIVE_WRITE_BIAS + RWSEM_WAITING_BIAS，然后写者把锁给释放出来，count就变成了RWSEM_WAITING_BIAS，这个时候读者
+		 * 把锁抢走了，所以count变成了RWSEM_WAITING_BIAS+1
 		 */
 		if (count > RWSEM_WAITING_BIAS) {
 			WAKE_Q(wake_q);

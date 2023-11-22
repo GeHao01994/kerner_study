@@ -124,7 +124,7 @@ EXPORT_SYMBOL(up_read);
 void up_write(struct rw_semaphore *sem)
 {
 	rwsem_release(&sem->dep_map, 1, _RET_IP_);
-
+	/* rwsem_clear_owner函数清楚sem->owner */
 	rwsem_clear_owner(sem);
 	__up_write(sem);
 }

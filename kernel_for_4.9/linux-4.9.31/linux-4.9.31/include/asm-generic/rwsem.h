@@ -128,6 +128,9 @@ static inline void __up_read(struct rw_semaphore *sem)
  */
 static inline void __up_write(struct rw_semaphore *sem)
 {
+	/* 释放锁需要count减去RWSEM_ACTIVE_WRITE_BIAS，如果sem->count仍然小于0，
+	 * 说明等待队列里面有人在睡眠等待
+	 */
 	if (unlikely(atomic_long_sub_return_release(RWSEM_ACTIVE_WRITE_BIAS,
 				 (atomic_long_t *)&sem->count) < 0))
 		rwsem_wake(sem);
