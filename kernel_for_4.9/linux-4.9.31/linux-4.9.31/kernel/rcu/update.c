@@ -879,7 +879,9 @@ static void early_boot_test_call_rcu_sched(void)
 void rcu_early_boot_tests(void)
 {
 	pr_info("Running RCU self tests\n");
-
+	/* 这里的rcu_self_test、rcu_self_test_bh、rcu_self_test_sched
+	 * 是内核传过来的参数
+	 */
 	if (rcu_self_test)
 		early_boot_test_call_rcu();
 	if (rcu_self_test_bh)

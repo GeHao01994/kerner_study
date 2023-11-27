@@ -92,6 +92,12 @@ struct rcu_state sname##_state = { \
 	.rda = &sname##_data, \
 	.call = cr, \
 	.gp_state = RCU_GP_IDLE, \
+	/* gpnum和completed初始化为（0UL - 300UL）.
+	 * 这两个成员定义为unsigned long类型，为什么这里初始化0UL - 300UL呢？unsigned long类型为什么要定义成负数？
+	 * 以32为CPU为例，unsigned long类型的最大值是ULONG_MAX(~0UL)，即0xffffffff.
+	 * 如果用有符号类型来表示-1，所以（0UL - 300UL）用无符号类型来表示0xfffffed4,用有符号类型来表示是-300。
+	 * gpnum和completed成员在RCU系统中会一直增长，也就是初始化的0xfffffed4(有符号类型等于-300)一直增长到0xffffffff（有符号类型等于-1），然后变成0x0,然后一直增长到0xffffffff，然后有从0x0开始增长，一直循环下去。有符号类型变量有溢出问题，所以这里都使用无符号类型变量。
+	 */
 	.gpnum = 0UL - 300UL, \
 	.completed = 0UL - 300UL, \
 	.orphan_lock = __RAW_SPIN_LOCK_UNLOCKED(&sname##_state.orphan_lock), \
@@ -104,6 +110,7 @@ struct rcu_state sname##_state = { \
 	.exp_wake_mutex = __MUTEX_INITIALIZER(sname##_state.exp_wake_mutex), \
 }
 
+/* 这里初始化rcu_sched_state、rcu_bh_state */
 RCU_STATE_INITIALIZER(rcu_sched, 's', call_rcu_sched);
 RCU_STATE_INITIALIZER(rcu_bh, 'b', call_rcu_bh);
 
@@ -271,7 +278,14 @@ void rcu_bh_qs(void)
 }
 
 static DEFINE_PER_CPU(int, rcu_sched_qs_mask);
-
+/* 如果一个16核的系统，它只有四个CPU比较忙，其他的CPU的负载都很轻。理想情况下，
+ * 余下12个CPU可以一直处于深度睡眠模式以节约能源。然而不幸的是，如果四个忙的CPU
+ * 频繁的执行RCU更新，这12个空闲CPU会被周期性的唤醒，浪费了重要的能源。
+ * 引入这个应该就是解决这个问题的
+ * 通过要求所有CPU操作位于rcu_dynticks结构中的计数器来实现的。不是那么准确的说，
+ * 当相应的CPU处于dynticks idle模式时，计数器的值为偶数，否则是技术。这样
+ * RCU仅仅需要等待rcu_dynticks计数值为奇数的CPU经过静止状态，而不必唤醒正在睡眠的CPU
+ */
 static DEFINE_PER_CPU(struct rcu_dynticks, rcu_dynticks) = {
 	.dynticks_nesting = DYNTICK_TASK_EXIT_IDLE,
 	.dynticks = ATOMIC_INIT(1),
@@ -3746,11 +3760,14 @@ rcu_boot_init_percpu_data(int cpu, struct rcu_state *rsp)
 {
 	unsigned long flags;
 	struct rcu_data *rdp = per_cpu_ptr(rsp->rda, cpu);
+	/* 这是获得这个rnp的第一个节点，也就是根节点 */
 	struct rcu_node *rnp = rcu_get_root(rsp);
 
 	/* Set up local state, ensuring consistent view of global state. */
 	raw_spin_lock_irqsave_rcu_node(rnp, flags);
+	/* rdp->grpmask 是该CPU的rcu_data在相关node的位图上面的bit位 */
 	rdp->grpmask = leaf_node_cpu_bit(rdp->mynode, cpu);
+	/* */
 	rdp->dynticks = &per_cpu(rcu_dynticks, cpu);
 	WARN_ON_ONCE(rdp->dynticks->dynticks_nesting != DYNTICK_TASK_EXIT_IDLE);
 	WARN_ON_ONCE(atomic_read(&rdp->dynticks->dynticks) != 1);
@@ -3810,7 +3827,9 @@ rcu_init_percpu_data(int cpu, struct rcu_state *rsp)
 int rcutree_prepare_cpu(unsigned int cpu)
 {
 	struct rcu_state *rsp;
-
+	/* for_each_rcu_flavor编译系统中所有的struct rcu_state数据结构.
+	 * rcu_init_percpu_data函数初始化每个CPU上的struct rcu_data数据结构
+	 */
 	for_each_rcu_flavor(rsp)
 		rcu_init_percpu_data(cpu, rsp);
 
@@ -4010,21 +4029,42 @@ void rcu_scheduler_starting(void)
  * Compute the per-level fanout, either using the exact fanout specified
  * or balancing the tree, depending on the rcu_fanout_exact boot parameter.
  */
+/* 实际上这里就是计算每一级rcu_node的child的的数目，如果定义了rcu_fanout_exact
+ * 就严格按照定义的宏来
+ * 如果没定义，那么严格按照CPU的数量来
+ */
 static void __init rcu_init_levelspread(int *levelspread, const int *levelcnt)
 {
 	int i;
 
 	if (rcu_fanout_exact) {
+		/* rcu_fanout_leaf = RCU_FANOUT_LEAF,也就是一个子叶子的CPU数量
+		 * int rcu_num_lvls __read_mostly = RCU_NUM_LVLS;
+		 * 所以这里把最后一层设置为rcu_fanout_leaf，没毛病，最后一层下面放了多少CPU就是多少
+		 */
 		levelspread[rcu_num_lvls - 1] = rcu_fanout_leaf;
+		/* 然后依次设置为RCU_FANOUT */
 		for (i = rcu_num_lvls - 2; i >= 0; i--)
 			levelspread[i] = RCU_FANOUT;
 	} else {
 		int ccur;
 		int cprv;
-
+		/* 这里是说将CPU总数设置到cprv */
 		cprv = nr_cpu_ids;
+		/* 如果我们是4个CPU，那么就是define NUM_RCU_LVL_INIT    { NUM_RCU_LVL_0 }
+		 * 也就是levelcnt[0]=NUM_RCU_LVL_0=1
+		 * 如果有512核，那么#  define NUM_RCU_LVL_INIT    { NUM_RCU_LVL_0, NUM_RCU_LVL_1 }
+		 * 也就是levelcnt[0]=NUM_RCU_LVL_0=1
+		 * levelcnt[1]= 512/16=32
+		 */
 		for (i = rcu_num_lvls - 1; i >= 0; i--) {
 			ccur = levelcnt[i];
+			/* 第一次进来的时候 levelspread[rcu_num_lvls - 1] = nr_cpu_ids + （ccur -1 )/ccur
+			 * 如果是4核，那么这里就是levelspread[0]=(4+1-1)/1=4;
+			 * 如果是512核，那么这里就是levelspread[1]=（512 + 32 -1 ）/32 = 16
+			 * 然后就是第二次循环就是把cprv就等于这里的32，ccur = levelcnt[0] = 1
+			 * levelspread[0] = (32 + 1 - 1)/1 = 32
+			 */
 			levelspread[i] = (cprv + ccur - 1) / ccur;
 			cprv = ccur;
 		}
@@ -4036,6 +4076,16 @@ static void __init rcu_init_levelspread(int *levelspread, const int *levelcnt)
  */
 static void __init rcu_init_one(struct rcu_state *rsp)
 {
+	/* 得到NODE的名字和FQS的名字，这里就是根据你CPU的数量来的
+	 * 主要是为了建立RCU tree
+	 * 相关的define可以看include/linux/rcu_node_tree.h
+	 * 假设只有4个CPU，那么这里buf就是 "rcu_node_0" ，fqs就是"rcu_node_fqs_0"
+	 * RCU_NUM_LVLS就是1
+	 * 如果有两层
+	 * 如果有512核,那么就有两层
+	 * buf就是{ "rcu_node_0", "rcu_node_1" }
+	 * fqs就是{ "rcu_node_fqs_0", "rcu_node_fqs_1" }
+	 */
 	static const char * const buf[] = RCU_NODE_NAME_INIT;
 	static const char * const fqs[] = RCU_FQS_NAME_INIT;
 	static struct lock_class_key rcu_node_class[RCU_NUM_LVLS];
@@ -4056,20 +4106,50 @@ static void __init rcu_init_one(struct rcu_state *rsp)
 		panic("rcu_init_one: rcu_num_lvls out of range");
 
 	/* Initialize the level-tracking arrays. */
-
+	/* static int num_rcu_lvl[] = NUM_RCU_LVL_INIT;
+	 * 这里就是RCU的LVL的init,也就是初始化tree的level
+	 * 如果我们是4个CPU，那么就是define NUM_RCU_LVL_INIT    { NUM_RCU_LVL_0 }
+	 * 也就是levelcnt[0]=NUM_RCU_LVL_0=1
+	 * 如果有512核，那么#  define NUM_RCU_LVL_INIT    { NUM_RCU_LVL_0, NUM_RCU_LVL_1 }
+	 * 也就是levelcnt[0]=NUM_RCU_LVL_0=1
+	 * levelcnt[1]= 512/16=32
+	 */
 	for (i = 0; i < rcu_num_lvls; i++)
 		levelcnt[i] = num_rcu_lvl[i];
+	/* 初始化rsp(ruc state point)的level
+	 * 这里的rcu_num_lvls就等于RCU_NUM_LVLS
+	 * 如果是4核这里就等于1
+	 * 如果是512核这里就等于2
+	 * 如果是4核，那么就没有level 1
+	 * 如果是512核，那么rsp->level[1]=rsp->level[0]+levelcnt[0]
+	 * 将rsp->level[]指向每一级的第一个rcu_node.
+	 * rsp->level在RCU_STATE_INITIALIZER(rcu_sched, 's', call_rcu_sched);
+	 * .level = { &sname##_state.node[0] }，就已经初始化了level 0
+	 * 所以这里是在1开始
+	 * 而且rcu_state的node成员是个数组，包含了所有的node,如果有512核心
+	 * 那么这里的node就是NUM_RCU_LVL_0 + NUM_RCU_LVL_1，也就是1+ 512/16=32
+	 * 而这里的level[1]就指向node[1]
+	 */
 	for (i = 1; i < rcu_num_lvls; i++)
 		rsp->level[i] = rsp->level[i - 1] + levelcnt[i - 1];
+	/* 计算每一级rcu_node的child的的数目 */
 	rcu_init_levelspread(levelspread, levelcnt);
 	rsp->flavor_mask = fl_mask;
 	fl_mask <<= 1;
 
 	/* Initialize the elements themselves, starting from the leaves. */
-
+	/* 前面计算了每一个rcu_node的child的数目了
+	 * 这里就开始初始化相关的数据结构了
+	 */
 	for (i = rcu_num_lvls - 1; i >= 0; i--) {
+		/* 这里第一次循环是1，然后乘以最底层的child的数目
+		 * 如果是四核，那么这里就是4
+		 * 如果是512核，那么这里就是[32,16]
+		 */
 		cpustride *= levelspread[i];
+		/* 得到最底层的第一个rcu_node */
 		rnp = rsp->level[i];
+		/* 然后初始化每一个rcu_node */
 		for (j = 0; j < levelcnt[i]; j++, rnp++) {
 			raw_spin_lock_init(&ACCESS_PRIVATE(rnp, lock));
 			lockdep_set_class_and_name(&ACCESS_PRIVATE(rnp, lock),
@@ -4081,13 +4161,29 @@ static void __init rcu_init_one(struct rcu_state *rsp)
 			rnp->completed = rsp->completed;
 			rnp->qsmask = 0;
 			rnp->qsmaskinit = 0;
+			/* 将这个节点最小管理的CPU编号或者group编号设置为j * cpustride
+			 * i的第一次循环
+			 * 如果是4核，那么这里就是 0 * 4 = 0
+			 * 如果是512核，那么这里就是0 * 16 = 0,第二次j的循环，那么这里就是16.....
+			 * 如果是512核，那么i的第二次循环这里就是0
+			 */
 			rnp->grplo = j * cpustride;
+			/* 把这个节点最大管理的CPU编号或者group编号设置为(j+1)*cpustride -1
+			 * i的第一次循环
+			 * 如果是4核，那么这里就是3
+			 * 如果是512核，那么这里就是15,第二次j循环就是31.....
+			 * i的第二次循环，如果是512核，那么这里就是31
+			 */
 			rnp->grphi = (j + 1) * cpustride - 1;
 			if (rnp->grphi >= nr_cpu_ids)
 				rnp->grphi = nr_cpu_ids - 1;
 			if (i == 0) {
+				/* 如果i=0表示已经到顶层了，那么把grpnum设置为0 */
+				/* grpnum为node在上一层node中的编号 */
+				/* grpmask为此node对应父node的qsmask的哪个bit */
 				rnp->grpnum = 0;
 				rnp->grpmask = 0;
+				/* 把父node设置为NULL */
 				rnp->parent = NULL;
 			} else {
 				rnp->grpnum = j % levelspread[i - 1];
@@ -4108,13 +4204,16 @@ static void __init rcu_init_one(struct rcu_state *rsp)
 
 	init_swait_queue_head(&rsp->gp_wq);
 	init_swait_queue_head(&rsp->expedited_wq);
+	/* 拿到最后一层的第一个rcu_node */
 	rnp = rsp->level[rcu_num_lvls - 1];
 	for_each_possible_cpu(i) {
 		while (i > rnp->grphi)
 			rnp++;
+		/* 将他们的rda的mynode辅助给相应的rnp */
 		per_cpu_ptr(rsp->rda, i)->mynode = rnp;
 		rcu_boot_init_percpu_data(i, rsp);
 	}
+	/* 将rcu_state载入到全局变量的rcu_struct_flavors链表里面 */
 	list_add(&rsp->flavors, &rcu_struct_flavors);
 }
 
@@ -4227,6 +4326,12 @@ void __init rcu_init(void)
 
 	rcu_bootup_announce();
 	rcu_init_geometry();
+	/* 系统初始化3个独立的struct rcu_state用于不同场景，分别为rcu_sched_state、rcu_bh_state和rcu_preempt_state.
+	 * 每个struct rcu_state都有一套上述的RCU层次结构。普通上下文RCU使用
+rcu_sched_state状态；
+	 * 软中断上下文则使用rcu_bh_state;
+	 * 如果系统配置了CONFIG_PREEMPT_RCU，那么系统默认使用rcu_preempt_state,它在read_lock期间允许其他进程抢占
+	 */
 	rcu_init_one(&rcu_bh_state);
 	rcu_init_one(&rcu_sched_state);
 	if (dump_tree)
@@ -4240,6 +4345,9 @@ void __init rcu_init(void)
 	 * or the scheduler are operational.
 	 */
 	pm_notifier(rcu_pm_notify, 0);
+	/* 给系统中每个online的CPU都发送一个CPU_UP_PREPARE事件到CPU notifier子系统中。
+	 * 在回调函数rcu_cpu_notify中处理该事件.
+	 */
 	for_each_online_cpu(cpu) {
 		rcutree_prepare_cpu(cpu);
 		rcu_cpu_starting(cpu);
