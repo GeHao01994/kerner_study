@@ -263,20 +263,31 @@ struct rcu_node {
 				/*  rcu_node tree? */
 	/* 指向父节点 */
 	struct rcu_node *parent;
+	/* 在 RCU 读取端临界区中阻塞的任务。 任务被放置在这个列表的头部，旧的在尾部。 */
 	struct list_head blkd_tasks;
 				/* Tasks blocked in RCU read-side critical */
 				/*  section.  Tasks are placed at the head */
 				/*  of this list and age towards the tail. */
+	/* 指向阻塞当前宽限期的第一个任务的指针，如果没有这样的任务，则为 NULL。blkd_tasks 挂在这个链表上 */
 	struct list_head *gp_tasks;
 				/* Pointer to the first task blocking the */
 				/*  current grace period, or NULL if there */
 				/*  is no such task. */
+	/*
+	 * 指向阻塞当前加速宽限期的第一个任务的指针，如果没有这样的任务，则为 NULL
+	 * 如果当前没有加速的宽限期，那么就不可能有任何这样的任务.
+	 */
 	struct list_head *exp_tasks;
 				/* Pointer to the first task blocking the */
 				/*  current expedited grace period, or NULL */
 				/*  if there is no such task.  If there */
 				/*  is no current expedited grace period, */
 				/*  then there can cannot be any such task. */
+	/*
+	 * 指向需要提升优先级的第一个任务的指针，如果此 rcu_node 结构不需要提升优先级,
+	 * 则为 NULL。 如果在这个 rcu_node 结构上没有任务排队阻塞当前的宽限期，那么就
+	 * 不会有这样的任务
+	 */
 	struct list_head *boost_tasks;
 				/* Pointer to first task that needs to be */
 				/*  priority boosted, or NULL if no priority */
@@ -285,14 +296,18 @@ struct rcu_node {
 				/*  queued on this rcu_node structure that */
 				/*  are blocking the current grace period, */
 				/*  there can be no such task. */
+	/* 仅用于利用rt_mutex提高优先级，不用作锁。 */
 	struct rt_mutex boost_mtx;
 				/* Used only for the priority-boosting */
 				/*  side effect, not as a lock. */
+	/* 何时开始boosting(jiffies) */
 	unsigned long boost_time;
 				/* When to start boosting (jiffies). */
+	/* 负责此 rcu_node 结构的优先级提升的 kthread */
 	struct task_struct *boost_kthread_task;
 				/* kthread that takes care of priority */
 				/*  boosting for this rcu_node structure. */
+	/* 用于跟踪的 boost_kthread_task 的状态。 */
 	unsigned int boost_kthread_status;
 				/* State of boost_kthread_task for tracing. */
 	unsigned long n_tasks_boosted;
@@ -479,20 +494,26 @@ struct rcu_data {
 	unsigned long   n_cbs_adopted;  /* RCU cbs adopted from dying CPU */
 	unsigned long	n_force_qs_snap;
 					/* did other CPU force QS recently? */
+	/* 在某一个时刻可以调用的回调函数最大值。在高负载情况下，这个限制增强了系统响应性能。*/
 	long		blimit;		/* Upper limit on a processed batch */
 
 	/* 3) dynticks interface. */
+	/* 与cpu对应的rcu_dynticks结构。*/
 	struct rcu_dynticks *dynticks;	/* Shared per-CPU dynticks state. */
+	/* dynticks->dynticks曾经经历过的值，用于中断处理函数中检查CPU何时经历过一次dynticks idle状态 */
 	int dynticks_snap;		/* Per-GP tracking for dynticks. */
 
 	/* 4) reasons this CPU needed to be kicked by force_quiescent_state */
+	/* 其他CPU由于dynticksidle而标记一次静止状态的次数。*/
 	unsigned long dynticks_fqs;	/* Kicked due to dynticks idle. */
+	/* 其他CPU由于离线而标记一次静止状态的次数。*/
 	unsigned long offline_fqs;	/* Kicked due to being offline. */
 	unsigned long cond_resched_completed;
 					/* Grace period that needs help */
 					/*  from cond_resched(). */
 
 	/* 5) __rcu_pending() statistics. */
+	/* 调用rcu_pending()的次数，在一个非dynticks-idle 的CPU上，每一个jiffy将调用一次这个函数。*/
 	unsigned long n_rcu_pending;	/* rcu_pending() calls since boot. */
 	unsigned long n_rp_core_needs_qs;
 	unsigned long n_rp_report_qs;
@@ -628,6 +649,7 @@ struct rcu_state {
 	struct rcu_head *orphan_donelist;	/* Orphaned callbacks that */
 						/*  are ready to invoke. */
 	struct rcu_head **orphan_donetail;	/* Tail of above. */
+	/* 延迟回调函数的数目 ？ */
 	long qlen_lazy;				/* Number of lazy callbacks. */
 	long qlen;				/* Total number of callbacks. */
 	/* End of fields guarded by orphan_lock. */
@@ -651,26 +673,47 @@ struct rcu_state {
 						/*  force_quiescent_state(). */
 	unsigned long jiffies_kick_kthreads;	/* Time at which to kick */
 						/*  kthreads, if configured. */
+	/* 调用force_quiescent_state() ，并真正进行强制产生静止状态的次数。
+	 * 如果相应的CPU已经完成静止周期，而导致force_quiescent_state()过早退出，是不统计在这个字段中的。
+	 * 这个字段用于跟踪和调试，以 ->fqslock锁进行保护
+	 */
 	unsigned long n_force_qs;		/* Number of calls to */
 						/*  force_quiescent_state(). */
+	/* 由于->fqslock 被其他CPU获得而导致force_quiescent_state() 过早返回的次数的近似值。
+	 * 这个字段用于跟踪和调试，由于它是近似值，因此没有用任何锁进行保护
+	 */
 	unsigned long n_force_qs_lh;		/* ~Number of calls leaving */
 						/*  due to lock unavailable. */
+	/* force_quiescent_state() 成功获得->fqslock 锁，
+	 * 但是随后发现没有正在处理的优雅周期，然后该函数的退出次数。
+	 * 用于调试和跟踪，由->fqslock进行保护
+	 */
 	unsigned long n_force_qs_ngp;		/* Number of calls leaving */
 						/*  due to no GP active. */
+	/* 记录最近的优雅周期开始时间，以jiffies计数。
+	 * 这用于检测卡顿的CPU，但是仅仅在CONFIG_RCU_CPU_STALL_DETECTOR 内核参数选中时才有效。
+	 * 这个字段由根rcu_node的->lock锁进行保护，但是有时不使用锁访问它(但是不修改它)
+	 */
 	unsigned long gp_start;			/* Time at which GP started, */
 						/*  but in jiffies. */
 	unsigned long gp_activity;		/* Time of last GP kthread */
 						/*  activity in jiffies. */
+	/* 这个时间值以jiffies计算，表示当前优雅周期什么时候会变得太长，此时将开始检查CPU卡顿。
+	 * 与->gp_start一样，仅仅在配置了 CONFIG_RCU_CPU_STALL_DETECTOR 内核参数时，这个字段才存在。
+	 * 这个字段由根rcu_node保护，但是有时不使用这个锁而直接访问（但不修改)
+	 */
 	unsigned long jiffies_stall;		/* Time at which to check */
 						/*  for CPU stalls. */
 	unsigned long jiffies_resched;		/* Time at which to resched */
 						/*  a reluctant CPU. */
 	unsigned long n_force_qs_gpstart;	/* Snapshot of n_force_qs at */
 						/*  GP start. */
+	/* 这个值以jiffies计算，最大GP的持续时间 */
 	unsigned long gp_max;			/* Maximum GP duration in */
 						/*  jiffies. */
 	/* 该rcu_state的名字 */
 	const char *name;			/* Name of structure. */
+	/* 缩写的名字 */
 	char abbr;				/* Abbreviated name. */
 	/* 几个独立的rcu_state串成的一个链表 */
 	struct list_head flavors;		/* List of RCU flavors. */
