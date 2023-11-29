@@ -1550,8 +1550,17 @@ void rcu_cpu_stall_reset(void)
 static void init_default_callback_list(struct rcu_data *rdp)
 {
 	int i;
-
+	/* 将nxtlist设置为NULL */
 	rdp->nxtlist = NULL;
+	/* #define RCU_DONE_TAIL	0	Also RCU_WAIT head
+	 * #define RCU_WAIT_TAIL	1	Also RCU_NEXT_READY head
+	 * #define RCU_NEXT_READY_TAIL	2	Also RCU_NEXT head.
+	 * #define RCU_NEXT_TAIL	3	Also RCU_NEXT head.
+	 * #define RCU_NEXT_SIZE	4
+	 *
+	 * 把这四个二级指针都指向rdp->nxtlist
+	 * 然后rdp->nxtlist初始化为NULL
+	 */
 	for (i = 0; i < RCU_NEXT_SIZE; i++)
 		rdp->nxttail[i] = &rdp->nxtlist;
 }
@@ -2194,6 +2203,9 @@ static int __noreturn rcu_gp_kthread(void *arg)
 			trace_rcu_grace_period(rsp->name,
 					       READ_ONCE(rsp->gpnum),
 					       TPS("reqwait"));
+			/* 睡眠等待，唤醒的条件是rsp->gp_flags要设置为RCU_GP_FLAG_INIT标志位，
+			 * 这是初始化一个GP的请求
+			 */
 			rsp->gp_state = RCU_GP_WAIT_GPS;
 			swait_event_interruptible(rsp->gp_wq,
 						 READ_ONCE(rsp->gp_flags) &
@@ -2881,6 +2893,8 @@ void rcu_check_callbacks(int user)
 		rcu_bh_qs();
 	}
 	rcu_preempt_check_callbacks();
+	/* rcu_pengding函数会检查本地CPU上所有的rcu_state对应的rcu_data上有没有事情需要处理
+	 * 如果有就调用invoke_rcu_core产生一个rcu中断 */
 	if (rcu_pending())
 		invoke_rcu_core();
 	if (user)
@@ -3131,6 +3145,11 @@ static void rcu_leak_callback(struct rcu_head *rhp)
  * a CPU only if that CPU is a no-CBs CPU.  Currently, only _rcu_barrier()
  * is expected to specify a CPU.
  */
+/* __call_rcu__call_rcu函数的第一个参数head指rcu_head数据结构，通常被RCU保护的数据结构
+ * 都内嵌一个struct rcu_head结构；
+ * 第二个参数是回调函数指针，等之前的RCU读者都执行完成后，即宽限期结束之后调用该回调函数来做销毁动作。
+ * 第三个参数是指在哪个rcu_state上执行.
+ */
 static void
 __call_rcu(struct rcu_head *head, rcu_callback_t func,
 	   struct rcu_state *rsp, int cpu, bool lazy)
@@ -3155,6 +3174,7 @@ __call_rcu(struct rcu_head *head, rcu_callback_t func,
 	 * a quiescent state betweentimes.
 	 */
 	local_irq_save(flags);
+	/* 获得该CPU的rcu_data */
 	rdp = this_cpu_ptr(rsp->rda);
 
 	/* Add the callback to our list. */
@@ -3163,6 +3183,7 @@ __call_rcu(struct rcu_head *head, rcu_callback_t func,
 
 		if (cpu != -1)
 			rdp = per_cpu_ptr(rsp->rda, cpu);
+
 		if (likely(rdp->mynode)) {
 			/* Post-boot, so this should be for a no-CBs CPU. */
 			offline = !__call_rcu_nocb(rdp, head, lazy, flags);
@@ -3180,12 +3201,14 @@ __call_rcu(struct rcu_head *head, rcu_callback_t func,
 		if (!likely(rdp->nxtlist))
 			init_default_callback_list(rdp);
 	}
+	/* 将rdp->qlen加一 */
 	WRITE_ONCE(rdp->qlen, rdp->qlen + 1);
 	if (lazy)
 		rdp->qlen_lazy++;
 	else
 		rcu_idle_count_callbacks_posted();
 	smp_mb();  /* Count before adding callback for rcu_barrier(). */
+	/* head把这个加入到rcu_data的nxttail链表中 */
 	*rdp->nxttail[RCU_NEXT_TAIL] = head;
 	rdp->nxttail[RCU_NEXT_TAIL] = &head->next;
 
@@ -3975,6 +3998,7 @@ static int __init rcu_spawn_gp_kthread(void)
 	struct sched_param sp;
 	struct task_struct *t;
 
+	/* 优先级0~99给实时进程使用 */
 	/* Force priority into range. */
 	if (IS_ENABLED(CONFIG_RCU_BOOST) && kthread_prio < 1)
 		kthread_prio = 1;
@@ -3988,6 +4012,7 @@ static int __init rcu_spawn_gp_kthread(void)
 
 	rcu_scheduler_fully_active = 1;
 	for_each_rcu_flavor(rsp) {
+		/* 为每一个rcu_state创建一个rcu_gp_thread,名字为rsp的名字 */
 		t = kthread_create(rcu_gp_kthread, rsp, "%s", rsp->name);
 		BUG_ON(IS_ERR(t));
 		rnp = rcu_get_root(rsp);
@@ -4000,6 +4025,10 @@ static int __init rcu_spawn_gp_kthread(void)
 		raw_spin_unlock_irqrestore_rcu_node(rnp, flags);
 		wake_up_process(t);
 	}
+	/* nocb是指某些CPU是无回调的。当需要使用回调机制的时，
+	 * 把该工作转移到其他CPU，用以减轻nocb cpu的负载
+	 * 参数rcu_nocbs=cpulist可以指定
+	 */
 	rcu_spawn_nocb_kthreads();
 	rcu_spawn_boost_kthreads();
 	return 0;

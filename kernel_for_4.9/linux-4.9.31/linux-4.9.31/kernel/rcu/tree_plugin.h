@@ -644,6 +644,7 @@ static void rcu_preempt_do_callbacks(void)
 /*
  * Queue a preemptible-RCU callback for invocation after a grace period.
  */
+/* RCU写者程序通常需要调用call_rcu、call_rcu_bh或call_rcu_sched等函数来通知RCU系统注册一个RCU回调函数 */
 void call_rcu(struct rcu_head *head, rcu_callback_t func)
 {
 	__call_rcu(head, func, rcu_state_p, -1, 0);
@@ -1836,10 +1837,14 @@ static void __call_rcu_nocb_enqueue(struct rcu_data *rdp,
 	struct task_struct *t;
 
 	/* Enqueue the callback on the nocb list and update counts. */
+	/* 在nocb list排队callback，更新nocb_q_count*/
 	atomic_long_add(rhcount, &rdp->nocb_q_count);
 	/* rcu_barrier() relies on ->nocb_q_count add before xchg. */
+	/* 让rdp->nocbtail = rhtp */
 	old_rhpp = xchg(&rdp->nocb_tail, rhtp);
+	/* 将rhp写入old_rhpp，这样其实就把他们连起来了 */
 	WRITE_ONCE(*old_rhpp, rhp);
+	/* 将nocb_q_count_lazy + rhcount_lazy */
 	atomic_long_add(rhcount_lazy, &rdp->nocb_q_count_lazy);
 	smp_mb__after_atomic(); /* Store *old_rhpp before _wake test. */
 
@@ -1850,7 +1855,9 @@ static void __call_rcu_nocb_enqueue(struct rcu_data *rdp,
 				    TPS("WakeNotPoll"));
 		return;
 	}
+	/* 读取rdp->nocb_q_count，也就是callback的数量 */
 	len = atomic_long_read(&rdp->nocb_q_count);
+	/* 如果之前的rdp->nocb_tail等于rdp->nocb_head，那么说明之前空的 */
 	if (old_rhpp == &rdp->nocb_head) {
 		if (!irqs_disabled_flags(flags)) {
 			/* ... if queue was empty ... */
@@ -1893,7 +1900,7 @@ static void __call_rcu_nocb_enqueue(struct rcu_data *rdp,
 static bool __call_rcu_nocb(struct rcu_data *rdp, struct rcu_head *rhp,
 			    bool lazy, unsigned long flags)
 {
-
+	/* 如果此CPU不是nocb cpu就返回false */
 	if (!rcu_is_nocb_cpu(rdp->cpu))
 		return false;
 	__call_rcu_nocb_enqueue(rdp, rhp, &rhp->next, 1, lazy, flags);
@@ -2006,6 +2013,7 @@ wait_again:
 
 	/* Wait for callbacks to appear. */
 	if (!rcu_nocb_poll) {
+		/* 如果rcu_nocb_poll设置为false，那么这里就进入睡眠，直到rcu_data里面的nocb_leader_sleep设置为false */
 		trace_rcu_nocb_wake(my_rdp->rsp->name, my_rdp->cpu, "Sleep");
 		swait_event_interruptible(my_rdp->nocb_wq,
 				!READ_ONCE(my_rdp->nocb_leader_sleep));
@@ -2020,13 +2028,19 @@ wait_again:
 	 * We are our own first follower.  Any CBs found are moved to
 	 * nocb_gp_head, where they await a grace period.
 	 */
+	/* 每次通过以下循环都会检查CBS的follower,我们是自己的第一个follower.
+	 * 发现的任何CBs都会转移到nocb_gp_head，等待一个GP.
+	 */
 	gotcbs = false;
 	for (rdp = my_rdp; rdp; rdp = rdp->nocb_next_follower) {
+		/* 将rdp->nocb_head给nocb_gp_head */
 		rdp->nocb_gp_head = READ_ONCE(rdp->nocb_head);
 		if (!rdp->nocb_gp_head)
 			continue;  /* No CBs here, try next follower. */
-
+		/* 将所有的callbacks移动到wait-for-GP 链表，那里是空的 */
 		/* Move callbacks to wait-for-GP list, which is empty. */
+		/* 将nocb_head赋值为空,然后将rdp->nocb_tail也设置为NULL
+		 * rdp->nocb_gp_tail得到了之前的rdp->nocb_tail */
 		WRITE_ONCE(rdp->nocb_head, NULL);
 		rdp->nocb_gp_tail = xchg(&rdp->nocb_tail, &rdp->nocb_head);
 		gotcbs = true;
@@ -2035,6 +2049,7 @@ wait_again:
 	/*
 	 * If there were no callbacks, sleep a bit, rescan after a
 	 * memory barrier, and go retry.
+	 * 到这里我们还没有callback，那么睡一会，等下重新扫描一边
 	 */
 	if (unlikely(!gotcbs)) {
 		if (!rcu_nocb_poll)
@@ -2049,6 +2064,7 @@ wait_again:
 		for (rdp = my_rdp; rdp; rdp = rdp->nocb_next_follower)
 			if (READ_ONCE(rdp->nocb_head)) {
 				/* Found CB, so short-circuit next wait. */
+				/* 找到了CB，不能在睡了 */
 				my_rdp->nocb_leader_sleep = false;
 				break;
 			}
@@ -2074,9 +2090,12 @@ wait_again:
 			continue; /* No CBs, so no need to wake follower. */
 
 		/* Append callbacks to follower's "done" list. */
+		/* 将nocb_gp_tail给到nocb_follower_tail尾 */
 		tail = xchg(&rdp->nocb_follower_tail, rdp->nocb_gp_tail);
+		/* 然后把头给到尾 */
 		*tail = rdp->nocb_gp_head;
 		smp_mb__after_atomic(); /* Store *tail before wakeup. */
+		/* 如果follwer的list是空的，那么唤醒follower */
 		if (rdp != my_rdp && tail == &rdp->nocb_follower_head) {
 			/*
 			 * List was empty, wake up the follower.
@@ -2127,6 +2146,11 @@ static void nocb_follower_wait(struct rcu_data *rdp)
  * callbacks queued by the corresponding no-CBs CPU, however, there is
  * an optional leader-follower relationship so that the grace-period
  * kthreads don't have to do quite so many wakeups.
+ */
+/* Per-rcu_data线程，只针对于no-CBs CPUs
+ * 每个线程调用在相应的no-CBs CPU排队的callback
+ * 然而，这里有一个可选的leader-follower关系以至于GP线程不必要那么
+ * 频繁的唤醒
  */
 static int rcu_nocb_kthread(void *arg)
 {
@@ -2225,7 +2249,7 @@ void __init rcu_init_nohz(void)
 			return;
 		}
 		have_rcu_nocb_mask = true;
-	}
+	}rcu_organize_nocb_kthreads
 	if (!have_rcu_nocb_mask)
 		return;
 
@@ -2285,9 +2309,10 @@ static void rcu_spawn_one_nocb_kthread(struct rcu_state *rsp, int cpu)
 	 * If this isn't a no-CBs CPU or if it already has an rcuo kthread,
 	 * then nothing to do.
 	 */
+	/* 如果这不是个no-CBs CPU或者它早就有了rcuo内核线程，那没事可做 */
 	if (!rcu_is_nocb_cpu(cpu) || rdp_spawn->nocb_kthread)
 		return;
-
+	/* 如果我们首先产生leader,重组 */
 	/* If we didn't spawn the leader first, reorganize! */
 	rdp_old_leader = rdp_spawn->nocb_leader;
 	if (rdp_old_leader != rdp_spawn && !rdp_old_leader->nocb_kthread) {
@@ -2309,6 +2334,7 @@ static void rcu_spawn_one_nocb_kthread(struct rcu_state *rsp, int cpu)
 	}
 
 	/* Spawn the kthread for this CPU and RCU flavor. */
+	/* 创建rcuo线程，为这个rcu_data */
 	t = kthread_run(rcu_nocb_kthread, rdp_spawn,
 			"rcuo%c/%d", rsp->abbr, cpu);
 	BUG_ON(IS_ERR(t));
@@ -2334,6 +2360,10 @@ static void rcu_spawn_all_nocb_kthreads(int cpu)
  * non-boot CPUs come online -- if this changes, we will need to add
  * some mutual exclusion.
  */
+/* 一旦调度器开始运行，对所有在线的on-CBs CPUS产生rcuo内核线程
+ * 这假定early_initcall发生在non_boot cpus come online之前
+ * 如果改变，我们将需要添加一些互斥
+ */
 static void __init rcu_spawn_nocb_kthreads(void)
 {
 	int cpu;
@@ -2352,6 +2382,11 @@ module_param(rcu_nocb_leader_stride, int, 0444);
 static void __init rcu_organize_nocb_kthreads(struct rcu_state *rsp)
 {
 	int cpu;
+	/* rcutree.rcu_nocb_leader_stride= sets the number of NOCB kthread groups,
+	 * which defaults to the square root of the number of CPUs.
+	 * Larger numbers reduce the wakeup overhead on the per-CPU grace-period kthreads,
+	 * but increase that same overhead on each group's leader.
+	 */
 	int ls = rcu_nocb_leader_stride;
 	int nl = 0;  /* Next leader. */
 	struct rcu_data *rdp;
@@ -2360,6 +2395,9 @@ static void __init rcu_organize_nocb_kthreads(struct rcu_state *rsp)
 
 	if (!have_rcu_nocb_mask)
 		return;
+	/* 默认值就是-1，如果你启动参数没有指定rcu_nocb_leader_stride
+	 * 然后取CPUs的平方根
+	 */
 	if (ls == -1) {
 		ls = int_sqrt(nr_cpu_ids);
 		rcu_nocb_leader_stride = ls;
@@ -2371,13 +2409,26 @@ static void __init rcu_organize_nocb_kthreads(struct rcu_state *rsp)
 	 */
 	for_each_cpu(cpu, rcu_nocb_mask) {
 		rdp = per_cpu_ptr(rsp->rda, cpu);
+		/* 如果大于nl,那么就是新老大 */
 		if (rdp->cpu >= nl) {
 			/* New leader, set up for followers & next leader. */
+			/* nl = (rdp->cpu + 1)/ls的向上取整然后再乘以ls
+			 * 如果没有加到一个ls,那么nl是不会变的
+			 * 那比如如果是8核，那么ls就是2，假设rcu_no_cb_mask有0，1，2，3，4，5
+			 * 第一次进来0，那么leader就是0，这里就是(0+1)/2 *2 =2
+			 * 然后下一次就是2进来，（2+1）/2 * 2 =4
+			 */
 			nl = DIV_ROUND_UP(rdp->cpu + 1, ls) * ls;
+			/* 将其设置为nocb_leader */
 			rdp->nocb_leader = rdp;
+			/* 然后赋值给rdp_leader */
 			rdp_leader = rdp;
 		} else {
 			/* Another follower, link to previous leader. */
+			/* 将rdp_leader赋值给rdp->nocb_leader
+			 * 将rdp_prev->nocb_next_follower赋值给rdp,
+			 * 其实这样，大哥和小弟就通过nocb_next_follower就手拉手了
+			 */
 			rdp->nocb_leader = rdp_leader;
 			rdp_prev->nocb_next_follower = rdp;
 		}
@@ -2388,6 +2439,7 @@ static void __init rcu_organize_nocb_kthreads(struct rcu_state *rsp)
 /* Prevent __call_rcu() from enqueuing callbacks on no-CBs CPUs */
 static bool init_nocb_callback_list(struct rcu_data *rdp)
 {
+	/* 这里就是判断该CPU是不是oncb（no-callbacks）的CPU */
 	if (!rcu_is_nocb_cpu(rdp->cpu))
 		return false;
 
