@@ -69,9 +69,11 @@ static void copy_fd_bitmaps(struct fdtable *nfdt, struct fdtable *ofdt,
 			    unsigned int count)
 {
 	unsigned int cpy, set;
-
+	/* 算出要占用多少bit */
 	cpy = count / BITS_PER_BYTE;
+	/* 算出拷贝完之后剩下的需要占用多少bit */
 	set = (nfdt->max_fds - count) / BITS_PER_BYTE;
+	/* 开始拷贝 */
 	memcpy(nfdt->open_fds, ofdt->open_fds, cpy);
 	memset((char *)nfdt->open_fds + cpy, 0, set);
 	memcpy(nfdt->close_on_exec, ofdt->close_on_exec, cpy);
@@ -87,17 +89,20 @@ static void copy_fd_bitmaps(struct fdtable *nfdt, struct fdtable *ofdt,
  * Copy all file descriptors from the old table to the new, expanded table and
  * clear the extra space.  Called with the files spinlock held for write.
  */
+/* 第一个为新的fdtable,第二个为老的fdtable */
 static void copy_fdtable(struct fdtable *nfdt, struct fdtable *ofdt)
 {
 	unsigned int cpy, set;
 
 	BUG_ON(nfdt->max_fds < ofdt->max_fds);
-
+	/* 算出原来的struct file指针的大小 */
 	cpy = ofdt->max_fds * sizeof(struct file *);
+	/* 要请0的内存大小，也就是用大的减去原来的,就是新剩下的 */
 	set = (nfdt->max_fds - ofdt->max_fds) * sizeof(struct file *);
+	/* 然后拷贝和清零 */
 	memcpy(nfdt->fd, ofdt->fd, cpy);
 	memset((char *)nfdt->fd + cpy, 0, set);
-
+	/* 开始拷贝位图了 */
 	copy_fd_bitmaps(nfdt, ofdt, ofdt->max_fds);
 }
 
@@ -113,7 +118,15 @@ static struct fdtable * alloc_fdtable(unsigned int nr)
 	 * the fdarray into comfortable page-tuned chunks: starting at 1024B
 	 * and growing in powers of two from there on.
 	 */
+	/* 弄清楚在这个fdtable中我们实际想要支持多少fds。分配步骤与fdarray的大小有关
+	 * 因为它增长速度远远快于任何其他动态数据。
+	 * 我们试图将fdarray放入舒适的页面调整块中：从1024B开始，然后以2的幂增长
+	 */
 	nr /= (1024 / sizeof(struct file *));
+	/* 思想很简单，就是找出当前数的二级制中最大位为1位的位置，然后用1左移位数即可。
+	 * 比如数据5，它的二进制形式为101，最高位为1的位置是3，然后左移3位，等于1000，即数字8
+	 * 也就是数字8是5的接近的2的整数次幂
+	 */
 	nr = roundup_pow_of_two(nr + 1);
 	nr *= (1024 / sizeof(struct file *));
 	/*
@@ -131,18 +144,29 @@ static struct fdtable * alloc_fdtable(unsigned int nr)
 	if (!fdt)
 		goto out;
 	fdt->max_fds = nr;
+	/* 分配内存 */
 	data = alloc_fdmem(nr * sizeof(struct file *));
 	if (!data)
 		goto out_fdt;
+	/* data赋值给fdt的fd域，也就是fdt的struct file __rcu **fd */
 	fdt->fd = data;
-
+	/* 这个分配的大小是2 * nr / BITS_PER_BYTE + BITBIT_SIZE(nr)，
+	 * nr表示此fd table要容纳多少个fd，nr/BITS_PER_BYTE，一个bit表示一个fd，
+	 * 所以这个表示容纳nr个fd需要多少个byte；
+	 * BITBIT_SIZE(nr)，这个宏定义如下。
+	 * #define BITBIT_NR(nr)    BITS_TO_LONGS(BITS_TO_LONGS(nr))
+	 * #define BITBIT_SIZE(nr)    (BITBIT_NR(nr) * sizeof(long))
+	 * 假设nr为65*64，则BITBIT_SIZE(65*64)的结果为2*8，即为两个long型，这两个long型的每个bit为1表示open_fds里一个元素（long型）所有bit均为1
+	 */
 	data = alloc_fdmem(max_t(size_t,
 				 2 * nr / BITS_PER_BYTE + BITBIT_SIZE(nr), L1_CACHE_BYTES));
 	if (!data)
 		goto out_arr;
 	fdt->open_fds = data;
+	/* 这里是把第二个nr/BITS_PER_BYTE给close_on_exec */
 	data += nr / BITS_PER_BYTE;
 	fdt->close_on_exec = data;
+	/* 这里是把最后的BITBIT(nr)给full_fds_bits */
 	data += nr / BITS_PER_BYTE;
 	fdt->full_fds_bits = data;
 
@@ -170,6 +194,7 @@ static int expand_fdtable(struct files_struct *files, unsigned int nr)
 	struct fdtable *new_fdt, *cur_fdt;
 
 	spin_unlock(&files->file_lock);
+	/* 分配一个新的fdtable */
 	new_fdt = alloc_fdtable(nr);
 
 	/* make sure all __fd_install() have seen resize_in_progress
@@ -185,13 +210,17 @@ static int expand_fdtable(struct files_struct *files, unsigned int nr)
 	 * extremely unlikely race - sysctl_nr_open decreased between the check in
 	 * caller and alloc_fdtable().  Cheaper to catch it here...
 	 */
+	/* 极不可能的情况- sysctl_nr_open在进入调用者和alloc_fdtable（）之间减少。在这里抓到它更廉价。。*/
 	if (unlikely(new_fdt->max_fds <= nr)) {
 		__free_fdtable(new_fdt);
 		return -EMFILE;
 	}
+	/* 获取当前的fdt */
 	cur_fdt = files_fdtable(files);
 	BUG_ON(nr < cur_fdt->max_fds);
+	/* 将新老fdt合并 */
 	copy_fdtable(new_fdt, cur_fdt);
+	/* 将新的fdt写入到fdt里面 */
 	rcu_assign_pointer(files->fdt, new_fdt);
 	if (cur_fdt != &files->fdtab)
 		call_rcu(&cur_fdt->rcu, free_fdtable_rcu);
@@ -216,16 +245,21 @@ static int expand_files(struct files_struct *files, unsigned int nr)
 	int expanded = 0;
 
 repeat:
+	/* 得到files的fdt成员 */
 	fdt = files_fdtable(files);
 
 	/* Do we need to expand? */
+	/* 如果你要的fd小于fdt->max_fds，那么就不需要扩展 */
 	if (nr < fdt->max_fds)
 		return expanded;
 
+	/* sysctl_nr_open 即/proc/sys/fs/nr_open
+	 * 当fd大于nr_open时返回EMFILE
+	 */
 	/* Can we expand? */
 	if (nr >= sysctl_nr_open)
 		return -EMFILE;
-
+	/* 如果扩展正在处理,那么睡眠等待*/
 	if (unlikely(files->resize_in_progress)) {
 		spin_unlock(&files->file_lock);
 		expanded = 1;
@@ -236,6 +270,7 @@ repeat:
 
 	/* All good, so we try */
 	files->resize_in_progress = true;
+	/* 开始扩展 */
 	expanded = expand_fdtable(files, nr);
 	files->resize_in_progress = false;
 
@@ -256,8 +291,10 @@ static inline void __clear_close_on_exec(unsigned int fd, struct fdtable *fdt)
 
 static inline void __set_open_fd(unsigned int fd, struct fdtable *fdt)
 {
+	/* 把相应的open_fds的bit位置1 */
 	__set_bit(fd, fdt->open_fds);
 	fd /= BITS_PER_LONG;
+	/* 全设置为1之后就把对应的full_fds_bits设置为1 */
 	if (!~fdt->open_fds[fd])
 		__set_bit(fd, fdt->full_fds_bits);
 }
@@ -479,20 +516,29 @@ struct files_struct init_files = {
 
 static unsigned int find_next_fd(struct fdtable *fdt, unsigned int start)
 {
+	/* 获得当前fdtable最大的fd */
 	unsigned int maxfd = fdt->max_fds;
+	/* 获取full_fds_bit最大的bit */
 	unsigned int maxbit = maxfd / BITS_PER_LONG;
 	unsigned int bitbit = start / BITS_PER_LONG;
-
+	/* 这里就是找出哪个openfds里面有空位 */
 	bitbit = find_next_zero_bit(fdt->full_fds_bits, maxbit, bitbit) * BITS_PER_LONG;
 	if (bitbit > maxfd)
 		return maxfd;
 	if (bitbit > start)
 		start = bitbit;
+	/* 然后找到相关的bit位 */
 	return find_next_zero_bit(fdt->open_fds, maxfd, start);
 }
 
 /*
  * allocate a file descriptor, mark it busy.
+ */
+/* 分配一个fs
+ * 第一个参数为files_struct
+ * 第二个参数为开始的编号
+ * 第三个参数为结束的编号
+ * 第四个参数为flag
  */
 int __alloc_fd(struct files_struct *files,
 	       unsigned start, unsigned end, unsigned flags)
@@ -503,11 +549,13 @@ int __alloc_fd(struct files_struct *files,
 
 	spin_lock(&files->file_lock);
 repeat:
+	/* 得到fdtable结构体 */
 	fdt = files_fdtable(files);
 	fd = start;
+	/* 如果fd小于next_fd，那么fd就等于files->next_fd; */
 	if (fd < files->next_fd)
 		fd = files->next_fd;
-
+	/* 如果小于fdt->max_fds,也就是说先从那尝试在现有表范围内寻找未使用的fd,fdt->max_fds是文件描述表里最大的fd */
 	if (fd < fdt->max_fds)
 		fd = find_next_fd(fdt, fd);
 
@@ -516,9 +564,10 @@ repeat:
 	 * will limit the total number of files that can be opened.
 	 */
 	error = -EMFILE;
+	/* 如果超出limit,直接返回吧 */
 	if (fd >= end)
 		goto out;
-
+	/* 扩展文件描述表 */
 	error = expand_files(files, fd);
 	if (error < 0)
 		goto out;
@@ -529,7 +578,7 @@ repeat:
 	 */
 	if (error)
 		goto repeat;
-
+	/* 将此fd的下一个作为下一次进来第一个查找的fd */
 	if (start <= files->next_fd)
 		files->next_fd = fd + 1;
 

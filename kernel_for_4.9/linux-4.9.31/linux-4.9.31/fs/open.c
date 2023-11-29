@@ -1038,16 +1038,17 @@ EXPORT_SYMBOL(filp_clone_open);
 long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 {
 	struct open_flags op;
+	/* 根据入参构建文件打开标志，即填充struct open_flags结构体 */
 	int fd = build_open_flags(flags, mode, &op);
 	struct filename *tmp;
 
 	if (fd)
 		return fd;
-
+	/* 调用getname将文件路径名从用户空间复制到内核空间 */
 	tmp = getname(filename);
 	if (IS_ERR(tmp))
 		return PTR_ERR(tmp);
-
+	/* 在当前进程的打开文件表中找到一个可用的文件句柄，保存在局部变量fd中 */
 	fd = get_unused_fd_flags(flags);
 	if (fd >= 0) {
 		struct file *f = do_filp_open(dfd, tmp, &op);
@@ -1065,6 +1066,7 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 
 SYSCALL_DEFINE3(open, const char __user *, filename, int, flags, umode_t, mode)
 {
+	/* flags 会在64位kernel的情况下强制加上O_LARGEFILE标志位，表示允许打开长度超过4GB的大文件 */
 	if (force_o_largefile())
 		flags |= O_LARGEFILE;
 

@@ -929,39 +929,58 @@ static inline int ra_has_index(struct file_ra_state *ra, pgoff_t index)
 
 struct file {
 	union {
+		/* 链入到所属文件系统超级块的s_files链表的“连接件” */
 		struct llist_node	fu_llist;
+		/* 用于rcu机制的域 */
 		struct rcu_head 	fu_rcuhead;
 	} f_u;
+	/* 文件路径，包含这个文件的vfsmount以及和文件关联的dentry */
 	struct path		f_path;
+	/* 指向相应的inode */
 	struct inode		*f_inode;	/* cached value */
+	/* 指向文件操作表的指针 */
 	const struct file_operations	*f_op;
 
 	/*
 	 * Protects f_ep_links, f_flags.
 	 * Must not be taken from IRQ context.
 	 */
+	/* 用户保护的自旋锁 */
 	spinlock_t		f_lock;
+	/* 引用计数 */
 	atomic_long_t		f_count;
+	/* 打开文件时指定的标志位 */
 	unsigned int 		f_flags;
+	/* 进程访问模式 */
 	fmode_t			f_mode;
 	struct mutex		f_pos_lock;
+	/* 当前文件的偏移值 */
 	loff_t			f_pos;
+	/* 用于通过信号进行I/O事件通知的数据 */
 	struct fown_struct	f_owner;
+	/* f_cred.uid、f_cred.gid指定了用户的UID和GID */
 	const struct cred	*f_cred;
+	/* 文件预读状态 */
 	struct file_ra_state	f_ra;
-
+	/* 版本号，在每次使用后自动增加 */
 	u64			f_version;
 #ifdef CONFIG_SECURITY
+	/* 指向file安全结构的指针 */
 	void			*f_security;
 #endif
 	/* needed for tty driver, and maybe others */
+	/* 用于文件系统或设备驱动的私有指针 */
 	void			*private_data;
 
 #ifdef CONFIG_EPOLL
 	/* Used by fs/eventpoll.c to link all the hooks to this file */
+	/* 这个文件的事件轮询等待着链表的表头。
+	 * 等待者通过epitem结构的fllink域链入此链表
+	 */
 	struct list_head	f_ep_links;
 	struct list_head	f_tfile_llink;
 #endif /* #ifdef CONFIG_EPOLL */
+	/* 指向文件地址空间描述符的指针 */
 	struct address_space	*f_mapping;
 } __attribute__((aligned(4)));	/* lest something weird decides that 2 is OK */
 
