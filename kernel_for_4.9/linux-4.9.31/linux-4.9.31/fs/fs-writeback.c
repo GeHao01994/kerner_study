@@ -101,9 +101,16 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(wbc_writepage);
 
 static bool wb_io_lists_populated(struct bdi_writeback *wb)
 {
+	/* 如果之前dirty io了，也就是说这不是这个链表的第一个元素了
+	 * 直接返回false
+	 */
 	if (wb_has_dirty_io(wb)) {
 		return false;
 	} else {
+		/* 否则，设置WB_has_dirty_io
+		 *
+		 * 让tot_write_bandwidth加上avg_write_bandwidth
+		 */
 		set_bit(WB_has_dirty_io, &wb->state);
 		WARN_ON_ONCE(!wb->avg_write_bandwidth);
 		atomic_long_add(wb->avg_write_bandwidth,
@@ -137,13 +144,37 @@ static bool inode_io_list_move_locked(struct inode *inode,
 				      struct list_head *head)
 {
 	assert_spin_locked(&wb->list_lock);
-
+	/* 把inode的i_io_list移动到list里面去 */
 	list_move(&inode->i_io_list, head);
 
 	/* dirty_time doesn't count as dirty_io until expiration */
+	/* 这里主要是设置WB_has_dirty_io,然后就是带宽的计算 
+	 * static bool wb_io_lists_populated(struct bdi_writeback *wb)
+	 * {
+	 *	if (wb_has_dirty_io(wb)) {
+	 *		return false;
+	 *	} else {
+	 *		set_bit(WB_has_dirty_io, &wb->state);
+	 *		WARN_ON_ONCE(!wb->avg_write_bandwidth);
+	 *	atomic_long_add(wb->avg_write_bandwidth,
+	 *			&wb->bdi->tot_write_bandwidth);
+	 *	return true;
+	 *	}
+	 * }
+	 */
 	if (head != &wb->b_dirty_time)
 		return wb_io_lists_populated(wb);
-
+	/* 这对应上面的wb_io_lists_populated,反过来了
+	 * static void wb_io_lists_depopulated(struct bdi_writeback *wb)
+	 * {
+	 *	if (wb_has_dirty_io(wb) && list_empty(&wb->b_dirty) &&
+	 *		list_empty(&wb->b_io) && list_empty(&wb->b_more_io)) {
+	 *	clear_bit(WB_has_dirty_io, &wb->state);
+	 *	WARN_ON_ONCE(atomic_long_sub_return(wb->avg_write_bandwidth,
+	 *				&wb->bdi->tot_write_bandwidth) < 0);
+	 *	}
+	 * }
+	 */
 	wb_io_lists_depopulated(wb);
 	return false;
 }
@@ -352,6 +383,8 @@ static void inode_switch_wbs_work_fn(struct work_struct *work)
 	/*
 	 * Once I_FREEING is visible under i_lock, the eviction path owns
 	 * the inode and we shouldn't modify ->i_io_list.
+	 *
+	 * 一旦I_FREEING在I_lock下可见，驱逐路径就拥有索引节点，我们不应该修改->i_io_list。
 	 */
 	if (unlikely(inode->i_state & I_FREEING))
 		goto skip_switch;
@@ -2070,6 +2103,16 @@ static noinline void block_dump___mark_inode_dirty(struct inode *inode)
  * page->mapping->host, so the page-dirtying time is recorded in the internal
  * blockdev inode.
  */
+/* 将inode放到super block的drity list
+ * 当心，我们无条件的设置它的drity位，但只有当它在hashed表里或者它引用了blockdev时，才会将其移到脏列表中。
+ * 如果它没有在hash表里，即使后来被hash，它也永远不会被添加到脏列表中，因为它已经被标记为脏。
+ *
+ * 简而言之，在开始将任何inode_b标记为脏之前，请确保hash了任何inodes
+ *
+ * 请注意，对于blockdevs，inode->dirted_when表示对应的块inode（/dev/hda1）本身的dirtying time。
+ * 内核内部的blockdev inode的dirtied_when表示这个blockdev page的dirtying time。
+ * 这就是为什么对于I_DIRTY_PAGES，我们总是使用page->mapping->host，page-dirtying time总是记录在内部blockdev inode中
+ */
 void __mark_inode_dirty(struct inode *inode, int flags)
 {
 #define I_DIRTY_INODE (I_DIRTY_SYNC | I_DIRTY_DATASYNC)
@@ -2082,6 +2125,7 @@ void __mark_inode_dirty(struct inode *inode, int flags)
 	 * Don't do this for I_DIRTY_PAGES - that doesn't actually
 	 * dirty the inode itself
 	 */
+	/* 如果inode是脏的，调用对应superblock的dirty_inode同步到磁盘 */
 	if (flags & (I_DIRTY_SYNC | I_DIRTY_DATASYNC | I_DIRTY_TIME)) {
 		trace_writeback_dirty_inode_start(inode, flags);
 
@@ -2090,6 +2134,7 @@ void __mark_inode_dirty(struct inode *inode, int flags)
 
 		trace_writeback_dirty_inode(inode, flags);
 	}
+	/* 因为已经同步了，所以清除掉I_DIRTY_TIME */
 	if (flags & I_DIRTY_INODE)
 		flags &= ~I_DIRTY_TIME;
 	dirtytime = flags & I_DIRTY_TIME;
@@ -2103,7 +2148,9 @@ void __mark_inode_dirty(struct inode *inode, int flags)
 	if (((inode->i_state & flags) == flags) ||
 	    (dirtytime && (inode->i_state & I_DIRTY_INODE)))
 		return;
-
+	/* 是否开启IO调试信息，用于记录IO回写的具体信息
+	 * 比如进程号，inode号，文件名和磁盘设备名
+	 */
 	if (unlikely(block_dump))
 		block_dump___mark_inode_dirty(inode);
 
@@ -2111,6 +2158,7 @@ void __mark_inode_dirty(struct inode *inode, int flags)
 	if (dirtytime && (inode->i_state & I_DIRTY_INODE))
 		goto out_unlock_inode;
 	if ((inode->i_state & flags) != flags) {
+		/* 看这个inode是不是DIRTY的 */
 		const int was_dirty = inode->i_state & I_DIRTY;
 
 		inode_attach_wb(inode, NULL);
@@ -2124,6 +2172,7 @@ void __mark_inode_dirty(struct inode *inode, int flags)
 		 * The unlocker will place the inode on the appropriate
 		 * superblock list, based upon its state.
 		 */
+		/* 如果这个inode正在会写，仅仅只是更新它的dirty state */
 		if (inode->i_state & I_SYNC)
 			goto out_unlock_inode;
 
@@ -2131,6 +2180,7 @@ void __mark_inode_dirty(struct inode *inode, int flags)
 		 * Only add valid (hashed) inodes to the superblock's
 		 * dirty list.  Add blockdev inodes as well.
 		 */
+		/* 如果这个inode不是个块设备，然后又没有在hash表里面，直接out_unlock_inode */
 		if (!S_ISBLK(inode->i_mode)) {
 			if (inode_unhashed(inode))
 				goto out_unlock_inode;
@@ -2141,6 +2191,9 @@ void __mark_inode_dirty(struct inode *inode, int flags)
 		/*
 		 * If the inode was already on b_dirty/b_io/b_more_io, don't
 		 * reposition it (that would break b_dirty time-ordering).
+		 *
+		 * 如果inode已经在b_dirty/b.io/b_more_io上，
+		 * 请不要重新定位它（这会破坏b_dirty时间排序）。
 		 */
 		if (!was_dirty) {
 			struct bdi_writeback *wb;
@@ -2148,15 +2201,17 @@ void __mark_inode_dirty(struct inode *inode, int flags)
 			bool wakeup_bdi = false;
 
 			wb = locked_inode_to_wb_and_lock_list(inode);
-
+			/* 当没有对回写进行限制(bdi_cap_writeback_dirty) */
 			WARN(bdi_cap_writeback_dirty(wb->bdi) &&
 			     !test_bit(WB_registered, &wb->state),
 			     "bdi-%s not registered\n", wb->bdi->name);
-
+			/* 接下来设置inode的dirty时间 */
 			inode->dirtied_when = jiffies;
 			if (dirtytime)
 				inode->dirtied_time_when = jiffies;
-
+			/* b_dirty_time: 需要修改meta信息的inode链表(time被修改的inode链表)
+			 * b_drity : mark_inode_dirty标记的脏inode直接链接到b_dirty
+			 */
 			if (inode->i_state & (I_DIRTY_INODE | I_DIRTY_PAGES))
 				dirty_list = &wb->b_dirty;
 			else
@@ -2173,6 +2228,9 @@ void __mark_inode_dirty(struct inode *inode, int flags)
 			 * we have to wake-up the corresponding bdi thread
 			 * to make sure background write-back happens
 			 * later.
+			 */
+			/* 如果这是这个bdi的第一个脏的inode，我们必须唤醒相应的bdi线程，
+			 * 以确保稍后进行后台写回
 			 */
 			if (bdi_cap_writeback_dirty(wb->bdi) && wakeup_bdi)
 				wb_wakeup_delayed(wb);

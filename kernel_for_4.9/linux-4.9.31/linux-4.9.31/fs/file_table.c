@@ -100,6 +100,12 @@ int proc_nr_files(struct ctl_table *table, int write,
  * done, you will imbalance int the mount's writer count
  * and a warning at __fput() time.
  */
+/* 使用这个要非常小心。
+ * 如果这个filp是为写入而打开的，
+ * 那么您有责任获得写访问权限对于任何你可能分派给这个filp的任何挂载。
+ * 如果不这样做，您将不平衡装载的写入程序计数，
+ * 并在__fput（）时间发出警告
+ */
 struct file *get_empty_filp(void)
 {
 	const struct cred *cred = current_cred();
@@ -109,20 +115,24 @@ struct file *get_empty_filp(void)
 
 	/*
 	 * Privileged users can go above max_files
+	 * 特权用户可以超过max_files
 	 */
+	/* 如果本地CPU的文件已经超过了max_files，并且还不是管理员权限 */
 	if (get_nr_files() >= files_stat.max_files && !capable(CAP_SYS_ADMIN)) {
 		/*
 		 * percpu_counters are inaccurate.  Do an expensive check before
 		 * we go and fail.
+		 * percpu计数器不准确。在我们失败之前做一次昂贵的检查
 		 */
+		/* 将系统中所有的files加起来，如果大于max_files就不要分配了 */
 		if (percpu_counter_sum_positive(&nr_files) >= files_stat.max_files)
 			goto over;
 	}
-
+	/* 分配一个file struct */
 	f = kmem_cache_zalloc(filp_cachep, GFP_KERNEL);
 	if (unlikely(!f))
 		return ERR_PTR(-ENOMEM);
-
+	/* 将percpu里面nr_files +1 */
 	percpu_counter_inc(&nr_files);
 	f->f_cred = get_cred(cred);
 	error = security_file_alloc(f);
@@ -130,11 +140,15 @@ struct file *get_empty_filp(void)
 		file_free(f);
 		return ERR_PTR(error);
 	}
-
+	/* 设置file->f_count即该文件的引用计数+1 */
 	atomic_long_set(&f->f_count, 1);
 	rwlock_init(&f->f_owner.lock);
 	spin_lock_init(&f->f_lock);
 	mutex_init(&f->f_pos_lock);
+	/* eventpoll——init_file就是初始化两链表
+	 * INIT_LIST_HEAD(&file->f_ep_links);
+	 * INIT_LIST_HEAD(&file->f_tfile_llink);
+	 */
 	eventpoll_init_file(f);
 	/* f->f_version: 0 */
 	return f;
@@ -320,13 +334,24 @@ void __init files_init(void)
  * One file with associated inode and dcache is very roughly 1K. Per default
  * do not use more than 10% of our memory for files.
  */
+/* 一个带有相关inode和dcache的文件大约为1K。
+ * 默认情况下不要将超过10%的内存用于文件
+ */
 void __init files_maxfiles_init(void)
 {
 	unsigned long n;
+	/* 这里等于（totalram_pages - nr_free_pages）的1.5倍，
+	 * 主要还是为了节省一点内存来给其他功能用
+	 */
 	unsigned long memreserve = (totalram_pages - nr_free_pages()) * 3/2;
 
 	memreserve = min(memreserve, totalram_pages - 1);
+	/* 一个带有相关的inode和dcache的文件大约为1K
+	 * 所以这里用不超过10%的内存用于文件
+	 * 这里就算出最大可以有多少个文件
+	 */
 	n = ((totalram_pages - memreserve) * (PAGE_SIZE / 1024)) / 10;
-
+	/* 比较NR_FILE（8192）和 n的最大值
+	 * 然后把它写入到最大文件数量files_stat.max_files中 */
 	files_stat.max_files = max_t(unsigned long, n, NR_FILE);
 } 

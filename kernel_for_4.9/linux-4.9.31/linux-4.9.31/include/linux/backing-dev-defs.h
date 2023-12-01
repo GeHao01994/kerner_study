@@ -84,9 +84,15 @@ struct bdi_writeback {
 	unsigned long state;		/* Always use atomic bitops on this */
 	unsigned long last_old_flush;	/* last old data flush */
 
+	/* mark_inode_dirty标记的脏inode直接链接到b_dirty */
 	struct list_head b_dirty;	/* dirty inodes */
+	/* 回写线程需要回刷脏页时，会从b_ditry链表截取满足回写模式的超时要求的inode到b_io链表
+	 * 用于暂存即将要被writeback处理的inode
+	 */
 	struct list_head b_io;		/* parked for writeback */
+	/* 当inode的状态与work回写模式不匹配时，会先将当前回写的inode链表挂入b_more_io */
 	struct list_head b_more_io;	/* parked for more writeback */
+	/* 需要修改meta信息的inode链表 */
 	struct list_head b_dirty_time;	/* time stamps are dirty */
 	spinlock_t list_lock;		/* protects the b_* lists */
 
@@ -97,7 +103,11 @@ struct bdi_writeback {
 	unsigned long bw_time_stamp;	/* last time write bw is updated */
 	unsigned long dirtied_stamp;
 	unsigned long written_stamp;	/* pages written at bw_time_stamp */
+	/* bdi->write_bandwidth, 根据bdi_stat[BDI_WRITTEN], 计算3s内的平均速度. 
+	 * 但一般都是200ms就更新,所以它应该比较均衡.
+	 */
 	unsigned long write_bandwidth;	/* the estimated write bandwidth */
+	/* bdi->avg_write_bandwidth, 它根据和write_bandwidth的差距变化,应该更加缓慢. */
 	unsigned long avg_write_bandwidth; /* further smoothed write bw, > 0 */
 
 	/*
@@ -106,7 +116,9 @@ struct bdi_writeback {
 	 * @dirty_ratelimit tracks the estimated @balanced_dirty_ratelimit
 	 * in small steps and is much more smooth/stable than the latter.
 	 */
+	/* bdi->dirty_ratelimit 渐变的脏页产生速率. */
 	unsigned long dirty_ratelimit;
+	/* bdi->balanced_dirty_ratelimit 经过调整的avg_write_bandwidth */
 	unsigned long balanced_dirty_ratelimit;
 
 	struct fprop_local_percpu completions;
@@ -149,6 +161,7 @@ struct backing_dev_info {
 	 * Sum of avg_write_bw of wbs with dirty inodes.  > 0 if there are
 	 * any dirty wbs, which is depended upon by bdi_has_dirty().
 	 */
+	/* 表示total wb任务的bandwidth之和，带宽指单位时间写有多少次io */
 	atomic_long_t tot_write_bandwidth;
 
 	struct bdi_writeback wb;  /* the root writeback info for this bdi */

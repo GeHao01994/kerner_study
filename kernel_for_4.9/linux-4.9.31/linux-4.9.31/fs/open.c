@@ -1051,6 +1051,7 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 	/* 在当前进程的打开文件表中找到一个可用的文件句柄，保存在局部变量fd中 */
 	fd = get_unused_fd_flags(flags);
 	if (fd >= 0) {
+		/* 顾名思义，这里就是打开文件，然后分配和填充file struct */
 		struct file *f = do_filp_open(dfd, tmp, &op);
 		if (IS_ERR(f)) {
 			put_unused_fd(fd);

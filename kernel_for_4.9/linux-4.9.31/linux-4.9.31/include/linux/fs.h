@@ -2206,20 +2206,62 @@ static inline bool HAS_UNMAPPED_ID(struct inode *inode)
  *
  * Q: What is the difference between I_WILL_FREE and I_FREEING?
  */
+
+/* inode的属性(如:修改时间)改变
+ * 1.无论是否有数据写入,文件的修改时间都会更新,即I_DIRTY_SYNC标志会置位
+ * sys_write()
+ * __generic_file_aio_write_nolock()
+ * file_update_time()
+ * mark_inode_dirty_sync()
+ * __mark_inode_dirty(inode, I_DIRTY_SYNC);
+ */
 #define I_DIRTY_SYNC		(1 << 0)
+/* 对于ext文件系统来说,至少可以认为I_DIRTY_DATASYNC表示文件的树结构发生了变化,
+ * 因为sys_write()扩展文件后,文件的树结构肯定发生了变化,
+ * 此后sys_fdatasync()就必须将最新的树结构(也就是inode本身)回写到磁盘才能保证文件数据的完整性,
+ * 反之,如果文件的树结构未变化,sys_fdatasync()只需将脏页回写即可保证数据完整性.
+ * 
+ * 例子：
+ * 扩展了文件后,I_DIRTY_DATASYNC标志会置位
+ * sys_write()
+ * generic_write_end()
+ * if (pos+copied > inode->i_size){
+ * mark_inode_dirty()
+ *  __mark_inode_dirty(inode, I_DIRTY_SYNC|I_DIRTY_PAGES|I_DIRTY_DATASYNC);
+ * }
+ */
 #define I_DIRTY_DATASYNC	(1 << 1)
+/* inode有脏页
+ *
+ * 有数据写入成功时,I_DIRTY_PAGES标志会置位
+ * sys_write()
+ * __block_commit_write()
+ * mark_buffer_dirty()
+ * __set_page_dirty()
+ * __mark_inode_dirty(mapping->host, I_DIRTY_PAGES);
+ */
 #define I_DIRTY_PAGES		(1 << 2)
 #define __I_NEW			3
 #define I_NEW			(1 << __I_NEW)
 #define I_WILL_FREE		(1 << 4)
+/* I_FREEING Set when inode is about to be freed 
+ * but still has dirty pages or buffers attached or the inode itself is still dirty.
+ *
+ * I_FREEING设置当inode即将被释放，但是任然有脏页或者附带的缓冲区，或者本身inode是脏的
+ */
 #define I_FREEING		(1 << 5)
 #define I_CLEAR			(1 << 6)
 #define __I_SYNC		7
+/* 回写的inode正在运行，该为是在数据回写时设置
+ * 一旦完成，就会唤醒去清除这个bit位
+ * 该bit也被用来把inode锁在内存中对于flusher线程
+ */
 #define I_SYNC			(1 << __I_SYNC)
 #define I_REFERENCED		(1 << 8)
 #define __I_DIO_WAKEUP		9
 #define I_DIO_WAKEUP		(1 << __I_DIO_WAKEUP)
 #define I_LINKABLE		(1 << 10)
+/* 表示该文件的时间戳已经发生了跟新但还没有同步到磁盘上 */
 #define I_DIRTY_TIME		(1 << 11)
 #define __I_DIRTY_TIME_EXPIRED	12
 #define I_DIRTY_TIME_EXPIRED	(1 << __I_DIRTY_TIME_EXPIRED)
@@ -2236,6 +2278,7 @@ static inline void mark_inode_dirty(struct inode *inode)
 
 static inline void mark_inode_dirty_sync(struct inode *inode)
 {
+	/* I_DIRTY_SYNC表示要进行同步操作 */
 	__mark_inode_dirty(inode, I_DIRTY_SYNC);
 }
 

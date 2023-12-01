@@ -1636,7 +1636,13 @@ static int lookup_fast(struct nameidata *nd,
 	if (nd->flags & LOOKUP_RCU) {
 		unsigned seq;
 		bool negative;
+		/* 首先调用 __d_lookup_rcu 在内存中的某个散列表里通过字符串比较查找目标 dentry，
+		 * 如果找到了就返回该 dentry
+		 */
 		dentry = __d_lookup_rcu(parent, &nd->last, &seq);
+		/* 如果没有找到就跳转到 unlazy。在这里会使用 unlazy_walk 就地将查找模式切换到
+		 * ref-walk 如果还不行就只好返回到 do_filp_open 从头来过
+		 */
 		if (unlikely(!dentry)) {
 			if (unlazy_walk(nd, NULL, 0))
 				return -ECHILD;
@@ -1688,10 +1694,18 @@ static int lookup_fast(struct nameidata *nd,
 		dentry = __d_lookup(parent, &nd->last);
 		if (unlikely(!dentry))
 			return 0;
+	/* 这个方法在路径查找时从dentry缓存中找到目标项之后，它被用来检查这个目录项
+	 * 是否依然有效，因为它们可能在VFS之外被删除。若无效，则需要作废缓存中的目录项，
+	 * 根据磁盘上的内容重新构造。
+	 * 第一个参数为指向父目录dentry描述符的指针
+	 * 如果未定义此回调函数，则默认认为dentry缓存中的信息是有效的，这适合于大多数文件系统。
+	 * 某些（例如NFS）文件系统需要对dentry缓存中找到dentry结构进行验证（和处理），则需要提供此回调函数的实现
+	 */
 		if (unlikely(dentry->d_flags & DCACHE_OP_REVALIDATE))
 			status = d_revalidate(dentry, nd->flags);
 	}
 	if (unlikely(status <= 0)) {
+		/* 注销该dentry */
 		if (!status)
 			d_invalidate(dentry);
 		dput(dentry);
@@ -1856,6 +1870,9 @@ static int walk_component(struct nameidata *nd, int flags)
 			put_link(nd);
 		return err;
 	}
+	/* 调用lookup_fast，从nd->patn.dentry的hash链表中，根据nd->last.name查找子dentry
+	 * 其实这里就是dentry在内存中的情况
+	 */
 	err = lookup_fast(nd, &path, &inode, &seq);
 	if (unlikely(err <= 0)) {
 		if (err < 0)
@@ -3627,7 +3644,7 @@ static struct file *path_openat(struct nameidata *nd,
 	struct file *file;
 	int opened = 0;
 	int error;
-
+	/* 分配一个空的file成员 */
 	file = get_empty_filp();
 	if (IS_ERR(file))
 		return file;
@@ -3684,7 +3701,7 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
 	struct nameidata nd;
 	int flags = op->lookup_flags;
 	struct file *filp;
-
+	/* 填充路径查找的上下文nameidata */
 	set_nameidata(&nd, dfd, pathname);
 	filp = path_openat(&nd, op, flags | LOOKUP_RCU);
 	if (unlikely(filp == ERR_PTR(-ECHILD)))

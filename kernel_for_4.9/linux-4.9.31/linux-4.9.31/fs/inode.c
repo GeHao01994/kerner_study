@@ -1530,12 +1530,17 @@ void iput(struct inode *inode)
 		return;
 	BUG_ON(inode->i_state & I_CLEAR);
 retry:
+	/* atomic原子地递减1，如果结果为0，将lock上锁并返回true，否则返回false */
 	if (atomic_dec_and_lock(&inode->i_count, &inode->i_lock)) {
+		/* 表示该文件的时间戳已经发生了更新但还没有同步到磁盘上 */
 		if (inode->i_nlink && (inode->i_state & I_DIRTY_TIME)) {
+			/* 将引用计数 +1 */
 			atomic_inc(&inode->i_count);
+			/* 将inode设置为状态设置的I_DIRTY_TIME 清除掉 */
 			inode->i_state &= ~I_DIRTY_TIME;
 			spin_unlock(&inode->i_lock);
 			trace_writeback_lazytime_iput(inode);
+			/* 将inode标记为脏 */
 			mark_inode_dirty_sync(inode);
 			goto retry;
 		}

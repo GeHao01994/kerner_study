@@ -329,12 +329,22 @@ static void dentry_unlink_inode(struct dentry * dentry)
 
 	if (hashed)
 		raw_write_seqcount_begin(&dentry->d_seq);
+	/* static inline void __d_clear_type_and_inode(struct dentry *dentry)
+	 * {
+	 *	unsigned flags = READ_ONCE(dentry->d_flags);
+	 *	flags &= ~(DCACHE_ENTRY_TYPE | DCACHE_FALLTHRU);
+	 *	WRITE_ONCE(dentry->d_flags, flags);
+	 *	dentry->d_inode = NULL;
+	 * }
+	 */
 	__d_clear_type_and_inode(dentry);
+	/* d_alias是链入到所属inode的i_dentry(别名)链表的“连接件”，这里把它脱稿了 */
 	hlist_del_init(&dentry->d_u.d_alias);
 	if (hashed)
 		raw_write_seqcount_end(&dentry->d_seq);
 	spin_unlock(&dentry->d_lock);
 	spin_unlock(&inode->i_lock);
+	/* 如果这个inode没有硬链接 */
 	if (!inode->i_nlink)
 		fsnotify_inoderemove(inode);
 	if (dentry->d_op && dentry->d_op->d_iput)
@@ -368,9 +378,13 @@ static void d_lru_add(struct dentry *dentry)
 
 static void d_lru_del(struct dentry *dentry)
 {
+	/* 验证一下DCACHE_LRU_LIST是否存在 */
 	D_FLAG_VERIFY(dentry, DCACHE_LRU_LIST);
+	/* 清掉这个DCACHE_LRU_LIST flag */
 	dentry->d_flags &= ~DCACHE_LRU_LIST;
+	/* 将nr_dentry_unused -1 */
 	this_cpu_dec(nr_dentry_unused);
+	/* 将它在superblock中的lru链表脱离出来 */
 	WARN_ON_ONCE(!list_lru_del(&dentry->d_sb->s_dentry_lru, &dentry->d_lru));
 }
 
@@ -384,9 +398,13 @@ static void d_shrink_del(struct dentry *dentry)
 
 static void d_shrink_add(struct dentry *dentry, struct list_head *list)
 {
+	/* 看一下flag是不是0 */
 	D_FLAG_VERIFY(dentry, 0);
+	/* 把它添加到传入的list里面去 */
 	list_add(&dentry->d_lru, list);
+	/* 设置其flag的DCACHE_SHRINK_LIST和DCACHE_LRU_LIST位 */
 	dentry->d_flags |= DCACHE_SHRINK_LIST | DCACHE_LRU_LIST;
+	/* 将nr_dentry_unused计数+1 */
 	this_cpu_inc(nr_dentry_unused);
 }
 
@@ -436,8 +454,14 @@ static void dentry_lru_add(struct dentry *dentry)
  *
  * __d_drop requires dentry->d_lock.
  */
+/* drop掉一个dentry
+ * d_drop 将该dentry从父dentry的hashes链表中解开，这样就不会再通过VFS查找到它了.
+ * 请注意，这和删除一个dentry是不同的，如果可能的话，d_delete将试图让dentry变成消极的，从而成功的进行_negative_ lookup,而d_drop只会使缓存查找失败
+ * d_drop（）主要用于由于某种原因（NFS超时或自动删除）而想要使dentry无效的内容。
+ */
 void __d_drop(struct dentry *dentry)
 {
+	/* !dentry的d_hash->pprev就可以判断它有没有drop掉 */
 	if (!d_unhashed(dentry)) {
 		struct hlist_bl_head *b;
 		/*
@@ -445,12 +469,16 @@ void __d_drop(struct dentry *dentry)
 		 * with the exception of those newly allocated by
 		 * d_obtain_alias, which are always IS_ROOT:
 		 */
+		/* hashed的dentry通常在dentry的哈希表上，但是d_obtain_alias,新分配的dentry除外
+		 * 它们总是IS_ROOT
+		 */
 		if (unlikely(IS_ROOT(dentry)))
 			b = &dentry->d_sb->s_anon;
 		else
 			b = d_hash(dentry->d_name.hash);
 
 		hlist_bl_lock(b);
+		/* 将该dentry从hash表里面拔掉 */
 		__hlist_bl_del(&dentry->d_hash);
 		dentry->d_hash.pprev = NULL;
 		hlist_bl_unlock(b);
@@ -475,9 +503,11 @@ static inline void dentry_unlist(struct dentry *dentry, struct dentry *parent)
 	 * Inform d_walk() and shrink_dentry_list() that we are no longer
 	 * attached to the dentry tree
 	 */
+	/* 通知d_walk（）和shrink_dentry_list（）我们不再连接到dentry树 */
 	dentry->d_flags |= DCACHE_DENTRY_KILLED;
 	if (unlikely(list_empty(&dentry->d_child)))
 		return;
+	/* 把自己从父dentry的d_subdirs删掉 */
 	__list_del_entry(&dentry->d_child);
 	/*
 	 * Cursors can move around the list of children.  While we'd been
@@ -498,6 +528,21 @@ static inline void dentry_unlist(struct dentry *dentry, struct dentry *parent)
 	 * points to something that won't be moving around.  I.e. skip the
 	 * cursors.
 	 */
+	/* Cursors 可以在子项列表中移动.
+	 * 虽然我们是一个普通的列表成员,但这并不重要
+	 * -->>d_child.next会被更新.
+	 * 然而，从现在起就不会了,对于d_walk（）这样的事情,它可能会以一个令人讨厌的惊喜告终
+	 *
+	 * 通常d_walk（）不关心cursor的移动 -->d_lock在父对象上可以防止这种情况发生，
+	 * 而且由于cursor没有自己的子对象，我们可以在不解锁父对象的情况下穿过他
+	 *
+	 * 不过，有一个例外——如果我们从一个被一解锁就被kill掉的child开始上升，那么下一个兄弟姐妹将使用其->d_child.next中留下的值找到
+	 * 如果_that_指向一个cursor，并且在d_walk（）重新获得父对象->d_lock之前，cursors被移动了（例如lseek（）），
+	 * 那么我们最终将跳过cursor移动过的所有内容。
+	 *
+	 *
+	 * solution:确保->d_child.next中留下的指针指向不会移动的东西。即跳过Cursors
+	 */
 	while (dentry->d_child.next != &parent->d_subdirs) {
 		next = list_entry(dentry->d_child.next, struct dentry, d_child);
 		if (likely(!(next->d_flags & DCACHE_DENTRY_CURSOR)))
@@ -510,44 +555,66 @@ static void __dentry_kill(struct dentry *dentry)
 {
 	struct dentry *parent = NULL;
 	bool can_free = true;
+	/* 如果不是root目录，那么parent就等于它自己的parent */
 	if (!IS_ROOT(dentry))
 		parent = dentry->d_parent;
 
 	/*
 	 * The dentry is now unrecoverably dead to the world.
+	 * 这个dentry已经无法起死回生了
+	 * assert_spin_locked(&lockref->lock);
+	 * lockref->count = -128;
 	 */
 	lockref_mark_dead(&dentry->d_lockref);
 
 	/*
 	 * inform the fs via d_prune that this dentry is about to be
 	 * unhashed and destroyed.
+	 *
+	 * 通过d_prune通知fs这个dentry即将被unhashed然后销毁
+	 * 调用dentry的d_prune去unhash dentry
 	 */
 	if (dentry->d_flags & DCACHE_OP_PRUNE)
 		dentry->d_op->d_prune(dentry);
 
+	/* 如果dentry还在s_dentry_lru链表，则摘除
+	 *
+	 * static void d_lru_del(struct dentry *dentry)
+	 * {
+	 *	D_FLAG_VERIFY(dentry, DCACHE_LRU_LIST);
+	 *	dentry->d_flags &= ~DCACHE_LRU_LIST;
+	 *	this_cpu_dec(nr_dentry_unused);
+	 *	WARN_ON_ONCE(!list_lru_del(&dentry->d_sb->s_dentry_lru, &dentry->d_lru));
+	 * }
+	 */
 	if (dentry->d_flags & DCACHE_LRU_LIST) {
 		if (!(dentry->d_flags & DCACHE_SHRINK_LIST))
 			d_lru_del(dentry);
 	}
 	/* if it was on the hash then remove it */
 	__d_drop(dentry);
+	/* 解除和父目录的关系，d_child和d_child之间的关系 */
 	dentry_unlist(dentry, parent);
 	if (parent)
 		spin_unlock(&parent->d_lock);
+	/* 解除和对应inode的关联 */
 	if (dentry->d_inode)
 		dentry_unlink_inode(dentry);
 	else
 		spin_unlock(&dentry->d_lock);
+	/* 将本CPU的dentry -1 */
 	this_cpu_dec(nr_dentry);
 	if (dentry->d_op && dentry->d_op->d_release)
 		dentry->d_op->d_release(dentry);
 
 	spin_lock(&dentry->d_lock);
+	/* 如果在回收链表里面，那么这里就不动了，仅仅是给他设置一个可以free的flag */
 	if (dentry->d_flags & DCACHE_SHRINK_LIST) {
 		dentry->d_flags |= DCACHE_MAY_FREE;
 		can_free = false;
 	}
 	spin_unlock(&dentry->d_lock);
+	/* free掉 */
 	if (likely(can_free))
 		dentry_free(dentry);
 }
@@ -939,7 +1006,7 @@ EXPORT_SYMBOL(d_prune_aliases);
 static void shrink_dentry_list(struct list_head *list)
 {
 	struct dentry *dentry, *parent;
-
+	/* 如果这个list是空 */
 	while (!list_empty(list)) {
 		struct inode *inode;
 		dentry = list_entry(list->prev, struct dentry, d_lru);
@@ -951,11 +1018,26 @@ static void shrink_dentry_list(struct list_head *list)
 		 * to the LRU here, so we can simply remove it from the list
 		 * here regardless of whether it is referenced or not.
 		 */
+		/* 处置列表是孤立的，dentry在这里不计入LRU，
+		 * 所以我们可以简单的从这个链表里面移除它无论它是不是被引用
+		 *
+		 *
+		 * d_shrink_del
+		 *
+		 * D_FLAG_VERIFY(dentry, DCACHE_SHRINK_LIST | DCACHE_LRU_LIST);
+		 * list_del_init(&dentry->d_lru);
+		 * dentry->d_flags &= ~(DCACHE_SHRINK_LIST | DCACHE_LRU_LIST);
+		 * this_cpu_dec(nr_dentry_unused);
+		 *
+		 */
 		d_shrink_del(dentry);
 
 		/*
 		 * We found an inuse dentry which was not removed from
 		 * the LRU because of laziness during lookup. Do not free it.
+		 */
+		/*
+		 * 我们发现了一个因查找过程中的惰性而没有从LRU中删除的inuse dentry。不要将其释放
 		 */
 		if (dentry->d_lockref.count > 0) {
 			spin_unlock(&dentry->d_lock);
@@ -964,26 +1046,36 @@ static void shrink_dentry_list(struct list_head *list)
 			continue;
 		}
 
-
+		/* 如果这个dentry设置了KILLED flag */
 		if (unlikely(dentry->d_flags & DCACHE_DENTRY_KILLED)) {
+			/* 如果也有free flag */
 			bool can_free = dentry->d_flags & DCACHE_MAY_FREE;
 			spin_unlock(&dentry->d_lock);
 			if (parent)
 				spin_unlock(&parent->d_lock);
+			/* free掉它 */
 			if (can_free)
 				dentry_free(dentry);
 			continue;
 		}
 
 		inode = dentry->d_inode;
-		if (inode && unlikely(!spin_trylock(&inode->i_lock))) {
+		/* 如果这dentry的inode还在，但是inode被锁住了
+		 * 那说明inode还在被用,把它加回到这个链表里面
+		 *
+		 * D_FLAG_VERIFY(dentry, 0);
+		 * list_add(&dentry->d_lru, list);
+		 * dentry->d_flags |= DCACHE_SHRINK_LIST | DCACHE_LRU_LIST;
+		 * this_cpu_inc(nr_dentry_unused);
+		 */
+		 if (inode && unlikely(!spin_trylock(&inode->i_lock))) {
 			d_shrink_add(dentry, list);
 			spin_unlock(&dentry->d_lock);
 			if (parent)
 				spin_unlock(&parent->d_lock);
 			continue;
 		}
-
+		/* 把这个dentry给kill掉 */
 		__dentry_kill(dentry);
 
 		/*
@@ -992,9 +1084,14 @@ static void shrink_dentry_list(struct list_head *list)
 		 * expected to be beneficial in reducing dentry cache
 		 * fragmentation.
 		 */
+		/* 我们也需要消减祖先。
+		 * 这对于防止shrink_dcache_parent（）的二次行为是必要的，
+		 * 但也有望有助于减少dentry缓存碎片。
+		 */
 		dentry = parent;
 		while (dentry && !lockref_put_or_lock(&dentry->d_lockref)) {
 			parent = lock_parent(dentry);
+			/* 说明还有其他的地方引用，我猜应该是该目录下有其他子目录或文件 */
 			if (dentry->d_lockref.count != 1) {
 				dentry->d_lockref.count--;
 				spin_unlock(&dentry->d_lock);
@@ -1002,6 +1099,7 @@ static void shrink_dentry_list(struct list_head *list)
 					spin_unlock(&parent->d_lock);
 				break;
 			}
+			/* 既然你都有子的dentry了,你的inode肯定不会为空啦 */
 			inode = dentry->d_inode;	/* can't be NULL */
 			if (unlikely(!spin_trylock(&inode->i_lock))) {
 				spin_unlock(&dentry->d_lock);
@@ -1010,6 +1108,7 @@ static void shrink_dentry_list(struct list_head *list)
 				cpu_relax();
 				continue;
 			}
+			/* 把父的dentry也给kill掉 */
 			__dentry_kill(dentry);
 			dentry = parent;
 		}
@@ -1164,6 +1263,7 @@ enum d_walk_ret {
  *
  * The @enter() and @finish() callbacks are called with d_lock held.
  */
+/* 遍历dentry树 */
 static void d_walk(struct dentry *parent, void *data,
 		   enum d_walk_ret (*enter)(void *, struct dentry *),
 		   void (*finish)(void *))
@@ -1191,6 +1291,7 @@ again:
 		break;
 	}
 repeat:
+	/* 开始爬这个dentry的子目录了 */
 	next = this_parent->d_subdirs.next;
 resume:
 	while (next != &this_parent->d_subdirs) {
@@ -1217,7 +1318,7 @@ resume:
 			spin_unlock(&dentry->d_lock);
 			continue;
 		}
-
+		/* 如果这个子目录下还有子目录,那么遍历一遍 */
 		if (!list_empty(&dentry->d_subdirs)) {
 			spin_unlock(&this_parent->d_lock);
 			spin_release(&dentry->d_lock.dep_map, 1, _RET_IP_);
@@ -1232,7 +1333,9 @@ resume:
 	 */
 	rcu_read_lock();
 ascend:
+	/* 如果这个parent和原来的parent不一样了，也就是说在这个目录下有子目录的时候 */
 	if (this_parent != parent) {
+		/* 将这个parent变成儿子，将this_parent指向它父亲 */
 		struct dentry *child = this_parent;
 		this_parent = child->d_parent;
 
@@ -1244,12 +1347,15 @@ ascend:
 			goto rename_retry;
 		/* go into the first sibling still alive */
 		do {
+			/* 开始找到这一个的next */
 			next = child->d_child.next;
+			/* 如果说这个目录走到了头，那么接着往parent找 */
 			if (next == &this_parent->d_subdirs)
 				goto ascend;
 			child = list_entry(next, struct dentry, d_child);
 		} while (unlikely(child->d_flags & DCACHE_DENTRY_KILLED));
 		rcu_read_unlock();
+		/* 然后去resume下面接着干活 */
 		goto resume;
 	}
 	if (need_seqretry(&rename_lock, seq))
@@ -1349,14 +1455,20 @@ out:
  * whenever the d_subdirs list is non-empty and continue
  * searching.
  *
- * It returns zero iff there are no unused children,
+ * It returns zero if there are no unused children,
  * otherwise  it returns the number of children moved to
  * the end of the unused list. This may not be the total
  * number of unused children, because select_parent can
  * drop the lock and return early due to latency
  * constraints.
  */
-
+/* 搜索指定父dentry的子dentry链表，通过prune_dcache将any unused dentries
+ * 移动到unused链表的结尾.
+ * 如果这里没有unused children，那么返回0
+ * 否则，他将返回移动到unused list链表的结尾的children数目
+ * 这可能不是unused children的总数，因为select_parent能drop锁
+ * 由于延迟约束，提前返回
+ */
 struct select_data {
 	struct dentry *start;
 	struct list_head dispose;
@@ -1367,16 +1479,23 @@ static enum d_walk_ret select_collect(void *_data, struct dentry *dentry)
 {
 	struct select_data *data = _data;
 	enum d_walk_ret ret = D_WALK_CONTINUE;
-
+	/* 如果这个dentry是start的dentry，那么返回D_WALK_CONTINUE */
 	if (data->start == dentry)
 		goto out;
-
+	/* 如果这个dentry在回收链表里面了，那么data->found++ */
 	if (dentry->d_flags & DCACHE_SHRINK_LIST) {
 		data->found++;
 	} else {
+		/* 如果dentry在LRU链表里面,把它从lru链表里面脱离出来，并且把本CPU的nr_dentry_unused-1 */
 		if (dentry->d_flags & DCACHE_LRU_LIST)
 			d_lru_del(dentry);
+		/* 如果引用计数为0 */
 		if (!dentry->d_lockref.count) {
+			/* 把它加入到data->dispose链表里面去
+			 * dentry->d_flags |= DCACHE_SHRINK_LIST | DCACHE_LRU_LIST;
+			 * 把本CPU的nr_dentry_unused + 1
+			 * this_cpu_inc(nr_dentry_unused);
+			 */
 			d_shrink_add(dentry, &data->dispose);
 			data->found++;
 		}
@@ -1385,6 +1504,9 @@ static enum d_walk_ret select_collect(void *_data, struct dentry *dentry)
 	 * We can return to the caller if we have found some (this
 	 * ensures forward progress). We'll be coming back to find
 	 * the rest.
+	 */
+	/* 如果我们找到了一些，我们可以返回给调用者（这确保了往前走）
+	 * 我们会回来找剩下的
 	 */
 	if (!list_empty(&data->dispose))
 		ret = need_resched() ? D_WALK_QUIT : D_WALK_NORETRY;
@@ -1487,7 +1609,7 @@ static enum d_walk_ret detach_and_collect(void *_data, struct dentry *dentry)
 static void check_and_drop(void *_data)
 {
 	struct detach_data *data = _data;
-
+	/* 如果它不是mount节点，然后select.fount里面又没有找到要回收的dentry，那么drop掉了 */
 	if (!data->mountpoint && !data->select.found)
 		__d_drop(data->select.start);
 }
@@ -1507,6 +1629,7 @@ void d_invalidate(struct dentry *dentry)
 	/*
 	 * If it's already been dropped, return OK.
 	 */
+	/* 如果早被drop掉了，那么直接返回 */
 	spin_lock(&dentry->d_lock);
 	if (d_unhashed(dentry)) {
 		spin_unlock(&dentry->d_lock);
@@ -1515,6 +1638,7 @@ void d_invalidate(struct dentry *dentry)
 	spin_unlock(&dentry->d_lock);
 
 	/* Negative dentries can be dropped without further checks */
+	/* 无需进一步检查就可以drop没用的dentry */
 	if (!dentry->d_inode) {
 		d_drop(dentry);
 		return;
@@ -1522,9 +1646,11 @@ void d_invalidate(struct dentry *dentry)
 
 	for (;;) {
 		struct detach_data data;
-
+		/* 将data的mountpoint设置为NULL */
 		data.mountpoint = NULL;
+		/* 初始化data.select.dispose链表 */
 		INIT_LIST_HEAD(&data.select.dispose);
+		/* 将select.start设置为本dentry */
 		data.select.start = dentry;
 		data.select.found = 0;
 
