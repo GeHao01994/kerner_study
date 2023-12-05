@@ -1571,6 +1571,7 @@ EXPORT_SYMBOL(bmap);
 
 /*
  * Update times in overlayed inode from underlying real inode
+ * 将根本的real inode更新到overlayed的时间
  */
 static void update_ovl_inode_times(struct dentry *dentry, struct inode *inode,
 			       bool rcu)
@@ -1592,10 +1593,14 @@ static void update_ovl_inode_times(struct dentry *dentry, struct inode *inode,
  * earlier than either the ctime or mtime or if at least a day has
  * passed since the last atime update.
  */
+/* 对于相对atime,仅当上一个atime早于ctime或者mtime或者上次atime更新以来，
+ * 至少过去一天了
+ */
 static int relatime_need_update(const struct path *path, struct inode *inode,
 				struct timespec now, bool rcu)
 {
 
+	/* 如果这个路径的mount的flags没有MNT_RELATIME，直接返回1 ? */
 	if (!(path->mnt->mnt_flags & MNT_RELATIME))
 		return 1;
 
@@ -1603,11 +1608,13 @@ static int relatime_need_update(const struct path *path, struct inode *inode,
 	/*
 	 * Is mtime younger than atime? If yes, update atime:
 	 */
+	/* 将文件的最后修改时间和i_atime想比，如果大于，那么要更新 */
 	if (timespec_compare(&inode->i_mtime, &inode->i_atime) >= 0)
 		return 1;
 	/*
 	 * Is ctime younger than atime? If yes, update atime:
 	 */
+	/* 将inode的最后修改时间和i_atime相比，如果大于，那么要更新 */
 	if (timespec_compare(&inode->i_ctime, &inode->i_atime) >= 0)
 		return 1;
 
@@ -1615,6 +1622,7 @@ static int relatime_need_update(const struct path *path, struct inode *inode,
 	 * Is the previous atime value older than a day? If yes,
 	 * update atime:
 	 */
+	/* 如果上一次atmie更新已经过去一天了，如果是的话，那么也要更新 */
 	if ((long)(now.tv_sec - inode->i_atime.tv_sec) >= 24*60*60)
 		return 1;
 	/*
@@ -1638,6 +1646,7 @@ int generic_update_time(struct inode *inode, struct timespec *time, int flags)
 
 	if (!(inode->i_sb->s_flags & MS_LAZYTIME) || (flags & S_VERSION))
 		iflags |= I_DIRTY_SYNC;
+	/* 让dentry变成脏的 */
 	__mark_inode_dirty(inode, iflags);
 	return 0;
 }
@@ -1646,6 +1655,9 @@ EXPORT_SYMBOL(generic_update_time);
 /*
  * This does the actual work of updating an inodes time or version.  Must have
  * had called mnt_want_write() before calling this.
+ */
+/* 这完成了更新inodes时间或版本的实际工作。
+ * 在调用此之前，一定已调用mnt_want_write
  */
 static int update_time(struct inode *inode, struct timespec *time, int flags)
 {
@@ -1666,36 +1678,45 @@ static int update_time(struct inode *inode, struct timespec *time, int flags)
  *	This function automatically handles read only file systems and media,
  *	as well as the "noatime" flag and inode specific "noatime" markers.
  */
+/* touch_atime - 更新访问时间
+ *
+ * 更新访问时间对于inode结点，并将其标记为写回，
+ * 这个函数自动处理只读文件系统和介质
+ * 以及有“noatime”的flag和指定“noatime”标记的inode
+ */
 bool __atime_needs_update(const struct path *path, struct inode *inode,
 			  bool rcu)
 {
 	struct vfsmount *mnt = path->mnt;
 	struct timespec now;
-
+	/* 如果这个i_flag有S_NOATIME，那么直接返回flag */
 	if (inode->i_flags & S_NOATIME)
 		return false;
 
 	/* Atime updates will likely cause i_uid and i_gid to be written
 	 * back improprely if their true value is unknown to the vfs.
 	 */
+	/* 如果vfs不知道i_uid和i_gid的真实值，则Atime更新可能会导致它们被不适当地写回。*/
 	if (HAS_UNMAPPED_ID(inode))
 		return false;
-
+	/* #define IS_NOATIME(inode)	__IS_FLG(inode, MS_RDONLY|MS_NOATIME)
+	 * 如果设置了只读或者NOATIME，也没必要更新了 */
 	if (IS_NOATIME(inode))
 		return false;
+	/* 检查super_block的flag是不是MS_NODIRATIME，然后inode还是个目录 */
 	if ((inode->i_sb->s_flags & MS_NODIRATIME) && S_ISDIR(inode->i_mode))
 		return false;
-
+	/* 检查mount点是不是NOATIME的 */
 	if (mnt->mnt_flags & MNT_NOATIME)
 		return false;
 	if ((mnt->mnt_flags & MNT_NODIRATIME) && S_ISDIR(inode->i_mode))
 		return false;
-
+	/* 拿到当前时间,然后要跟super_block里面对应的精度来计算，得到一个时间*/
 	now = current_time(inode);
 
 	if (!relatime_need_update(path, inode, now, rcu))
 		return false;
-
+	/* 如果now和现在相等，那么也退出 */
 	if (timespec_equal(&inode->i_atime, &now))
 		return false;
 
@@ -1725,7 +1746,12 @@ void touch_atime(const struct path *path)
 	 * We may also fail on filesystems that have the ability to make parts
 	 * of the fs read only, e.g. subvolumes in Btrfs.
 	 */
+	/* 如果文件系统需要分配新的空间去修改inode(Btrfs就是这种情况)，那么他们在更新inode时可能出错，
+	 * 但是由于我们修改atime在查找路径的时候，我们真的不在乎是否未能更新到文件的atime,因此忽略返回值.
+	 * 我们也可能在能够使fs的某些部分只读的文件系统上失败，例如Btrfs中的子卷。
+	 */
 	now = current_time(inode);
+	/* 开始真正的update atime了，实际上，这里也只是将其标记为dirty */
 	update_time(inode, &now, S_ATIME);
 	__mnt_drop_write(mnt);
 skip_update:

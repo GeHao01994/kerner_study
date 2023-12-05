@@ -1085,6 +1085,9 @@ static int may_linkat(struct path *link)
 static __always_inline
 const char *get_link(struct nameidata *nd)
 {
+	/* 得到最后一个进来的软链接
+	 * 譬如，如果是should_follow_link里面分配的，那么就指向刚刚分配的那个saved
+	 */
 	struct saved *last = nd->stack + nd->depth - 1;
 	struct dentry *dentry = last->link.dentry;
 	struct inode *inode = nd->link_inode;
@@ -1092,6 +1095,7 @@ const char *get_link(struct nameidata *nd)
 	const char *res;
 
 	if (!(nd->flags & LOOKUP_RCU)) {
+		/* 更新文件的访问时间，读取内容会更新 */
 		touch_atime(&last->link);
 		cond_resched();
 	} else if (atime_needs_update_rcu(&last->link, inode)) {
@@ -1104,7 +1108,7 @@ const char *get_link(struct nameidata *nd)
 					   nd->flags & LOOKUP_RCU);
 	if (unlikely(error))
 		return ERR_PTR(error);
-
+	/* 设置此次的type为LAST_BIND，也就是软链接 */
 	nd->last_type = LAST_BIND;
 	res = inode->i_link;
 	if (!res) {
@@ -1112,13 +1116,16 @@ const char *get_link(struct nameidata *nd)
 				struct delayed_call *);
 		get = inode->i_op->get_link;
 		if (nd->flags & LOOKUP_RCU) {
+			/* 调用inode中的get_link()方法完成符号链接解析 */
 			res = get(NULL, inode, &last->done);
 			if (res == ERR_PTR(-ECHILD)) {
 				if (unlikely(unlazy_walk(nd, NULL, 0)))
 					return ERR_PTR(-ECHILD);
+				/* 调用inode中的get_link()方法完成符号链接解析 */
 				res = get(dentry, inode, &last->done);
 			}
 		} else {
+			/* 调用inode中的get_link()方法完成符号链接解析 */
 			res = get(dentry, inode, &last->done);
 		}
 		if (IS_ERR_OR_NULL(res))
@@ -1861,10 +1868,11 @@ static int pick_link(struct nameidata *nd, struct path *link,
 			return error;
 		}
 	}
-
+	/* 然后把link（也就是这个软链接的path放到depth里面，depth再++) */
 	last = nd->stack + nd->depth++;
 	last->link = *link;
 	clear_delayed_call(&last->done);
+	/* 把inode放到nd的link_inode里面去 */
 	nd->link_inode = inode;
 	last->seq = seq;
 	return 1;
@@ -1948,6 +1956,10 @@ static int walk_component(struct nameidata *nd, int flags)
 	err = should_follow_link(nd, &path, flags & WALK_GET, inode, seq);
 	if (unlikely(err))
 		return err;
+	/* 把path转换成nameidata，你可以细品一下，这里没有动到nameidata的stack域
+	 * 所以说刚刚分析的软链接的那个stack那个是指的整个nameidata
+	 * 不会随着path来动
+	 */
 	path_to_nameidata(&path, nd);
 	nd->inode = inode;
 	nd->seq = seq;
@@ -2307,7 +2319,7 @@ OK:
 		}
 		if (err < 0)
 			return err;
-
+		/* 如果说是个软链接，那么这里进行处理 */
 		if (err) {
 			const char *s = get_link(nd);
 
