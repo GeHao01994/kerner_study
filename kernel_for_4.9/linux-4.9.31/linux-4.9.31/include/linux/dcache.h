@@ -139,6 +139,7 @@ struct dentry {
 	union {
 		/* 链入到所属inode的i_dentry(别名)链表的“连接件” */
 		struct hlist_node d_alias;	/* inode alias list */
+		/* 新创建dentry后，将其放入该表中，以便并发访问的其他程序能够找到。关联inode后，就从中删除不会用了 */
 		struct hlist_bl_node d_in_lookup_hash;	/* only for in-lookup ones */
 	 	struct rcu_head d_rcu;
 	} d_u;
@@ -232,6 +233,15 @@ struct dentry_operations {
 #define DCACHE_OP_DELETE		0x00000008
 #define DCACHE_OP_PRUNE			0x00000010
 
+/* 这个dentry可能当前没有连接到dcache的树中，在这种情况下，它的父母将是它自己
+ * 也将具有这个flag。
+ * nfsd不会使用带了这个标志位的dentry，而是首先努力去清楚这个标志位当发现他已经
+ * 链接的时候，或者指向查找操作的时候。
+ *
+ * 任何支持nfsd_operations的文件系统必须有一个lookup函数，如果如果它找到了一个
+ * 带有DCACHE_DISCONNECTED的dentry,将d_move 这个dentry到位置，然后返回这个dentry
+ * 而不是传递的那个，通常被d_splice_alias使用
+ */
 #define	DCACHE_DISCONNECTED		0x00000020
      /* This dentry is possibly not currently connected to the dcache tree, in
       * which case its parent will either be itself, or will have this flag as
@@ -242,7 +252,6 @@ struct dentry_operations {
       * directory inode with a DCACHE_DISCONNECTED dentry, will d_move that
       * dentry into place and return that dentry rather than the passed one,
       * typically using d_splice_alias. */
-
 #define DCACHE_REFERENCED		0x00000040 /* Recently used, don't discard. */
 #define DCACHE_RCUACCESS		0x00000080 /* Entry has ever been RCU-visible */
 

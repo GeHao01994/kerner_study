@@ -792,18 +792,28 @@ static inline bool fast_dput(struct dentry *dentry)
 /* 
  * This is dput
  *
+ * 这是dput
+ *
  * This is complicated by the fact that we do not want to put
  * dentries that are no longer on any hash chain on the unused
  * list: we'd much rather just get rid of them immediately.
+ *
+ * 事实让情况变得很复杂（我们不想将太久没有在任何hash链表上的dentry放到 unused list,
+ * 我们更愿意立即去删除它
  *
  * However, that implies that we have to traverse the dentry
  * tree upwards to the parents which might _also_ now be
  * scheduled for deletion (it may have been only waiting for
  * its last child to go away).
  *
+ * 然而，这意味着我们必须向上遍历dentry树直到父母，他们现在可能也被安排删除
+ *（它可能只是在等待最后一个孩子离开）。
  * This tail recursion is done by hand as we don't want to depend
  * on the compiler to always get this right (gcc generally doesn't).
  * Real recursion would eat up our stack space.
+ *
+ * 这个尾部递归是手工完成的，因为我们不想总是依赖编译器来完成（gcc通常不会）。
+ * 真正的递归会占用我们的堆栈空间。
  */
 
 /*
@@ -814,6 +824,11 @@ static inline bool fast_dput(struct dentry *dentry)
  * call the dentry unlink method as well as removing it from the queues and
  * releasing its resources. If the parent dentries were scheduled for release
  * they too may now get deleted.
+ *
+ * 释放dentry。这将减少使用计数，
+ * 并在适当的情况下调用dentry unlink方法，将其从队列中删除并释放其资源。
+ * 如果父dentries计划释放，那么它们现在也可能被删除。
+ *
  */
 void dput(struct dentry *dentry)
 {
@@ -833,23 +848,25 @@ repeat:
 	rcu_read_unlock();
 
 	WARN_ON(d_in_lookup(dentry));
-
+	/* 如果不在hash链表里面，直接kill掉 */
 	/* Unreachable? Get rid of it */
 	if (unlikely(d_unhashed(dentry)))
 		goto kill_it;
-
+	/* 如果带有DCACHE_DISCONNECTED标志，也kill掉吧*/
 	if (unlikely(dentry->d_flags & DCACHE_DISCONNECTED))
 		goto kill_it;
 
+	/* 如果有OP_DELETE，那么就调用来删除detry */
 	if (unlikely(dentry->d_flags & DCACHE_OP_DELETE)) {
 		if (dentry->d_op->d_delete(dentry))
 			goto kill_it;
 	}
-
+	/* #define DCACHE_REFERENCED   0x0040 Recently used, don't discard.*/
 	if (!(dentry->d_flags & DCACHE_REFERENCED))
 		dentry->d_flags |= DCACHE_REFERENCED;
+	/* 添加到lru链表 */
 	dentry_lru_add(dentry);
-
+	/* dentry的count-- */
 	dentry->d_lockref.count--;
 	spin_unlock(&dentry->d_lock);
 	return;
@@ -2561,8 +2578,10 @@ struct dentry *d_alloc_parallel(struct dentry *parent,
 				wait_queue_head_t *wq)
 {
 	unsigned int hash = name->hash;
+	/* 这个是lookup的hash 链表,这个里面住的都是临时的lookup的链表，如果你不lookup了，那就拜拜 */
 	struct hlist_bl_head *b = in_lookup_hash(parent, hash);
 	struct hlist_bl_node *node;
+	/* 分配dentry结构体 */
 	struct dentry *new = d_alloc(parent, name);
 	struct dentry *dentry;
 	unsigned seq, r_seq, d_seq;
@@ -2574,8 +2593,14 @@ retry:
 	rcu_read_lock();
 	seq = smp_load_acquire(&parent->d_inode->i_dir_seq) & ~1;
 	r_seq = read_seqbegin(&rename_lock);
+	/* 在hash表里面去找*/
 	dentry = __d_lookup_rcu(parent, name, &d_seq);
+	/* 如果找到了 */
 	if (unlikely(dentry)) {
+		/* lockref_get_not_dead - Increments count unless the ref is dead
+		 * @lockref: pointer to lockref structure
+		 * Return: 1 if count updated successfully or 0 if lockref was dead
+		 */
 		if (!lockref_get_not_dead(&dentry->d_lockref)) {
 			rcu_read_unlock();
 			goto retry;
@@ -2586,6 +2611,7 @@ retry:
 			goto retry;
 		}
 		rcu_read_unlock();
+		/* 释放掉刚刚分配的dentry */
 		dput(new);
 		return dentry;
 	}
@@ -2605,6 +2631,15 @@ retry:
 	 * any potential in-lookup matches are going to stay here until
 	 * we unlock the chain.  All fields are stable in everything
 	 * we encounter.
+	 */
+	/* 自从d_lookup开始以来 parent就没有改变
+	 * 因为所有从chain中移除都是在hlist_bl_lock下发生的，
+	 * 任何可能的in-lookup匹配都将停留在此处，直到我们解锁了chain.
+	 * 所有域都是稳定的，在我们遇到的每件事情
+	 */
+	/* 这里比较容易混淆，实际上上面有个__d_lookup_rcu，他们两个的hash链表是不同的
+	 * __d_lookup_rcu用的是dentry_hashtable
+	 * 这里用的是in_lookup_hashtable
 	 */
 	hlist_bl_for_each_entry(dentry, node, b, d_u.d_in_lookup_hash) {
 		if (dentry->d_name.hash != hash)
@@ -2650,6 +2685,7 @@ retry:
 	/* we can't take ->d_lock here; it's OK, though. */
 	new->d_flags |= DCACHE_PAR_LOOKUP;
 	new->d_wait = wq;
+	/* 将其添加到hash链表里面去 */
 	hlist_bl_add_head_rcu(&new->d_u.d_in_lookup_hash, b);
 	hlist_bl_unlock(b);
 	return new;
