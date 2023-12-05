@@ -656,10 +656,21 @@ static bool path_connected(const struct path *path)
 
 static inline int nd_alloc_stack(struct nameidata *nd)
 {
+	/* 如果depth不等于EMBEDDED_LEVELS,
+	 * depth只有两种情况，要么等于EMBEDDED_LEVELS
+	 * 要么就是说它之前已经被alloc过，那尽然你都
+	 * alloc过了，说明你已经超过了EMBEDDED_LEVELS
+	 * 并且之前分配了#define MAXSYMLINKS 40的空间
+	 * 太多了，分配不了了
+	 */
 	if (likely(nd->depth != EMBEDDED_LEVELS))
 		return 0;
+	/* 同理，如果你分配了stack，那么nd->stack会指向分配的那段动态空间
+	 * 而不会指向你内部的那个stack
+	 */
 	if (likely(nd->stack != nd->internal))
 		return 0;
+	/* 分配stack,并将nd->internal拷贝进来，然后那nd->stack赋值动态分配的空间 */
 	return __nd_alloc_stack(nd);
 }
 
@@ -1247,6 +1258,14 @@ static int follow_automount(struct path *path, struct nameidata *nd,
  *
  * Serialization is taken care of in namespace.c
  */
+/*
+ * 处理以某种方式管理的dentry
+ * 标记为中转管理的(autofs)
+ * 标记为mountpoint
+ * 标记为automount point
+ * 这个只能在refwalk模式下被调用
+ * 在namespace串行应该小心
+ */
 static int follow_managed(struct path *path, struct nameidata *nd)
 {
 	struct vfsmount *mnt = path->mnt; /* held by caller, must be left alone */
@@ -1262,6 +1281,7 @@ static int follow_managed(struct path *path, struct nameidata *nd)
 	       unlikely(managed != 0)) {
 		/* Allow the filesystem to manage the transit without i_mutex
 		 * being held. */
+		/* 如果是transit management (autofs) */
 		if (managed & DCACHE_MANAGE_TRANSIT) {
 			BUG_ON(!path->dentry->d_op);
 			BUG_ON(!path->dentry->d_op->d_manage);
@@ -1269,7 +1289,7 @@ static int follow_managed(struct path *path, struct nameidata *nd)
 			if (ret < 0)
 				break;
 		}
-
+		/* 如果是mountpoint */
 		/* Transit to a mounted filesystem. */
 		if (managed & DCACHE_MOUNTED) {
 			struct vfsmount *mounted = lookup_mnt(path);
@@ -1288,7 +1308,7 @@ static int follow_managed(struct path *path, struct nameidata *nd)
 			 * namespace got unmounted before lookup_mnt() could
 			 * get it */
 		}
-
+		/* 如果是automount point */
 		/* Handle an automount point */
 		if (managed & DCACHE_NEED_AUTOMOUNT) {
 			ret = follow_automount(path, nd, &need_mntput);
@@ -1718,7 +1738,9 @@ static int lookup_fast(struct nameidata *nd,
 
 	path->mnt = mnt;
 	path->dentry = dentry;
+	// 处理按照某种方式管理的目录（自动挂载工具 autofs 管理这个目录的跳转，挂载点或自动挂载点。
 	err = follow_managed(path, nd);
+	/* 得到这个inode */
 	if (likely(err > 0))
 		*inode = d_backing_inode(path->dentry);
 	return err;
@@ -1738,9 +1760,11 @@ static struct dentry *lookup_slow(const struct qstr *name,
 	if (unlikely(IS_DEADDIR(inode)))
 		goto out;
 again:
+	/* 分配一个dentry的结构体 */
 	dentry = d_alloc_parallel(dir, name, &wq);
 	if (IS_ERR(dentry))
 		goto out;
+	/* 如果说dentry没有在lookup中 */
 	if (unlikely(!d_in_lookup(dentry))) {
 		if ((dentry->d_flags & DCACHE_OP_REVALIDATE) &&
 		    !(flags & LOOKUP_NO_REVAL)) {
@@ -1756,8 +1780,18 @@ again:
 			}
 		}
 	} else {
+		/* 从文件系统中由父节点（inode）代表的那个目录中寻找当前节点（dentry）的目录项
+		 * 并设置结构中的其他信息，且读入其索引节点，在内存中建立对应的inode结构。
+		 * 该过程因文件系统而异。所以要通过父节点inode结构中的指针i_op找到相应的inode_operations数据结构。
+		 * 该方法只对代表目录的inode有意义。
+		 * 第一个参数指向父目录的inode描述符的指针;
+		 * 第二个为指向子目录的dentry描述符的指针.
+		 * 在调用函数之前，已经为子节点分配了dentry,并且将它关联到父目录的dentry,
+		 * 但是它还没有被关联到inode
+		 */
 		old = inode->i_op->lookup(inode, dentry, flags);
 		d_lookup_done(dentry);
+		//如果dentry是一个目录的dentry，则有可能old是有效的；否则如果dentry是文件的dentry则old是null
 		if (unlikely(old)) {
 			dput(dentry);
 			dentry = old;
@@ -1799,6 +1833,13 @@ static int pick_link(struct nameidata *nd, struct path *link,
 {
 	int error;
 	struct saved *last;
+	/* 假设一个符号链接指向自己。当然解析含有这样的符号链接的路径名
+	 * 可能导致无休止的递归调用流，这又依次引发内核栈的溢出。
+	 * total_link_count域记录在元查找操作中哟多少符号链接被跟踪，
+	 * 如果这个计数器的值达到40，则查找操作终止。没有这个计数器，
+	 * 怀有恶意的用户就可能创建一个病态的路径名，让其中包含很多连续
+	 * 的符号链接，使内核在无休止的查找操作中冻结
+	 */
 	if (unlikely(nd->total_link_count++ >= MAXSYMLINKS)) {
 		path_to_nameidata(link, nd);
 		return -ELOOP;
@@ -1807,6 +1848,7 @@ static int pick_link(struct nameidata *nd, struct path *link,
 		if (link->mnt == nd->path.mnt)
 			mntget(link->mnt);
 	}
+	/* 分配nd的栈 */
 	error = nd_alloc_stack(nd);
 	if (unlikely(error)) {
 		if (error == -ECHILD) {
@@ -1838,6 +1880,7 @@ static inline int should_follow_link(struct nameidata *nd, struct path *link,
 				     int follow,
 				     struct inode *inode, unsigned seq)
 {
+	/* 如果它不是个软链接，那么直接退出吧 */
 	if (likely(!d_is_symlink(link->dentry)))
 		return 0;
 	if (!follow)
@@ -1877,12 +1920,14 @@ static int walk_component(struct nameidata *nd, int flags)
 	if (unlikely(err <= 0)) {
 		if (err < 0)
 			return err;
+		/* 如果在内存中的dentry里面美艺找到，那么就进入slow了 */
 		path.dentry = lookup_slow(&nd->last, nd->path.dentry,
 					  nd->flags);
 		if (IS_ERR(path.dentry))
 			return PTR_ERR(path.dentry);
 
 		path.mnt = nd->path.mnt;
+		/* 处理它是managed的情况 */
 		err = follow_managed(&path, nd);
 		if (unlikely(err < 0))
 			return err;
@@ -1893,11 +1938,13 @@ static int walk_component(struct nameidata *nd, int flags)
 		}
 
 		seq = 0;	/* we are already out of RCU mode */
+		/* 拿到这个dentry的inode */
 		inode = d_backing_inode(path.dentry);
 	}
 
 	if (flags & WALK_PUT)
 		put_link(nd);
+	/* 这里就是处理链接的case了 */
 	err = should_follow_link(nd, &path, flags & WALK_GET, inode, seq);
 	if (unlikely(err))
 		return err;
