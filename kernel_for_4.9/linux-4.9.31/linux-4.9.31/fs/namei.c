@@ -747,7 +747,13 @@ static bool legitimize_links(struct nameidata *nd)
  * (eg. a seqcount has changed), then failure is returned and it's up to caller
  * to restart the path walk from the beginning in ref-walk mode.
  */
-
+/* Path walking有两种模式，rcu-walk和ref-walk（(see Documentation/filesystems/path-lookup.txt).
+ * 在无法继续使用rcu-walk模式的情况下，我们会尝试退出rcu-walking模式并获取
+ * 正常的dentry和vfsmounts去转换成ref-walk模式。
+ * refcounts在rcu-walk卡主之前最后一个已知的好的点在rcu-walk获取，所以ref-walk
+ * 可以从这里继续。如果它没有成功（例如seqcount被改变了），则返回失败，
+ * 由调用者在ref-walk模式下从头开始重新启动路径path walk
+ */
 /**
  * unlazy_walk - try to switch to ref-walk mode.
  * @nd: nameidata pathwalk data
@@ -760,6 +766,12 @@ static bool legitimize_links(struct nameidata *nd)
  * @nd or NULL.  Must be called from rcu-walk context.
  * Nothing should touch nameidata between unlazy_walk() failure and
  * terminate_walk().
+ */
+/* unlazy_walk - 尝试切换到ref-walk模式
+ * unlazy_walk试图让当前nd->path、nd->root和dentry在ref-walk模式下合法化。
+ * dentry必须是一个在do_lookup_call上找到的path或者是NULL.
+ * 必须在rcu_walk内容上调用.
+ * 在unlazy_walk失败和terminate_walk之间，任何实物都不能接触到nameidata
  */
 static int unlazy_walk(struct nameidata *nd, struct dentry *dentry, unsigned seq)
 {
@@ -872,10 +884,25 @@ static int complete_walk(struct nameidata *nd)
 		if (unlikely(unlazy_walk(nd, NULL, 0)))
 			return -ECHILD;
 	}
-
+	/* 如果nd的flag里面没有设置了LOOKUP_JUMPED */
 	if (likely(!(nd->flags & LOOKUP_JUMPED)))
 		return 0;
 
+	/* _weak_revalidate
+	 * called when the VFS needs to revalidate a “jumped” dentry.
+	 * This is called when a path-walk ends at dentry that was not acquired by doing a lookup in the parent directory.
+	 * This includes “/”, “.” and “…”, as well as procfs-style symlinks and mountpoint traversal.
+	 * 当 VFS 需要重新验证“跳转”的 dentry 时调用。 当路径漫步在 dentry 结束时调用这个函数，该 dentry 不是通过在父目录中执行查找获得的
+	 * 这包括“ / ”,“.” 及"…" ，以及 procfs 风格的符号链接和挂载点遍历.
+	 * In this case, we are less concerned with whether the dentry is still fully correct,
+	 * but rather that the inode is still valid. As with d_revalidate, most local filesystems will set this to NULL since their dcache entries are always valid.
+	 * 在这种情况下，我们不太关心 dentry 是否仍然完全正确，而是关心 inode 是否仍然有效.
+	 * 与 d_revalidate一样，大多数本地文件系统将此值设置为 NULL，因为它们的 dcache 条目始终有效.
+	 * This function has the same return code semantics as d_revalidate.
+	 * 此函数具有与 d_revalidate相同的返回码语义
+	 * d_weak_revalidate is only called after leaving rcu-walk mode.
+	 * d_weak_revalidate仅在离开 rcu-walk 模式后调用
+	 */
 	if (likely(!(dentry->d_flags & DCACHE_OP_WEAK_REVALIDATE)))
 		return 0;
 
@@ -985,21 +1012,45 @@ int sysctl_protected_hardlinks __read_mostly = 0;
  *
  * Returns 0 if following the symlink is allowed, -ve on error.
  */
+/* -检查以下符号链接是否存在不安全情况
+ *
+ *
+ * 在sysctl_protected_symlinks sysctl being enabled的情况下，
+ * 如果软链接是sticky world-writable 目录，CAP_DAC_OVERRIDE 需要被特别忽略。
+ * 这是为了保护特权进程免受与路径名的失败竞争，这些路径名可能会通过其他用户创建恶意符号链接而从其下更改
+ * 只有在stucky world-writable 可写目录之外，或者符号链接和follower的uid匹配，
+ * 或者目录所有者与符号链接的所有者匹配时，它才会允许符号链接被follower。
+ */
 static inline int may_follow_link(struct nameidata *nd)
 {
 	const struct inode *inode;
 	const struct inode *parent;
 	kuid_t puid;
-
+	/* 如果 sysctl_protected_symlinks disable的情况下，那么直接返回0 */
 	if (!sysctl_protected_symlinks)
 		return 0;
 
 	/* Allowed if owner and follower match. */
+	/* 如果current的fsuid和当前i_uid相等的情况下，返回0 */
 	inode = nd->link_inode;
 	if (uid_eq(current_cred()->fsuid, inode->i_uid))
 		return 0;
 
 	/* Allowed if parent directory not sticky and world-writable. */
+	/* 在UNIX尚未使用请求分页式技术的早期版本中，S_ISVTX位被称为粘着位（sticky bit）。
+	 * 如果一个可执行程序文件的这一位被设置了，那么当该程序第一次被执行，在其终止时，程序正文部分的一个副本仍被保存在交换区（程序的正文部分是机器指令）。
+	 * 这使得下次执行该程序时能较快地将其装载入内存。其原因是：通常的UNIX文件系统中，文件的各数据块很可能是随机存放的，相比较而言，交换区是被作为一个连续文件来处理的。
+	 * 对于通用的应用程序，如文本编辑程序和C语言编译器，我们常常设置它们所在文件的粘着位。
+	 * 自然地，对于在交换区中可以同时存放的设置了粘着位的文件数是有限制的，以免过多占用交换区空间，但无论如何这是一个有用的技术。
+	 * 现今较新的UNIX系统大多数都配置了虚拟存储系统以及快速文件系统，所以不再需要使用这种技术。
+	 * 现今的系统扩展了粘着位的使用范围，Single UNIX Specification允许针对目录设置粘着位。如果对一个目录设置了粘着位，只有对该目录具有写权限的用户并且满足下列条件之一，才能删除或重命名该目录下的文件：
+	 * 1、拥有此文件
+	 * 2、拥有此目录
+	 * 3、超级用户
+	 */
+	/* S_IWOTH 表示对于普通文件来说许可其他写文件
+	 * 对于目录来说许可其他在目录中删除和创建文件
+	 */
 	parent = nd->inode;
 	if ((parent->i_mode & (S_ISVTX|S_IWOTH)) != (S_ISVTX|S_IWOTH))
 		return 0;
@@ -1131,9 +1182,11 @@ const char *get_link(struct nameidata *nd)
 		if (IS_ERR_OR_NULL(res))
 			return res;
 	}
+	/* 如果软链接对应的路径有“/”,那么跳到root */
 	if (*res == '/') {
 		if (!nd->root.mnt)
 			set_root(nd);
+			/* 跳到root */
 		if (unlikely(nd_jump_root(nd)))
 			return ERR_PTR(-ECHILD);
 		while (unlikely(*++res == '/'))
@@ -1898,6 +1951,7 @@ static inline int should_follow_link(struct nameidata *nd, struct path *link,
 		if (read_seqcount_retry(&link->dentry->d_seq, seq))
 			return -ECHILD;
 	}
+	/* 处理软链接 */
 	return pick_link(nd, link, inode, seq);
 }
 
@@ -2286,7 +2340,7 @@ static int link_path_walk(const char *name, struct nameidata *nd)
 		nd->last_type = type;
 		/* 让name偏移hash_len个字节，得到下一个路径 */
 		name += hashlen_len(hash_len);
-		/* 如果是空的话，直接返回了 */
+		/* 如果是空的话，直接返回了,这里譬如/dev/sda,那么就到这里可以结束了 */
 		if (!*name)
 			goto OK;
 		/*
@@ -2297,7 +2351,7 @@ static int link_path_walk(const char *name, struct nameidata *nd)
 		do {
 			name++;
 		} while (unlikely(*name == '/'));
-		/* 如果跳过之后是空的,也就是说name是最后一个节点*/
+		/* 如果跳过之后是空的,也就是说name是最后一个节点 譬如/dev/sda/ */
 		if (unlikely(!*name)) {
 OK:
 			/* pathname body, done */
@@ -2309,6 +2363,7 @@ OK:
 			/* 如果depth有数，说明这里面有软链接 */
 			name = nd->stack[nd->depth - 1].name;
 			/* trailing symlink, done */
+			/* 如果是，那说明是尾部符号链接，也可以退出了 */
 			if (!name)
 				return 0;
 			/* last component of nested symlink */
@@ -2321,20 +2376,25 @@ OK:
 			return err;
 		/* 如果说是个软链接，那么这里进行处理 */
 		if (err) {
+			/* 获得这个软链接对应的文件路径 */
 			const char *s = get_link(nd);
-
+			/* 如果是error，那么直接返回error */
 			if (IS_ERR(s))
 				return PTR_ERR(s);
 			err = 0;
+			/* 如果是空的 */
 			if (unlikely(!s)) {
 				/* jumped */
+				/* 你找出来都是NULL，那么就清掉其stack */
 				put_link(nd);
 			} else {
+				/* 如果不是NULL，那么就填充 */
 				nd->stack[nd->depth - 1].name = name;
 				name = s;
 				continue;
 			}
 		}
+		/* 如果这个dentry不能lookup,也就是不是目录，那么直接退出了 */
 		if (unlikely(!d_can_lookup(nd->path.dentry))) {
 			if (nd->flags & LOOKUP_RCU) {
 				if (unlazy_walk(nd, NULL, 0))
@@ -2458,16 +2518,19 @@ static const char *trailing_symlink(struct nameidata *nd)
 		return ERR_PTR(error);
 	nd->flags |= LOOKUP_PARENT;
 	nd->stack[0].name = NULL;
+	/* 获得这个软链接里面的真身，得到的是软链接里面的那个指向的字串 */
 	s = get_link(nd);
 	return s ? s : "";
 }
 
 static inline int lookup_last(struct nameidata *nd)
 {
+	/* 可能是个目录 nd->last.name[nd->last.len] 要么是空要么是/,譬如/dev/sda/ */
 	if (nd->last_type == LAST_NORM && nd->last.name[nd->last.len])
 		nd->flags |= LOOKUP_FOLLOW | LOOKUP_DIRECTORY;
 
 	nd->flags &= ~LOOKUP_PARENT;
+	/* 然后为last成员再找一轮，更新nd */
 	return walk_component(nd,
 			nd->flags & LOOKUP_FOLLOW
 				? nd->depth
@@ -2486,6 +2549,10 @@ static int path_lookupat(struct nameidata *nd, unsigned flags, struct path *path
 		return PTR_ERR(s);
 	while (!(err = link_path_walk(s, nd))
 		&& ((err = lookup_last(nd)) > 0)) {
+		/* 处理最后一个last是链接的情况，如果是链接，那么pick_link会返回1
+		 * 进到这个里面
+		 * 然后回去到s之后在进行一轮walk
+		 */
 		s = trailing_symlink(nd);
 		if (IS_ERR(s)) {
 			err = PTR_ERR(s);
@@ -2494,15 +2561,17 @@ static int path_lookupat(struct nameidata *nd, unsigned flags, struct path *path
 	}
 	if (!err)
 		err = complete_walk(nd);
-
+	/* 如果他是目录，但是又不能查找，那就有问题了啊 */
 	if (!err && nd->flags & LOOKUP_DIRECTORY)
 		if (!d_can_lookup(nd->path.dentry))
 			err = -ENOTDIR;
 	if (!err) {
+		/* 把我们的path拿出来 */
 		*path = nd->path;
 		nd->path.mnt = NULL;
 		nd->path.dentry = NULL;
 	}
+	/* 清理一下找出来的软链接相关 */
 	terminate_walk(nd);
 	return err;
 }
