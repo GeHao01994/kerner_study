@@ -2641,6 +2641,20 @@ retry:
 	 * __d_lookup_rcu用的是dentry_hashtable
 	 * 这里用的是in_lookup_hashtable
 	 */
+	/* d_alloc_parallel首先alloc一个dentry，然后调用__d_lookup_rcu在dcache里快速查找是否有当前目录对应的dentry，
+	 * 这个在不考虑并发的情况下，是找不到的。在并发条件下，可能不止一个线程去lookup当前目录，可能在其它cpu上的线程也在同时lookup这个目录。
+	 * 然后是在lookup hash链表上查找是否有当前目录对应的dentry，同样，在并发的条件下，有可能其它线程也在alloc当前目录，
+	 * 因为此时会进入具体的文件系统lookup当前目录，会去读取目录文件lookup当前目录，所以会涉及到IO操作，而IO操作是比较耗时的，
+	 * 有可能有其它线程已经将当前目录dentry加入了lookup hash链表但还在具体文件系统那边lookup，还没有完成整个当前目录的lookup，
+	 * 所以如果此时当前目录已经在lookup hash链表的话，当前lookup需要等其它线程完成它在具体文件系统那边的lookup过程，
+	 * 它那边完成了整个的lookup过程后，会将当前目录对应的dentry从lookup hash链表中移除，
+	 * 所以在d_alloc_parallel()里在lookup hash链表里查找时，
+	 * 如果该链表上的一个dentry的hash值、parent、name和当前目录的一致（说明当前目录已经在lookup hash链表上了），
+	 * 则会调用d_wait_lookup()等待当前目录的dentry从lookup hash链表上移除。d_wait_lookup()之后，
+	 * 基本会直接返回这个从lookup hash链表上找到的dentry，在return此dentry之前会先将上面已经alloc的dentry put
+	 * 如果在lookup hash上没有找到当前目录的dentry，说明当前目录没有在此hash链表上，即在此时没有人也在lookup当前目录。
+	 * 此时会将新alloc的dentry的flags的DCACHE_PAR_LOOKUP flag置上，并把新alloc的dentry加入到lookup hash，最终return此dentry
+	 */
 	hlist_bl_for_each_entry(dentry, node, b, d_u.d_in_lookup_hash) {
 		if (dentry->d_name.hash != hash)
 			continue;
@@ -2677,6 +2691,9 @@ retry:
 		if (unlikely(!d_same_name(dentry, parent, name)))
 			goto mismatch;
 		/* OK, it *is* a hashed match; return it */
+		/* 如果匹配到了，那么就说明有人已经分配过了，
+		 * 那么就释放我们分配的，返回它自己
+		 */
 		spin_unlock(&dentry->d_lock);
 		dput(new);
 		return dentry;

@@ -708,6 +708,7 @@ static int do_dentry_open(struct file *f,
 				FMODE_PREAD | FMODE_PWRITE;
 
 	path_get(&f->f_path);
+	/* 设置inode */
 	f->f_inode = inode;
 	f->f_mapping = inode->i_mapping;
 
@@ -732,7 +733,7 @@ static int do_dentry_open(struct file *f,
 	/* POSIX.1-2008/SUSv4 Section XSI 2.9.7 */
 	if (S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode))
 		f->f_mode |= FMODE_ATOMIC_POS;
-
+	/* 设置f_op为inode描述符的f_op */
 	f->f_op = fops_get(inode->i_fop);
 	if (unlikely(WARN_ON(!f->f_op))) {
 		error = -ENODEV;
@@ -746,7 +747,11 @@ static int do_dentry_open(struct file *f,
 	error = break_lease(locks_inode(f), f->f_flags);
 	if (error)
 		goto cleanup_all;
-
+	/* 一般来说，函数被调用时传入的open参数为NULL，
+	 * 如果inode的文件系统操作表描述符且操作表还有open回调函数非空，
+	 * 那么就调用它.常规文件不需要实现这个open方法，但是对于块设备文件和字符设备文件来讲，
+	 * 需要通常对这个方法对f_mapping域和/或f_op域进行调整
+	 */
 	if (!open)
 		open = f->f_op->open;
 	if (open) {
@@ -857,6 +862,7 @@ EXPORT_SYMBOL(file_path);
 int vfs_open(const struct path *path, struct file *file,
 	     const struct cred *cred)
 {
+	/* 获得dentry */
 	struct dentry *dentry = d_real(path->dentry, NULL, file->f_flags);
 
 	if (IS_ERR(dentry))
@@ -900,13 +906,29 @@ EXPORT_SYMBOL(dentry_open);
 static inline int build_open_flags(int flags, umode_t mode, struct open_flags *op)
 {
 	int lookup_flags = 0;
+	/*
+	 * #define O_ACCMODE	00000003
+	 * #define O_RDONLY	00000000
+	 * #define O_WRONLY	00000001
+	 * #define O_RDWR	00000002
+	 * #define ACC_MODE(x) ("\004\002\006\006"[(x)&O_ACCMODE])
+	 * 这个ACC_MODE等价于a[4]={4,2,6,6}
+	 * #define ACC_MODE(x) a[x & 0x11]
+	 * 这里主要对用户层访问模式进行转换:
+	 * user_flag     acc_mode
+	 * 0(只读)	 4 ( r-- )
+	 * 1(只写)	 2 ( -w- )
+	 * 2(读写)	 6 ( rw- )
+	 */
 	int acc_mode = ACC_MODE(flags);
 
 	if (flags & (O_CREAT | __O_TMPFILE))
 		op->mode = (mode & S_IALLUGO) | S_IFREG;
 	else
 		op->mode = 0;
-
+	/* FMODE_NONOTIFY是做文件操作时不通知，内核里有个notify的文件系统
+	 * O_CLOEXEC是在exec时关闭文件，主要用于父子进程共享文件
+	 */
 	/* Must never be set by userspace */
 	flags &= ~FMODE_NONOTIFY & ~O_CLOEXEC;
 
@@ -918,16 +940,39 @@ static inline int build_open_flags(int flags, umode_t mode, struct open_flags *o
 	 */
 	if (flags & __O_SYNC)
 		flags |= O_DSYNC;
-
+	// 创建临时文件
 	if (flags & __O_TMPFILE) {
+		/*
+		 * #define O_TMPFILE (__O_TMPFILE | O_DIRECTORY)
+		 * #define O_TMPFILE_MASK (__O_TMPFILE | O_DIRECTORY | O_CREAT)
+		 * 创建临时文件不能有O_CREAT标志
+		 */
 		if ((flags & O_TMPFILE_MASK) != O_TMPFILE)
 			return -EINVAL;
+		/* #define MAY_WRITE	0x00000002
+		 * 创建临时文件如果没有写标志，则出错
+		 */
 		if (!(acc_mode & MAY_WRITE))
 			return -EINVAL;
 	} else if (flags & O_PATH) {
 		/*
 		 * If we have O_PATH in the open flag. Then we
 		 * cannot have anything other than the below set of flags
+		 */
+		/*
+		 * 如果我们在打开标志中有O_PATH 。 然后我们除了以下标志集之外，
+		 * 不能有任何其他内容
+		 * 使用O_PATH将不会真正打开一个文件，而只是准备好该文件的文件描述符，
+		 * 而且如果使用该标志位的话系统会忽略大部分其他的标志位。
+		 * 特别是如果配合使用O_NOFOLLOW，那么遇到符号链接的时候将会返回这个符号链接本身的文件描述符，而非符号链接所指的对象。
+		 */
+		/*
+		 * 这里进行了一个“与”操作，这就将除了O_DIRECTORY和O_NOFOLLOW的其他标志位全部清零了，这就忽略了其他的标志位。
+		 * 在开始说明中还有一个标志位O_CLOEXEC也受到O_PATH的保护，但是这个标志位不允许在用户空间直接设置，
+		 * 所以build_open_flags一开始就把它干掉了。另外O_PATH本身连一个真正的打开操作都不是就跟别提创建了，
+		 * 所以mode当然要置零了（873）。既然不会打开文件那么也就和LOOKUP_OPEN无缘了（891）。
+		 * 接下来就是处理一下受O_PATH保护两个标志位。注意，如果没有设置O_NOFOLLOW的话遇到符号链接是需要跟踪到底的（902）。
+		 * 其实就算设置了O_NOFOLLOW，我们还会看到在do_last里还有一次补救的机会，那就是路径名以“/”结尾的话也会跟踪符号链接到底的
 		 */
 		flags &= O_DIRECTORY | O_NOFOLLOW | O_PATH;
 		acc_mode = 0;
@@ -936,26 +981,39 @@ static inline int build_open_flags(int flags, umode_t mode, struct open_flags *o
 	op->open_flag = flags;
 
 	/* O_TRUNC implies we need access checks for write permissions */
+	/* O_TRUNC 文件时需要写权限 */
 	if (flags & O_TRUNC)
 		acc_mode |= MAY_WRITE;
 
 	/* Allow the LSM permission hook to distinguish append
 	   access from general write access. */
+	/* O_APPEND 当我们使用该标志，我们在向打开的文件写入数据时，就会从文件的末尾开始写入。
+	 * 不过它只会影响文件写入的偏移量，读文件时依然从文件开头开始
+	 */
+	/* 追加文件时需要追加权限 */
 	if (flags & O_APPEND)
 		acc_mode |= MAY_APPEND;
 
 	op->acc_mode = acc_mode;
-
+	/*
+	 * intent表示本次open的意图
+	 * 如果有O_PATH只找到路径，则设0
+	 * 否则设置成普通打开文件
+	 */
 	op->intent = flags & O_PATH ? 0 : LOOKUP_OPEN;
-
+	/* 设置创建意图 */
 	if (flags & O_CREAT) {
 		op->intent |= LOOKUP_CREATE;
+		/* O_EXCL表示创建文件时，文件不能存在，
+		 * 这种情况下不跟随软链接
+		 */
 		if (flags & O_EXCL)
 			op->intent |= LOOKUP_EXCL;
 	}
-
+	/* O_DIRECTORY表示目标必须是一个目录 */
 	if (flags & O_DIRECTORY)
 		lookup_flags |= LOOKUP_DIRECTORY;
+	/* 如果需要跟踪链接，则设置标志 */
 	if (!(flags & O_NOFOLLOW))
 		lookup_flags |= LOOKUP_FOLLOW;
 	op->lookup_flags = lookup_flags;

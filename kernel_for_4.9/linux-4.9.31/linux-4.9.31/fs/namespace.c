@@ -345,10 +345,12 @@ static int mnt_is_readonly(struct vfsmount *mnt)
  */
 int __mnt_want_write(struct vfsmount *m)
 {
+	/* 获得实际的mount点 */
 	struct mount *mnt = real_mount(m);
 	int ret = 0;
-
+	/* 禁止抢占 */
 	preempt_disable();
+	/* 增加mnt的writer数 */
 	mnt_inc_writers(mnt);
 	/*
 	 * The store to mnt_inc_writers must be visible before we pass
@@ -356,6 +358,7 @@ int __mnt_want_write(struct vfsmount *m)
 	 * incremented count after it has set MNT_WRITE_HOLD.
 	 */
 	smp_mb();
+	/* 检查mnt是否持有MNT_WRITE_HOLD，如果持有的话，则通过cpu_relax 进行忙等待 */
 	while (ACCESS_ONCE(mnt->mnt.mnt_flags) & MNT_WRITE_HOLD)
 		cpu_relax();
 	/*
@@ -364,12 +367,14 @@ int __mnt_want_write(struct vfsmount *m)
 	 * MNT_WRITE_HOLD is cleared.
 	 */
 	smp_rmb();
+	/* 检查mnt是否是只读的 */
 	if (mnt_is_readonly(m)) {
 		mnt_dec_writers(mnt);
 		ret = -EROFS;
 	}
+	/* 使能抢占 */
 	preempt_enable();
-
+	/* 如果mnt是可以写的，则返回0 */
 	return ret;
 }
 
@@ -385,9 +390,11 @@ int __mnt_want_write(struct vfsmount *m)
 int mnt_want_write(struct vfsmount *m)
 {
 	int ret;
-
+	// 标志开始对super block开始写
 	sb_start_write(m->mnt_sb);
+	// 检查mnt是否持有MNT_WRITE_HOLD 或者是否只读，如果可以获得mnt的写权限的话ret返回零
 	ret = __mnt_want_write(m);
+	// 可以获得写权限的话ret为零，不会执行sb_end_write
 	if (ret)
 		sb_end_write(m->mnt_sb);
 	return ret;

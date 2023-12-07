@@ -439,10 +439,14 @@ static inline int do_inode_permission(struct inode *inode, int mask)
 int __inode_permission(struct inode *inode, int mask)
 {
 	int retval;
-
+	/* 如果要检查的权限有write权限 */
 	if (unlikely(mask & MAY_WRITE)) {
 		/*
 		 * Nobody gets write access to an immutable file.
+		 *
+		 * immutable bit如果被置1了，会有如下行为:
+		 * 这个文件就不能被修改了，也就是说不可以被删除，不可以被改名，不可以创建指向这个文件的link（文件链接），
+		 * 文件里面的绝大多数属性信息都不能修改，也不允许用write mode来打开这个文件。
 		 */
 		if (IS_IMMUTABLE(inode))
 			return -EPERM;
@@ -451,6 +455,9 @@ int __inode_permission(struct inode *inode, int mask)
 		 * Updating mtime will likely cause i_uid and i_gid to be
 		 * written back improperly if their true value is unknown
 		 * to the vfs.
+		 */
+		/* 如果vfs不知道i_uid和i_gid的真实值，
+		 * 则更新mtime可能会导致它们被不正确地写回
 		 */
 		if (HAS_UNMAPPED_ID(inode))
 			return -EACCES;
@@ -478,10 +485,16 @@ EXPORT_SYMBOL(__inode_permission);
  */
 static int sb_permission(struct super_block *sb, struct inode *inode, int mask)
 {
+	/* 如果要检查的权限是可写的权限 */
 	if (unlikely(mask & MAY_WRITE)) {
 		umode_t mode = inode->i_mode;
 
 		/* Nobody gets write access to a read-only fs. */
+		/* 如果superblock权限是只读的，那么直接返回吧
+		 * 为什么还有判断这个mode，而不是直接想着说判断sb是否为RDONLY
+		 * 我想如果你在这个目录下不用sync到磁盘就行吧
+		 * 如sock or fifo
+		 */
 		if ((sb->s_flags & MS_RDONLY) &&
 		    (S_ISREG(mode) || S_ISDIR(mode) || S_ISLNK(mode)))
 			return -EROFS;
@@ -503,10 +516,11 @@ static int sb_permission(struct super_block *sb, struct inode *inode, int mask)
 int inode_permission(struct inode *inode, int mask)
 {
 	int retval;
-
+	/* 这里主要是检查了super_block的权限 */
 	retval = sb_permission(inode->i_sb, inode, mask);
 	if (retval)
 		return retval;
+	/* 这里检查inode的权限 */
 	return __inode_permission(inode, mask);
 }
 EXPORT_SYMBOL(inode_permission);
@@ -573,6 +587,13 @@ struct nameidata {
 	/* depth域和saved_names域是用于支持符号链接的域，它考虑了符号链接可能出现嵌套的情况。
 	 */
 	unsigned	depth;
+	/* 假设一个符号链接指向自己。当然解析含有这样的符号链接的路径名
+	 * 可能导致无休止的递归调用流，这又依次引发内核栈的溢出。
+	 * total_link_count域记录在元查找操作中哟多少符号链接被跟踪，
+	 * 如果这个计数器的值达到40，则查找操作终止。没有这个计数器，
+	 * 怀有恶意的用户就可能创建一个病态的路径名，让其中包含很多连续
+	 * 的符号链接，使内核在无休止的查找操作中冻结
+	 */
 	int		total_link_count;
 	struct saved {
 		struct path link;
@@ -1775,10 +1796,10 @@ static int lookup_fast(struct nameidata *nd,
 		if (unlikely(!dentry))
 			return 0;
 	/* 这个方法在路径查找时从dentry缓存中找到目标项之后，它被用来检查这个目录项
-	 * 是否依然有效，因为它们可能在VFS之外被删除。若无效，则需要作废缓存中的目录项，
-	 * 根据磁盘上的内容重新构造。
+	 * 是否依然有效，因为它们可能在VFS之外被删除。若无效，则需要作废缓存中的目录项,
+	 * 根据磁盘上的内容重新构造.
 	 * 第一个参数为指向父目录dentry描述符的指针
-	 * 如果未定义此回调函数，则默认认为dentry缓存中的信息是有效的，这适合于大多数文件系统。
+	 * 如果未定义此回调函数，则默认认为dentry缓存中的信息是有效的，这适合于大多数文件系统.
 	 * 某些（例如NFS）文件系统需要对dentry缓存中找到dentry结构进行验证（和处理），则需要提供此回调函数的实现
 	 */
 		if (unlikely(dentry->d_flags & DCACHE_OP_REVALIDATE))
@@ -1824,7 +1845,11 @@ again:
 	dentry = d_alloc_parallel(dir, name, &wq);
 	if (IS_ERR(dentry))
 		goto out;
-	/* 如果说dentry没有在lookup中 */
+	/*
+	 * 这个函数是检查有无DCACHE_PAR_LOOKUP标志
+	 * 这个标志表示dentry是新建立的，如果dentry是新建立的就不用再做
+	 *下面的检查，直接退出循环
+         */
 	if (unlikely(!d_in_lookup(dentry))) {
 		if ((dentry->d_flags & DCACHE_OP_REVALIDATE) &&
 		    !(flags & LOOKUP_NO_REVAL)) {
@@ -3279,7 +3304,7 @@ static int may_o_create(const struct path *dir, struct dentry *dentry, umode_t m
 	int error = security_path_mknod(dir, dentry, mode, 0);
 	if (error)
 		return error;
-
+	/* 检查inode的权限 */
 	error = inode_permission(dir->dentry->d_inode, MAY_WRITE | MAY_EXEC);
 	if (error)
 		return error;
@@ -3300,6 +3325,17 @@ static int may_o_create(const struct path *dir, struct dentry *dentry, umode_t m
  *
  * Returns an error code otherwise.
  */
+/* 尝试从一个negative dentry里面去查找、创建和打开一个文件
+ *
+ * 如果成功则返回0. 该文件将被创建然后附加到struct file里面去，通过文件系统最终调用finish_open
+ *
+ * 返回1，如果这个文件只是查找或者不需要创建
+ * 调用者需要自己指向open的动作.
+ * path可能更新为指向新的dentry的指针，也有可能是消极的
+ *
+ * 否则返回一个错误码
+ *
+ */
 static int atomic_open(struct nameidata *nd, struct dentry *dentry,
 			struct path *path, struct file *file,
 			const struct open_flags *op,
@@ -3307,12 +3343,13 @@ static int atomic_open(struct nameidata *nd, struct dentry *dentry,
 			int *opened)
 {
 	struct dentry *const DENTRY_NOT_SET = (void *) -1UL;
+	/* 找个这个目录的inode */
 	struct inode *dir =  nd->path.dentry->d_inode;
 	int error;
-
+	/* 如果有设置O_EXCL或者O_CREATE中的一个，那么都是要创建的，O_TRUNC就拿掉吧 */
 	if (!(~open_flag & (O_EXCL | O_CREAT)))	/* both O_EXCL and O_CREAT */
 		open_flag &= ~O_TRUNC;
-
+	/* 如果是目录 */
 	if (nd->flags & LOOKUP_DIRECTORY)
 		open_flag |= O_DIRECTORY;
 
@@ -3321,18 +3358,35 @@ static int atomic_open(struct nameidata *nd, struct dentry *dentry,
 	error = dir->i_op->atomic_open(dir, dentry, file,
 				       open_to_namei_flags(open_flag),
 				       mode, opened);
+	/* 完成了lookup */
 	d_lookup_done(dentry);
 	if (!error) {
 		/*
 		 * We didn't have the inode before the open, so check open
 		 * permission here.
 		 */
+		/* acc_mode主要是对读写权限的校验:
+		 * 真正打开文件之前may_open通过inode_permission函数把acc_mode与inode->i_mode做比较，实现访问权限校验,
+		 * inode->i_mode就是ls中看到的文件形如-rwx-的权限.
+		 * 举例: ls /mnt/testdir/testfile -l :-rwx-rwx-rwx 即0777;
+		 * open("/mnt/testdir/testfile",O_RW);以读写方式打开一个文件,即flags=O_RW,从而acc_mode=06 (表示rwx中r位和w位都为1)
+		 * 打开文件之前会在inode_permission中校验inode->imode是否有读写权限,
+		 * 如本例中0777显然对所有用户都有读写权限，此处可以参考inode_permission一起分析.
+		 * acc_mode=MAY_OPEN|ACC_MODE(flags):
+		 * 其中:MAY_OPEN=0x20.
+		 * ACC_MODE(flags)取值为:
+		 * 当open函数入参flags = O_RDONLY (O_RDONLY=0)时,ACC_MODE(flags)=004 即：004代表bit2=1表示读权限打开,acc_mode=024.
+		 * 当flags = O_WRONLY =1时ACC_MODE(flags)=002 即：002代表bit1=1表示写权限,acc_mode=0x22.
+		 * 当flags = O_RDWR = 2时ACC_MODE(flags)=006 即：006代表bit2=1|bit1=1表示读写权限,acc_mode=0x26
+		 */
+		/* 这个acc_mode就是你在build_open_flags函数里面填充的 */
 		int acc_mode = op->acc_mode;
 		if (*opened & FILE_CREATED) {
 			WARN_ON(!(open_flag & O_CREAT));
 			fsnotify_create(dir, dentry);
 			acc_mode = 0;
 		}
+		/* check 一下权限 */
 		error = may_open(&file->f_path, acc_mode, open_flag);
 		if (WARN_ON(error > 0))
 			error = -EINVAL;
@@ -3377,6 +3431,17 @@ static int atomic_open(struct nameidata *nd, struct dentry *dentry,
  * FILE_CREATE will be set in @*opened if the dentry was created and will be
  * cleared otherwise prior to returning.
  */
+/* 查找，可能创建，打开最后一个component
+ *
+ * 必须抓住父的i_mutex的调用
+ *
+ * 如果文件已成功以原子方式创建（如有必要）和打开，那么返回0。
+ * 在这种情况下，文件将附加到@file返回
+ *
+ * 如果此时文件没有完全打开，返回1.尽管已经执行了查找和创建.
+ * 如果指定了O_CREAT，则@path中返回的dentry在返回时将为正。
+ * 如果未指定O_CREAT，则可能会返回一个负dentry。
+ */
 static int lookup_open(struct nameidata *nd, struct path *path,
 			struct file *file,
 			const struct open_flags *op,
@@ -3389,11 +3454,15 @@ static int lookup_open(struct nameidata *nd, struct path *path,
 	int error, create_error = 0;
 	umode_t mode = op->mode;
 	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
-
+	/* 如果父目录被删除，则直接返回错误
+	 * 删除的时候会先设置dead标志，然后等没人用了在释放数据结构 */
 	if (unlikely(IS_DEADDIR(dir_inode)))
 		return -ENOENT;
-
+	// 先删除已创建的标志，因为下面可能要创建文件
 	*opened &= ~FILE_CREATED;
+	/* 去内存中的dentry hashtable中查找，如果有了
+	 * 那当然不用再去分配了
+	 */
 	dentry = d_lookup(dir, &nd->last);
 	for (;;) {
 		if (!dentry) {
@@ -3401,21 +3470,34 @@ static int lookup_open(struct nameidata *nd, struct path *path,
 			if (IS_ERR(dentry))
 				return PTR_ERR(dentry);
 		}
+		/*
+		 * 这个函数是检查有无DCACHE_PAR_LOOKUP标志
+		 * 这个标志表示dentry是新建立的，如果dentry是新建立的就不用再做
+		 * 下面的检查，直接退出循环
+		 */
 		if (d_in_lookup(dentry))
 			break;
-
+		/* 走到这儿说明dentry是在内存里找的，就要检查dentry的有效性
+		 * d_revalidate直接调用具体文件系统的d_op的d_revalidate函数去验证
+		 */
 		if (!(dentry->d_flags & DCACHE_OP_REVALIDATE))
 			break;
 
 		error = d_revalidate(dentry, nd->flags);
+		// dentry有效就直接退出循环
 		if (likely(error > 0))
 			break;
+		// 如果出错就让dentry无效
 		if (error)
 			goto out_dput;
+		/* 如果无效,那么清干净 */
 		d_invalidate(dentry);
 		dput(dentry);
 		dentry = NULL;
 	}
+	/* 如果有inode，说明文件已经打开，直接返回
+	 * 因为inode是共用的
+	 */
 	if (dentry->d_inode) {
 		/* Cached positive dentry: will open in f_op->open */
 		goto out_no_open;
@@ -3430,23 +3512,40 @@ static int lookup_open(struct nameidata *nd, struct path *path,
 	 * Another problem is returing the "right" error value (e.g. for an
 	 * O_EXCL open we want to return EEXIST not EROFS).
 	 */
+	/* 检查写权限很棘手，因为我们不知道是否真的需要它：
+	 * 只要文件存在，O_CREAT打开就应该有效。
+	 * 但检查存在打破了原子性。诀窍是检查访问权限，如果未没有则清除标志中的O_CREAT
+	 */
 	if (open_flag & O_CREAT) {
+		/* 如果文件系统不支持acl，就去除文件的umask设置的权限 */
 		if (!IS_POSIXACL(dir->d_inode))
 			mode &= ~current_umask();
+		/* 如果没有写权限 */
 		if (unlikely(!got_write)) {
 			create_error = -EROFS;
 			open_flag &= ~O_CREAT;
+			/* O_EXCL表示如果使用O_CREAT，并且文件以存在，则出错
+			 * 实际上它也是去创建文件
+			 * O_CREAT简单就是想打开的文件如果不存在的话就会自动创建文件
+			 * 而O_EXCL他的作用就是如果要创建一个文件
+			 * 并且这个文件已经存在的话会直接返回并且如果打开的文件是符号链接文件的话也会直接返回
+			 *
+			 */
 			if (open_flag & (O_EXCL | O_TRUNC))
 				goto no_open;
 			/* No side effects, safe to clear O_CREAT */
 		} else {
+			/* 这里只是检查有没有创建文件的权限罢了 */
 			create_error = may_o_create(&nd->path, dentry, mode);
+			/* 如果说权限有问题，那么清除O_CREAT位 */
 			if (create_error) {
 				open_flag &= ~O_CREAT;
+				/* O_EXCL表示如果使用O_CREAT，并且文件以存在，则出错 */
 				if (open_flag & O_EXCL)
 					goto no_open;
 			}
 		}
+		/*如果open flag里面有关于写的，而你又不能写，那么直接退出吧 */
 	} else if ((open_flag & (O_TRUNC|O_WRONLY|O_RDWR)) &&
 		   unlikely(!got_write)) {
 		/*
@@ -3455,7 +3554,7 @@ static int lookup_open(struct nameidata *nd, struct path *path,
 		 */
 		goto no_open;
 	}
-
+	/* 如果inode有atomic_open那么就调用atomic_open来处理 */
 	if (dir_inode->i_op->atomic_open) {
 		error = atomic_open(nd, dentry, path, file, op, open_flag,
 				    mode, opened);
@@ -3465,9 +3564,21 @@ static int lookup_open(struct nameidata *nd, struct path *path,
 	}
 
 no_open:
+	/* 新创建的dentry ? */
 	if (d_in_lookup(dentry)) {
+		/*
+		 * lookup作用是从文件系统中由父节点（inode）代表的那个目录中寻找当前节点（dentry）的目录项
+		 * 并设置结构中的其他信息，且读入其索引节点，在内存中建立对应的inode结构.
+		 * 该过程因文件系统而异。所以要通过父节点inode结构中的指针i_op找到相应的inode_operations数据结构。
+		 * 该方法只对代表目录的inode有意义.
+		 * 第一个参数指向父目录的inode描述符的指针;
+		 * 第二个为指向子目录的dentry描述符的指针.
+		 * 在调用函数之前，已经为子节点分配了dentry,并且将它关联到父目录的dentry,
+		 * 但是它还没有被关联到inode
+		 */
 		struct dentry *res = dir_inode->i_op->lookup(dir_inode, dentry,
 							     nd->flags);
+		/* 完成lookup 去除DCACHE_PAR_LOOKUP标志，以及其它操作 */
 		d_lookup_done(dentry);
 		if (unlikely(res)) {
 			if (IS_ERR(res)) {
@@ -3478,15 +3589,23 @@ no_open:
 			dentry = res;
 		}
 	}
-
+	/* 如果说它没有inode，那么就创建文件 */
 	/* Negative dentry, just create the file */
 	if (!dentry->d_inode && (open_flag & O_CREAT)) {
 		*opened |= FILE_CREATED;
+		/* 打一条审计日志 */
 		audit_inode_child(dir_inode, dentry, AUDIT_TYPE_CHILD_CREATE);
 		if (!dir_inode->i_op->create) {
 			error = -EACCES;
 			goto out_dput;
 		}
+		/* 该方法只对代表目录的inode才有意义，用来在该目录下创建常规文件
+		 * 第一个参数为目录对应的inode;第二个参数为常规文件对应的dentry
+		 * 第三个参数为文件模式
+		 * 在调用这个函数之前，已经为常规文件分配了dentry描述符，但是inode还没有分配。
+		 * 并且常规文件的dentry->d_parent已经指向目录的dentry描述符（inode->i_dentry）
+		 */
+		/* 调用具体文件系统创建一个inode */
 		error = dir_inode->i_op->create(dir_inode, dentry, mode,
 						open_flag & O_EXCL);
 		if (error)
@@ -3516,6 +3635,9 @@ static int do_last(struct nameidata *nd,
 {
 	struct dentry *dir = nd->path.dentry;
 	int open_flag = op->open_flag;
+	/* 使用 O_TRUNC 标志，调用 open 函数打开文件的时候会原文件的内容全部丢弃，
+	 * 文件大小变为 0 ，相对于清空后打开
+	 */
 	bool will_truncate = (open_flag & O_TRUNC) != 0;
 	bool got_write = false;
 	int acc_mode = op->acc_mode;
@@ -3526,7 +3648,11 @@ static int do_last(struct nameidata *nd,
 
 	nd->flags &= ~LOOKUP_PARENT;
 	nd->flags |= op->intent;
-
+	/* 如果最后一个分量是“.”或者“..”，这种情况下只能打开，不能创建.
+	 * 对于“..”，还需要调用follow_dotdot跟踪到父目录
+	 * 如果没有错误，则路径查找上下文已经保存了这个要打开的文件，调用
+	 * finish_open，将返回的文件描述符传递给调用者
+	 */
 	if (nd->last_type != LAST_NORM) {
 		error = handle_dots(nd, nd->last_type);
 		if (unlikely(error))
@@ -3535,9 +3661,15 @@ static int do_last(struct nameidata *nd,
 	}
 
 	if (!(open_flag & O_CREAT)) {
+		/* 如果最后一个分量以“/”结尾，那么表明是一个目录 */
 		if (nd->last.name[nd->last.len])
 			nd->flags |= LOOKUP_FOLLOW | LOOKUP_DIRECTORY;
 		/* we _can_ be in RCU mode here */
+		/* 先用lookup_fast先到dentry的cache里面去找一轮
+		 * 如果没找到这里返回的是0，
+		 * 那么不要着急，或许会分配dentry之类的来搞
+		 * 主要是对于已经打开过的文件或目录，那么就很快了
+		 */
 		error = lookup_fast(nd, &path, &inode, &seq);
 		if (likely(error > 0))
 			goto finish_lookup;
@@ -3559,13 +3691,16 @@ static int do_last(struct nameidata *nd,
 			return error;
 
 		audit_inode(nd->name, dir, LOOKUP_PARENT);
+		/* 如果是个目录，那么是不能创建的 */
 		/* trailing slashes? */
 		if (unlikely(nd->last.name[nd->last.len]))
 			return -EISDIR;
 	}
 
 	if (open_flag & (O_CREAT | O_TRUNC | O_WRONLY | O_RDWR)) {
+		/* mnt_want_write()函数的功能是判断传入的参数vfsmount结构体是否可写 */
 		error = mnt_want_write(nd->path.mnt);
+		/* 返回0表示可写 */
 		if (!error)
 			got_write = true;
 		/*
@@ -3574,16 +3709,28 @@ static int do_last(struct nameidata *nd,
 		 * dropping this one anyway.
 		 */
 	}
+
+	/* static inline void inode_lock(struct inode *inode)
+	 * {
+	 *	down_write(&inode->i_rwsem);
+	 * }
+	 *
+	 * static inline void inode_lock_shared(struct inode *inode)
+	 * {
+	 *	down_read(&inode->i_rwsem);
+	 * }
+	 */
 	if (open_flag & O_CREAT)
 		inode_lock(dir->d_inode);
 	else
 		inode_lock_shared(dir->d_inode);
 	error = lookup_open(nd, &path, file, op, got_write, opened);
+	/* 解开读写锁 */
 	if (open_flag & O_CREAT)
 		inode_unlock(dir->d_inode);
 	else
 		inode_unlock_shared(dir->d_inode);
-
+	/* 如果等于0，说明OK了,如果小于0 说明NG了 */
 	if (error <= 0) {
 		if (error)
 			goto out;
@@ -3595,7 +3742,10 @@ static int do_last(struct nameidata *nd,
 		audit_inode(nd->name, file->f_path.dentry, 0);
 		goto opened;
 	}
-
+	/* 如果flag带了FILE_CREATE，那么清掉他的O_TRUNC
+	 * 使用 O_TRUNC 标志，调用 open 函数打开文件的时候会原文件的内容全部丢弃，
+	 * 文件大小变为 0 ，相对于清空后打开
+	 */
 	if (*opened & FILE_CREATED) {
 		/* Don't check for write permission, don't truncate */
 		open_flag &= ~O_TRUNC;
@@ -3610,15 +3760,20 @@ static int do_last(struct nameidata *nd,
 	 * possible mount and symlink following (this might be optimized away if
 	 * necessary...)
 	 */
+	/* 如果atomic_open（）获得了写访问权限，由于可能的挂载点和符号链接，
+	 * 它现在会被丢弃（如果必要，这可能会被优化…）
+	 */
 	if (got_write) {
 		mnt_drop_write(nd->path.mnt);
 		got_write = false;
 	}
-
+	/* 如果这个path是个管理或者说是个挂载点 */
 	error = follow_managed(&path, nd);
 	if (unlikely(error < 0))
 		return error;
-
+	/* 如果这个dentry是个空白的dentry,我猜应该是说没有实际的inode
+	 * 那么就把其转换成nameidata
+	 * 退掉，并返回 -ENOENT */
 	if (unlikely(d_is_negative(path.dentry))) {
 		path_to_nameidata(&path, nd);
 		return -ENOENT;
@@ -3628,15 +3783,22 @@ static int do_last(struct nameidata *nd,
 	 * create/update audit record if it already exists.
 	 */
 	audit_inode(nd->name, path.dentry, 0);
-
+	/* O_CREAT简单就是想打开的文件如果不存在的话就会自动创建文件
+	 * 而O_EXCL他的作用就是如果要创建一个文件
+	 * 并且这个文件已经存在的话会直接返回并且如果打开的文件是符号链接文件的话也会直接返回
+	 *
+	 * O_EXCL如果同时指定了O_CREAT,而文件已经存在，则出错
+	 */
 	if (unlikely((open_flag & (O_EXCL | O_CREAT)) == (O_EXCL | O_CREAT))) {
 		path_to_nameidata(&path, nd);
 		return -EEXIST;
 	}
 
 	seq = 0;	/* out of RCU mode, so the value doesn't matter */
+	/* 获得这个dentry的inode */
 	inode = d_backing_inode(path.dentry);
 finish_lookup:
+	/* 这里只是处理软链接的情况了 */
 	if (nd->depth)
 		put_link(nd);
 	error = should_follow_link(nd, &path, nd->flags & LOOKUP_FOLLOW,
@@ -3649,30 +3811,37 @@ finish_lookup:
 	nd->seq = seq;
 	/* Why this, you ask?  _Now_ we might have grown LOOKUP_JUMPED... */
 finish_open:
+	/* 完成路径查找 */
 	error = complete_walk(nd);
 	if (error)
 		return error;
 	audit_inode(nd->name, nd->path.dentry, 0);
 	error = -EISDIR;
+	/* 如果创建的是目录，那么直接退出 */
 	if ((open_flag & O_CREAT) && d_is_dir(nd->path.dentry))
 		goto out;
 	error = -ENOTDIR;
+	/* 如果你要打开的是目录，但是这个dentry有不是目录，那么出错了啊 */
 	if ((nd->flags & LOOKUP_DIRECTORY) && !d_can_lookup(nd->path.dentry))
 		goto out;
+	/* 如果它不是个原始文件，你也不能truncate啊 */
 	if (!d_is_reg(nd->path.dentry))
 		will_truncate = false;
 
 	if (will_truncate) {
+		/* 告知我们要写东西了 */
 		error = mnt_want_write(nd->path.mnt);
 		if (error)
 			goto out;
 		got_write = true;
 	}
 finish_open_created:
+	/* 又来检查权限了 */
 	error = may_open(&nd->path, acc_mode, open_flag);
 	if (error)
 		goto out;
 	BUG_ON(*opened & FILE_OPENED); /* once it's opened, it's opened */
+	/* 一切都准备好了，那么就填充file结构体吧 */
 	error = vfs_open(&nd->path, file, current_cred());
 	if (error)
 		goto out;
