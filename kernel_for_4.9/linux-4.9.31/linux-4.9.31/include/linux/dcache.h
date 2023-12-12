@@ -433,7 +433,9 @@ static inline void dont_mount(struct dentry *dentry)
 }
 
 extern void __d_lookup_done(struct dentry *);
-
+/* 这个函数是检查有无DCACHE_PAR_LOOKUP标志
+ * 这个标志表示dentry是新建立的
+ */
 static inline int d_in_lookup(struct dentry *dentry)
 {
 	return dentry->d_flags & DCACHE_PAR_LOOKUP;

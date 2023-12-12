@@ -3847,7 +3847,9 @@ finish_open_created:
 		goto out;
 	*opened |= FILE_OPENED;
 opened:
+	/* 如果f->f_flags里面有O_DIRECT，但是ops里面没有这个操作，那么就返回非法参数了啊 */
 	error = open_check_o_direct(file);
+	/* 静态度量相关检查 */
 	if (!error)
 		error = ima_file_check(file, op->acc_mode, *opened);
 	if (!error && will_truncate)

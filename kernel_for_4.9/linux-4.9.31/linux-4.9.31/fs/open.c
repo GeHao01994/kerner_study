@@ -43,18 +43,22 @@ int do_truncate(struct dentry *dentry, loff_t length, unsigned int time_attrs,
 	/* Not pretty: "inode->i_size" shouldn't really be signed. But it is. */
 	if (length < 0)
 		return -EINVAL;
-
+	/* 将length和time_attrs赋值 */
 	newattrs.ia_size = length;
+	/* 将ATTR_SIZE和time_attrs或上之后赋值给newattrs.ia_valid */
 	newattrs.ia_valid = ATTR_SIZE | time_attrs;
 	if (filp) {
+		/* 如果有filp那么属性就添加ATTR_FILE，再将file添加到filp */
 		newattrs.ia_file = filp;
 		newattrs.ia_valid |= ATTR_FILE;
 	}
 
 	/* Remove suid, sgid, and file capabilities on truncate too */
+	/* 移除suid,sgid和文件capabilities在truncate */
 	ret = dentry_needs_remove_privs(dentry);
 	if (ret < 0)
 		return ret;
+	/* 如果你需要remove掉suid、sgid那就一起带上吧 */
 	if (ret)
 		newattrs.ia_valid |= ret | ATTR_FORCE;
 
@@ -706,18 +710,20 @@ static int do_dentry_open(struct file *f,
 
 	f->f_mode = OPEN_FMODE(f->f_flags) | FMODE_LSEEK |
 				FMODE_PREAD | FMODE_PWRITE;
-
+	/* 增加path的引用计数 */
 	path_get(&f->f_path);
 	/* 设置inode */
 	f->f_inode = inode;
 	f->f_mapping = inode->i_mapping;
-
+	/* 使用O_PATH将不会真正打开一个文件，而只是准备好该文件的文件描述符 */
 	if (unlikely(f->f_flags & O_PATH)) {
 		f->f_mode = FMODE_PATH;
 		f->f_op = &empty_fops;
 		return 0;
 	}
-
+	/* 如果要求写，不是特殊文件，则检查用户和文件系统的可写权限
+	 * 特殊文件指: 字符设备， 块设备， 命名管道，socket
+	 */
 	if (f->f_mode & FMODE_WRITE && !special_file(inode->i_mode)) {
 		error = get_write_access(inode);
 		if (unlikely(error))
@@ -759,17 +765,19 @@ static int do_dentry_open(struct file *f,
 		if (error)
 			goto cleanup_all;
 	}
+	/* 如果文件只读，增加相应计数器 */
 	if ((f->f_mode & (FMODE_READ | FMODE_WRITE)) == FMODE_READ)
 		i_readcount_inc(inode);
+	/* 如果有read和write的operation,那么设置相应的mode */
 	if ((f->f_mode & FMODE_READ) &&
 	     likely(f->f_op->read || f->f_op->read_iter))
 		f->f_mode |= FMODE_CAN_READ;
 	if ((f->f_mode & FMODE_WRITE) &&
 	     likely(f->f_op->write || f->f_op->write_iter))
 		f->f_mode |= FMODE_CAN_WRITE;
-
+	/* 清除文件中的这些标志，这些标志已经没用了 */
 	f->f_flags &= ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC);
-
+	/* 设置预读 */
 	file_ra_state_init(&f->f_ra, f->f_mapping->host->i_mapping);
 
 	return 0;

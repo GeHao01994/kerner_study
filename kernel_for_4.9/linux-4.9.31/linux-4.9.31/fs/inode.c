@@ -1771,6 +1771,15 @@ int should_remove_suid(struct dentry *dentry)
 	int kill = 0;
 
 	/* suid always must be killed */
+	/* 对于文件的S_ISUID，我们举个例子：
+	 * passwd，原理是通过修改/etc/shadow文件从而实现用户账号密码的修改。
+	 * 而shadow文件只有root用户可以修改的。那普通用户为什么可以通过passwd修改字节的账号密码呢。
+	 * 其原理其实就是，passwd程序st_mode被设置了，S_ISUID。
+	 * 此时，因为passwd文件的所有者是root用户，由于设置了S_ISUID，在程序运行时，程序的有效用户ID会被设置为root。
+	 * 所以，程序拥有root用户的权限，可以修改shadow文件。如果没有设置S_ISUID，则passwd被A用户运行时，
+	 * 有效用户ID会被设置为A的``uid。则只会有A用户的权限.
+	 * 如果一目录具有S_ISUID 位权限，表示在此目录下只有该文件的所有者或root 可以删除该文件。
+	 */
 	if (unlikely(mode & S_ISUID))
 		kill = ATTR_KILL_SUID;
 
@@ -1778,9 +1787,15 @@ int should_remove_suid(struct dentry *dentry)
 	 * sgid without any exec bits is just a mandatory locking mark; leave
 	 * it alone.  If some exec bits are set, it's a real sgid; kill it.
 	 */
+	/* 对于文件夹的S_ISGID，如果文件夹A设置了S_ISGID，如果在A文件夹内创建B文件夹，则B文件夹的组ID默认为A文件夹的组ID。
+	 * 如果没设置，则为创建文件夹的进程的有效组ID.
+	 *
+	 * 没有任何exec位的sgid只是一个强制锁定标记，仅仅作为一个强制的locking mark;别管它
+	 * 如果设置了一些exec位，则它是一个真正的sgid；杀死它.
+	 */
 	if (unlikely((mode & S_ISGID) && (mode & S_IXGRP)))
 		kill |= ATTR_KILL_SGID;
-
+	/* CAP_FSETID 确保在文件被修改后不修改setuid/setgid位 */
 	if (unlikely(kill && !capable(CAP_FSETID) && S_ISREG(mode)))
 		return kill;
 
@@ -1792,6 +1807,11 @@ EXPORT_SYMBOL(should_remove_suid);
  * Return mask of changes for notify_change() that need to be done as a
  * response to write or truncate. Return 0 if nothing has to be changed.
  * Negative value on error (change should be denied).
+ */
+/* 返回给notify_change的更改掩码，
+ * 这些需要作为write和truncate的相应来完成
+ * 如果不需要改变任何事情，那么返回0
+ * 出错返回负数（change被拒绝）
  */
 int dentry_needs_remove_privs(struct dentry *dentry)
 {

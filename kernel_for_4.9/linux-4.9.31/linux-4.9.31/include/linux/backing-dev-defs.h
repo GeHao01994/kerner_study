@@ -147,6 +147,9 @@ struct bdi_writeback {
 
 struct backing_dev_info {
 	struct list_head bdi_list;
+	/* ra_pages字段表示当前的最大页数，即对该文件允许的最大预读量
+	 * 和/sys/block/<devname>/queue/read_ahead_kb的值对应
+	 */
 	unsigned long ra_pages;	/* max readahead in PAGE_SIZE units */
 	unsigned int capabilities; /* Device capabilities */
 	congested_fn *congested_fn; /* Function pointer if device is md/dm */

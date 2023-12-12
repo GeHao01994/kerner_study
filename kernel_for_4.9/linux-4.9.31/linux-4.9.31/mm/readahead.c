@@ -29,7 +29,11 @@
 void
 file_ra_state_init(struct file_ra_state *ra, struct address_space *mapping)
 {
+	/* 将bdi的最大预读页设置到这里 */
 	ra->ra_pages = inode_to_bdi(mapping->host)->ra_pages;
+	/* prev_pos 字段存放着进程在上一次读操作中所请求页的最后一页的索引,
+	 * 它的初值是-1
+	 */
 	ra->prev_pos = -1;
 }
 EXPORT_SYMBOL_GPL(file_ra_state_init);

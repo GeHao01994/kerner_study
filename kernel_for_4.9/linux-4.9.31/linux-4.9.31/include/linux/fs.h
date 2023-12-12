@@ -230,6 +230,9 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
  * Whiteout is represented by a char device.  The following constants define the
  * mode and device number to use.
  */
+/* Whiteout由char设备表示.
+ * 以下常量定义要使用的模式和设备编号.
+ */
 #define WHITEOUT_MODE 0
 #define WHITEOUT_DEV 0
 
@@ -239,7 +242,10 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
  * Also, in this manner, a Filesystem can look at only the values it cares
  * about.  Basically, these are the attributes that the VFS layer can
  * request to change from the FS layer.
- *
+ * 这是用于notify_change（）的Inode属性结构体。
+ * 它使用上面的定义作为标志，以了解哪些值发生了更改。
+ * 同样，通过这种方式，文件系统能只查看它关心的值。
+ * 基本上，这些是VFS层可以请求从FS层更改的属性。
  * Derek Atkins <warlord@MIT.EDU> 94-10-20
  */
 struct iattr {
@@ -256,6 +262,10 @@ struct iattr {
 	 * Not an attribute, but an auxiliary info for filesystems wanting to
 	 * implement an ftruncate() like method.  NOTE: filesystem should
 	 * check for (ia_valid & ATTR_FILE), and not for (ia_file != NULL).
+	 */
+	/* 这不是一个属性,
+	 * 但是一个辅助信息对于文件系统想要去开发一个ftruncate（）像个方法.
+	 * 注意： 文件系统应该检查(ia_valid & ATTR_FILE)，而不是(ia_file != NULL)
 	 */
 	struct file	*ia_file;
 };
@@ -907,14 +917,27 @@ struct fown_struct {
 /*
  * Track a single file's readahead state
  */
+/*
+ *                   |<----- async_size ---------|
+ * |------------------- size -------------------->|
+ * |==================#===========================|
+ * ^start             ^page marked with PG_readahead
+ */
 struct file_ra_state {
+	/* 当前预读第一页的索引 */
 	pgoff_t start;			/* where readahead started */
+	/* 当前预读的页数（当临时禁止预读时为-1，0表示当前预读为空）*/
 	unsigned int size;		/* # of readahead pages */
+	/* async_size指定一个阈值，预读窗口剩余这么多页时，就开始异步预读 */
 	unsigned int async_size;	/* do asynchronous readahead when
 					   there are only # of pages ahead */
-
+	/* 当前预读的最大页数 */
 	unsigned int ra_pages;		/* Maximum readahead window */
+	/* 预读命中失败计数器（用于内存映射）*/
 	unsigned int mmap_miss;		/* Cache miss stat for mmap accesses */
+	/* prev_pos 字段存放着进程在上一次读操作中所请求页的最后一页的索引，
+	 * 它的初值是-1
+	 */
 	loff_t prev_pos;		/* Cache last read() position */
 };
 
@@ -1678,6 +1701,30 @@ static inline void sb_end_intwrite(struct super_block *sb)
  *   -> i_mutex			(write path, truncate, directory ops, ...)
  *   -> s_umount		(freeze_super, thaw_super)
  */
+/* sb_start_write-获得对超级块的写访问权限
+ *
+ * 当进程想要将数据或元数据写入文件系统时（即dirty a page 或 an inode)
+ * 他应该把操作嵌入到sb_start_write和sb_end_write这对的中间以获得针对文件系统freeze的排除
+ * 此函数用于增加防止freeze 写入程序的数量，如果文件系统已经frozen(冻结)，则该函数将等待，直到文件系统解冻
+ *
+ * 由于freeze保护行为就像锁一样，用户必须保留freeze 保护的顺序和其他文件系统锁的locks。
+ * 一般来说，freeze保护应该是最外层的锁。特别是，我们有：
+ * sb_start_write
+ *   -> i_mutex                 (write path, truncate, directory ops, ...)
+ *   -> s_umount                (freeze_super, thaw_super)
+ *
+ * This is an internal function, please use sb_start_{write,pagefault,intwrite}
+ * instead.
+ * int __sb_start_write(struct super_block *sb, int level, bool wait)
+ * {
+ *	if (!wait)
+ *		return percpu_down_read_trylock(sb->s_writers.rw_sem + level-1);
+ *
+ *	percpu_down_read(sb->s_writers.rw_sem + level-1);
+ *	return 1;
+ * }
+ * 实际上就是把SB_FREEZE_WRITE读写信号量+1
+ */
 static inline void sb_start_write(struct super_block *sb)
 {
 	__sb_start_write(sb, SB_FREEZE_WRITE, true);
@@ -2086,6 +2133,11 @@ struct super_operations {
 #define S_SYNC		1	/* Writes are synced at once */
 #define S_NOATIME	2	/* Do not update access times */
 #define S_APPEND	4	/* Append-only file */
+/* immutable bit如果被置1了，会有如下行为:
+ * 这个文件就不能被修改了，也就是说不可以被删除，不可以被改名,
+ * 不可以创建指向这个文件的link（文件链接），文件里面的绝大多数属性信息都不能修改,
+ * 也不允许用write mode来打开这个文件.
+ */
 #define S_IMMUTABLE	8	/* Immutable file */
 #define S_DEAD		16	/* removed, but still open directory */
 #define S_NOQUOTA	32	/* Inode is not counted to quota */
@@ -2130,7 +2182,9 @@ struct super_operations {
 #define IS_APPEND(inode)	((inode)->i_flags & S_APPEND)
 #define IS_IMMUTABLE(inode)	((inode)->i_flags & S_IMMUTABLE)
 #define IS_POSIXACL(inode)	__IS_FLG(inode, MS_POSIXACL)
-
+/* 目录是否被删除？
+ * 删除的时候会先设置dead标志,然后等没人用了再释放结构
+ */
 #define IS_DEADDIR(inode)	((inode)->i_flags & S_DEAD)
 #define IS_NOCMTIME(inode)	((inode)->i_flags & S_NOCMTIME)
 #define IS_SWAPFILE(inode)	((inode)->i_flags & S_SWAPFILE)
