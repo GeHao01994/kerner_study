@@ -110,7 +110,7 @@ struct vfs_cap_data {
 /* Overrides all restrictions about allowed operations on files, where
    file owner ID must be equal to the user ID, except where CAP_FSETID
    is applicable. It doesn't override MAC and DAC restrictions. */
-/* 以最后操做的UID,覆盖文件的先前的UID */
+/* 以最后操作的UID,覆盖文件的先前的UID */
 #define CAP_FOWNER           3
 
 /* Overrides the following restrictions that the effective user ID

@@ -2481,11 +2481,28 @@ static inline void unmap_mapping_range_tree(struct rb_root *root,
  * @even_cows: 1 when truncating a file, unmap even private COWed pages;
  * but 0 when invalidating pagecache, don't throw away private data.
  */
+/* unmap_mapping_range- unmap 指定底层文件相应的page range的address_space
+ * 所有的mmaps
+ *
+ * @mapping：包含要取消映射的mmap的地址空间
+ * holebegin：相对于底层的开头,第一个page要umap的字节数。
+ * 这将PAGE_SIZE向下取整。
+ * 请注意，这与truncate_pagecache（）不同，后者必须保留部分页面。
+ * 相比之下，我们必须去掉部分页面.
+ *
+ * holelen：以字节为单位的预期hole的大小。这将PAGE_SIZE向下取整.
+ * 0的holelen将截断到文件末尾
+ *
+ * 当截断文件是，如果是1，甚至unmap私有的COWed的page
+ * 如果为0，当pagecache无效时，不要丢弃private data
+ */
 void unmap_mapping_range(struct address_space *mapping,
 		loff_t const holebegin, loff_t const holelen, int even_cows)
 {
 	struct zap_details details = { };
+	/* 算出holebegin相对于page的偏移  */
 	pgoff_t hba = holebegin >> PAGE_SHIFT;
+	/* 算出以PAGE大小为单位的长度 */
 	pgoff_t hlen = (holelen + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
 	/* Check for overflow. */
@@ -2495,10 +2512,14 @@ void unmap_mapping_range(struct address_space *mapping,
 		if (holeend & ~(long long)ULONG_MAX)
 			hlen = ULONG_MAX - hba + 1;
 	}
-
+	/* 如果even_cows为1，那么check_mapping就赋值为NULL
+	 * 如果为0时，那么为我们带进来的mapping
+	 */
 	details.check_mapping = even_cows? NULL: mapping;
 	details.first_index = hba;
 	details.last_index = hba + hlen - 1;
+	/* 如果最后一个last_index小于details.first_index
+	 * 也就是说如果为0，那么就一直清除到文件结尾 */
 	if (details.last_index < details.first_index)
 		details.last_index = ULONG_MAX;
 

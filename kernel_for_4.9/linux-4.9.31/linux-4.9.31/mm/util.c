@@ -387,13 +387,14 @@ struct anon_vma *page_anon_vma(struct page *page)
 struct address_space *page_mapping(struct page *page)
 {
 	struct address_space *mapping;
-
+	/* 如果是组合页，那么拿到头，否则就是它自己啊 */
 	page = compound_head(page);
 
 	/* This happens if someone calls flush_dcache_page on slab page */
+	/* 如果这个页用于SLAB */
 	if (unlikely(PageSlab(page)))
 		return NULL;
-
+	/* swapcache表示匿名页面已经交换(swap)到磁盘 */
 	if (unlikely(PageSwapCache(page))) {
 		swp_entry_t entry;
 
@@ -402,9 +403,10 @@ struct address_space *page_mapping(struct page *page)
 	}
 
 	mapping = page->mapping;
+	/* 如果是匿名页面，那么返回NULL */
 	if ((unsigned long)mapping & PAGE_MAPPING_ANON)
 		return NULL;
-
+	/* 否则返回mapping的地址 */
 	return (void *)((unsigned long)mapping & ~PAGE_MAPPING_FLAGS);
 }
 EXPORT_SYMBOL(page_mapping);

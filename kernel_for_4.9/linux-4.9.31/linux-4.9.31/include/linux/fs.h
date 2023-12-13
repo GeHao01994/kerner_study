@@ -249,13 +249,21 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
  * Derek Atkins <warlord@MIT.EDU> 94-10-20
  */
 struct iattr {
+	/* 检验是否有权限被修改 */
 	unsigned int	ia_valid;
+	/* 该节点的模式 */
 	umode_t		ia_mode;
+	/* 所有者标识符 */
 	kuid_t		ia_uid;
+	/* 组标识符 */
 	kgid_t		ia_gid;
+	/* 文件的字节数 */
 	loff_t		ia_size;
+	/* 上次访问文件的时间 */
 	struct timespec	ia_atime;
+	/* 上次写文件的时间 */
 	struct timespec	ia_mtime;
+	/* 上次修改索引节点的时间 */
 	struct timespec	ia_ctime;
 
 	/*

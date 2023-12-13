@@ -1016,23 +1016,28 @@ int page_referenced(struct page *page,
 static int page_mkclean_one(struct page *page, struct vm_area_struct *vma,
 			    unsigned long address, void *arg)
 {
+	/* 获得mm_struct */
 	struct mm_struct *mm = vma->vm_mm;
 	pte_t *pte;
 	spinlock_t *ptl;
 	int ret = 0;
 	int *cleaned = arg;
-
+	/* 获得pte */
 	pte = page_check_address(page, mm, address, &ptl, 1);
 	if (!pte)
 		goto out;
-
+	/* 如果pte是drity的，或者是pte是可写的 */
 	if (pte_dirty(*pte) || pte_write(*pte)) {
 		pte_t entry;
-
+		/* 刷TLB */
 		flush_cache_page(vma, address, pte_pfn(*pte));
+		/* 获取页表项内容，保存到pteval中，然后清空页表项 */
 		entry = ptep_clear_flush(vma, address, pte);
+		/* 清除可写位 */
 		entry = pte_wrprotect(entry);
+		/* 清除drity位 */
 		entry = pte_mkclean(entry);
+		/* 设置到相关的页表里面去 */
 		set_pte_at(mm, address, pte, entry);
 		ret = 1;
 	}
@@ -1064,12 +1069,14 @@ int page_mkclean(struct page *page)
 		.rmap_one = page_mkclean_one,
 		.invalid_vma = invalid_mkclean_vma,
 	};
-
+	/* 如果page是locked的，那么报个BUG吧 */
 	BUG_ON(!PageLocked(page));
-
+	/* page_mapped: Return true if this page is mapped into pagetables. */
 	if (!page_mapped(page))
 		return 0;
-
+	/* 得到mapping，如果mapping为空，那么直接返回了
+	 * 匿名页面会返回
+	 */
 	mapping = page_mapping(page);
 	if (!mapping)
 		return 0;

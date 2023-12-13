@@ -394,11 +394,23 @@ EXPORT_SYMBOL(simple_rename);
  * on simple regular filesystems.  Anything that needs to change on-disk
  * or wire state on size changes needs its own setattr method.
  */
+/* simple_setattr-用于简单文件系统的setattr
+ * @dentry: dentry
+ * @iattr: iattr structure
+ *
+ * 成功返回0，失败返回-error
+ *
+ * simple_setattr是一个简单的 ->setattr 实现，没有一个恰当的size改变的实现
+ *
+ * 它既可以用于内存中的文件系统，也可以用于简单的常规文件系统上的特殊文件。
+ * 任何需要在磁盘上更改或在size更改都需要自己的setattr方法.
+ */
 int simple_setattr(struct dentry *dentry, struct iattr *iattr)
 {
+	/* 得到相应的inode */
 	struct inode *inode = d_inode(dentry);
 	int error;
-
+	/* setattr_prepare - check if attribute changes to a dentry are allowed */
 	error = setattr_prepare(dentry, iattr);
 	if (error)
 		return error;

@@ -299,14 +299,17 @@ struct vm_userfaultfd_ctx {};
  */
 struct vm_area_struct {
 	/* The first cache line has the info for VMA tree walking. */
-
+	/* 指定VMA在进程地址空间的起始地址 */
 	unsigned long vm_start;		/* Our start address within vm_mm. */
+	/* 指定VMA在进程地址空间的结束地址 */
 	unsigned long vm_end;		/* The first byte after our end address
 					   within vm_mm. */
-
+	/* vm_next和vm_prev让进程的VMA都连接成一个链表 */
 	/* linked list of VM areas per task, sorted by address */
 	struct vm_area_struct *vm_next, *vm_prev;
-
+	/* VMA作为一个节点加入红黑树中，
+	 * 每个进程的struct mm_struct数据结构中都有这样一颗红黑树 mm->mm_rb
+	 */
 	struct rb_node vm_rb;
 
 	/*
@@ -318,9 +321,11 @@ struct vm_area_struct {
 	unsigned long rb_subtree_gap;
 
 	/* Second cache line starts here. */
-
+	/* 指向该VMA所属进程的struct mm_struct数据结构 */
 	struct mm_struct *vm_mm;	/* The address space we belong to. */
+	/* VMA的访问权限 */
 	pgprot_t vm_page_prot;		/* Access permissions of this VMA. */
+	/* 描述该VMA的一组标志位 */
 	unsigned long vm_flags;		/* Flags, see mm.h. */
 
 	/*
@@ -338,16 +343,20 @@ struct vm_area_struct {
 	 * can only be in the i_mmap tree.  An anonymous MAP_PRIVATE, stack
 	 * or brk vma (with NULL file) can only be in an anon_vma list.
 	 */
+	/* 用于管理RMAP反向映射 */
 	struct list_head anon_vma_chain; /* Serialized by mmap_sem &
 					  * page_table_lock */
 	struct anon_vma *anon_vma;	/* Serialized by page_table_lock */
 
 	/* Function pointers to deal with this struct. */
+	/* 指向许多方法的集合，这些方法用于在VMA中执行各种操作，通常用于文件映射 */
 	const struct vm_operations_struct *vm_ops;
 
 	/* Information about our backing store: */
+	/* 指向文件映射的偏移量，这个变量的单位不是Byte,而是页面的大小（PAGE_SIZE）*/
 	unsigned long vm_pgoff;		/* Offset (within vm_file) in PAGE_SIZE
 					   units */
+	/* 描述一个被映射的文件 */
 	struct file * vm_file;		/* File we map to (can be NULL). */
 	void * vm_private_data;		/* was vm_pte (shared mem) */
 

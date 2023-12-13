@@ -211,6 +211,11 @@ int notify_change(struct dentry * dentry, struct iattr * attr, struct inode **de
 	WARN_ON_ONCE(!inode_is_locked(inode));
 
 	if (ia_valid & (ATTR_MODE | ATTR_UID | ATTR_GID | ATTR_TIMES_SET)) {
+		/* immutable bit如果被置1了，会有如下行为:
+		 * 这个文件就不能被修改了，也就是说不可以被删除，不可以被改名，不可以创建指向这个文件的link（文件链接），
+		 * 文件里面的绝大多数属性信息都不能修改，也不允许用write mode来打开这个文件.
+		 */
+		/* 如果是以APPEND打开这个文件的话，也没法修改 */
 		if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
 			return -EPERM;
 	}
@@ -218,6 +223,9 @@ int notify_change(struct dentry * dentry, struct iattr * attr, struct inode **de
 	/*
 	 * If utimes(2) and friends are called with times == NULL (or both
 	 * times are UTIME_NOW), then we need to check for write permission
+	 */
+	/* 如果times==NULL（或者两个时间都是UTIME_NOW)调用utimes(2) and friends时
+	 * 那么我们需要检查写入权限
 	 */
 	if (ia_valid & ATTR_TOUCH) {
 		if (IS_IMMUTABLE(inode))
@@ -236,12 +244,14 @@ int notify_change(struct dentry * dentry, struct iattr * attr, struct inode **de
 		if (is_sxid(amode))
 			inode->i_flags &= ~S_NOSEC;
 	}
-
+	/* 获得当前的时间(以super block的粒度)*/
 	now = current_time(inode);
-
+	/* 将attr的ia_ctime(修改inode的时间)更新为now */
 	attr->ia_ctime = now;
+	/* 如果没有设置ATTR_ATIME_SET，那么将attr->ia_atime(访问inode的时间)设置为now */
 	if (!(ia_valid & ATTR_ATIME_SET))
 		attr->ia_atime = now;
+	/* 如果没有设置ATTR_MTIME_SET，那么将attr->im_atime(修改文件的时间)设置为now */
 	if (!(ia_valid & ATTR_MTIME_SET))
 		attr->ia_mtime = now;
 	if (ia_valid & ATTR_KILL_PRIV) {
@@ -258,6 +268,10 @@ int notify_change(struct dentry * dentry, struct iattr * attr, struct inode **de
 	 * that's due to these bits. This adds an implicit restriction that
 	 * no function will ever call notify_change with both ATTR_MODE and
 	 * ATTR_KILL_S*ID set.
+	 */
+	/* 我们现在将ATTR_KILL_S*ID传递给较低级别的setattr函数，因此该函数能够重新解析由这些位引起的模式变化.
+	 * 这增加了一个隐含的限制，即在设置了ATTR_MODE和ATTR_KILL_S*ID的情况下，
+	 * 任何函数都不会调用notify_change.
 	 */
 	if ((ia_valid & (ATTR_KILL_SUID|ATTR_KILL_SGID)) &&
 	    (ia_valid & ATTR_MODE))
@@ -285,6 +299,7 @@ int notify_change(struct dentry * dentry, struct iattr * attr, struct inode **de
 	 * Verify that uid/gid changes are valid in the target
 	 * namespace of the superblock.
 	 */
+	/* 验证在superblock的目标namespace中uid/git 改变是有效的 */
 	if (ia_valid & ATTR_UID &&
 	    !kuid_has_mapping(inode->i_sb->s_user_ns, attr->ia_uid))
 		return -EOVERFLOW;
@@ -294,6 +309,9 @@ int notify_change(struct dentry * dentry, struct iattr * attr, struct inode **de
 
 	/* Don't allow modifications of files with invalid uids or
 	 * gids unless those uids & gids are being made valid.
+	 */
+	/* 不允许修改具有无效uid或gid的文件，
+	 * 除非这些uids&gids变得有效.
 	 */
 	if (!(ia_valid & ATTR_UID) && !uid_valid(inode->i_uid))
 		return -EOVERFLOW;

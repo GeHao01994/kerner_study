@@ -64,6 +64,10 @@ int do_truncate(struct dentry *dentry, loff_t length, unsigned int time_attrs,
 
 	inode_lock(dentry->d_inode);
 	/* Note any delegations or leases have already been broken: */
+	/* notify_change()函数的作用是注册一个通知器，当文件的属性改变后，用来通知文件系统。
+	 * 改变的属性放在attr结构体中，函数首先会对传入的参数attr进行设置，使其对当前文件系统可用.
+	 * 用于检查文件系统attribute的改动是否有效，有效的话，就通知文件系统这个改动，无效的话就返回error
+	 */
 	ret = notify_change(dentry, &newattrs, NULL);
 	inode_unlock(dentry->d_inode);
 	return ret;

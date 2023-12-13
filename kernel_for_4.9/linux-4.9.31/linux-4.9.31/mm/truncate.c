@@ -688,9 +688,18 @@ EXPORT_SYMBOL_GPL(invalidate_inode_pages2);
  * situations such as writepage being called for a page that has already
  * had its underlying blocks deallocated.
  */
+/* truncate_pagecache - 取消映射并删除已截断的页面缓存
+ *
+ * 在调用truncate_pagecache之前，必须已经写入inode的新i_size.
+ *
+ * 此函数通常应在文件系统释放与释放范围相关联的资源（例如，解除分配块）之前调用.
+ * 通过这种方式，页面缓存将始终与磁盘上的格式保持逻辑一致，
+ * 并且文件系统将不必处理诸如为已经解除底层块分配的页面调用写页面之类的情况.
+ */
 void truncate_pagecache(struct inode *inode, loff_t newsize)
 {
 	struct address_space *mapping = inode->i_mapping;
+	/* 将newsize进行向上取整的页对齐 */
 	loff_t holebegin = round_up(newsize, PAGE_SIZE);
 
 	/*
@@ -701,6 +710,12 @@ void truncate_pagecache(struct inode *inode, loff_t newsize)
 	 * private pages to be COWed, which remain after
 	 * truncate_inode_pages finishes, hence the second
 	 * unmap_mapping_range call must be made for correctness.
+	 */
+	/* unmap_mappint_range将被调用两次，第一次只是为了提高效率以至于
+	 * truncate_inode_pages做较少的single-page unmaps.
+	 * 然而在第一次调用之后，在truncate_inode_pages完成之前，
+	 * 可能有一些私有page被COW，在unmap_mapping_range完成之后被保留
+	 * 因此必须进行第二次unmap_mapping_range调用以确保正确性.
 	 */
 	unmap_mapping_range(mapping, holebegin, 0, 1);
 	truncate_inode_pages(mapping, newsize);
@@ -721,11 +736,23 @@ EXPORT_SYMBOL(truncate_pagecache);
  * i_mutex but e.g. xfs uses a different lock) and before all filesystem
  * specific block truncation has been performed.
  */
+/* truncate_setsize - 更新一个新的文件大小给inode和pagecache
+ * @inode: inode
+ * @newsize: new file size
+ * truncate_setsize更新i_size和指向pagecache的截除(如果必须的话)到@newsize.
+ * 当传递ATTR_SIZE时，通常被文件系统的setattr函数调用
+ *
+ * 必须被带着一个锁顺序截除和写(通常为i_mutex，但例如xfs使用不同的锁)调用
+ * 在所有文件系统特定的块截除之前被执行
+ */
 void truncate_setsize(struct inode *inode, loff_t newsize)
 {
 	loff_t oldsize = inode->i_size;
-
+	/* 将newsize写到inode里面的i_size中去
+	 * 也就是说修改文件长度
+	 */
 	i_size_write(inode, newsize);
+	/* 如果新的大小大于老的大小 */
 	if (newsize > oldsize)
 		pagecache_isize_extended(inode, oldsize, newsize);
 	truncate_pagecache(inode, newsize);
@@ -751,31 +778,58 @@ EXPORT_SYMBOL(truncate_setsize);
  * makes sure i_size is stable but also that userspace cannot observe new
  * i_size value before we are prepared to store mmap writes at new inode size.
  */
+/*
+ * pagecache_isize_extended - 在i_size扩展后更新pagecache
+ * @inode: i_size被扩展的inode
+ * @from: 原来的inode大小
+ * @to: 新的inode的大小
+ *
+ * 处理扩展inode的大小由于extending truncate或者在current i_size之后写.
+ * 我们将横跨当前i_size的页面标记为只读以便在最临近的写访问调用page_mkwrite
+ * 通过这种方式，文件系统可以确保在i_size更改后，在用户通过mmap写入页面之前，
+ * 在页面上调用page_mkwrite().
+ *
+ * 必须在i_size更新后调用该函数，以便在我们unlock page 后出现的页面page fault 将已经看到新的i_size.
+ * 必须在我们仍然持有i_mutex的情况下调用该函数——这不仅确保i_size是稳定的，而且用户空间不能观察到新的
+ * i_size的值在我们准备以新的inode大小来存储mmap的写
+ */
 void pagecache_isize_extended(struct inode *inode, loff_t from, loff_t to)
 {
+	/* 获得块大小(以位为单位) 然后左移，也就是计算块大小 */
 	int bsize = 1 << inode->i_blkbits;
 	loff_t rounded_from;
 	struct page *page;
 	pgoff_t index;
-
+	/* 如果新的inode大小大于inode的大小，那么这里报出警告 */
 	WARN_ON(to > inode->i_size);
-
+	/* 如果原来的inode的大小大于新的inode的大小
+	 * 如果块大小等于一个PAGE_SIZE */
 	if (from >= to || bsize == PAGE_SIZE)
 		return;
 	/* Page straddling @from will not have any hole block created? */
+	/* 横跨 @from 的页面将不会创建任何block hole? */
+	/* from以块大小向上对齐 */
 	rounded_from = round_up(from, bsize);
+	/* 如果新的inode大小小于from的向上对齐的块大小，那么说明from <= to <= rounded_from区间内
+	 * 因为你读文件是以快为单位读的，你都在这个块里面了，那什么都不用做了呀
+	 * 如果rounded_from本身就是按页对齐的
+	 * 那么直接返回吧
+	 */
 	if (to <= rounded_from || !(rounded_from & (PAGE_SIZE - 1)))
 		return;
-
+	/*获得大小为from时最后一个PAGE */
 	index = from >> PAGE_SHIFT;
+	/* 找到这个page */
 	page = find_lock_page(inode->i_mapping, index);
 	/* Page not cached? Nothing to do */
+	/* 如果page没被cached，无事可做 */
 	if (!page)
 		return;
 	/*
 	 * See clear_page_dirty_for_io() for details why set_page_dirty()
 	 * is needed.
 	 */
+	/* page_mkclean会清除dirty位然后会添加写保护，这里又把dirty为给设置回来 */
 	if (page_mkclean(page))
 		set_page_dirty(page);
 	unlock_page(page);

@@ -2068,14 +2068,22 @@ EXPORT_SYMBOL(inode_init_owner);
  * Return true if current either has CAP_FOWNER in a namespace with the
  * inode owner uid mapped, or owns the file.
  */
+/* inode_owner_or_capable - 检查当前的task对inode的权限
+ * @inode: 被检查的inode
+ * 如果当前进程在inode的uid mapped的命名空间中有CAP_FOWNER或者拥有该文件的时候，
+ * 则返回true.
+ */
 bool inode_owner_or_capable(const struct inode *inode)
 {
 	struct user_namespace *ns;
-
+	/* 如果当前进程的fsuid和inode->i_uid相等的话，那么返回true
+	 * UID for VFS ops
+	 */
 	if (uid_eq(current_fsuid(), inode->i_uid))
 		return true;
-
+	/* 获得当前的namespace */
 	ns = current_user_ns();
+	/* CAP_FOWNER是说以最后操作的UID,覆盖文件的先前的UID */
 	if (ns_capable(ns, CAP_FOWNER) && kuid_has_mapping(ns, inode->i_uid))
 		return true;
 	return false;
@@ -2160,6 +2168,13 @@ EXPORT_SYMBOL(inode_nohighmem);
  *
  * Note that inode and inode->sb cannot be NULL.
  * Otherwise, the function warns and returns time without truncation.
+ */
+/* current_time - 返回fs时间
+ *
+ * 返回fs支持的时间精度格式的当前时间
+ *
+ * 注意，inode和inode->sb不能为空
+ * 否则，这个函数将发出警告然后返回没有格式化的时间
  */
 struct timespec current_time(struct inode *inode)
 {
