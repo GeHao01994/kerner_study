@@ -1410,6 +1410,13 @@ void zap_page_range(struct vm_area_struct *vma, unsigned long start,
  *
  * The range must fit into one VMA.
  */
+/*
+ * zap_page_range_single - 删除给定range的user page
+ * vma: 持有合适页面的vm_area_struct
+ * address：要移除页面起始地址
+ * size：要移除的大小（字节为单位）
+ * details：shared cache无效的详细信息
+ */
 static void zap_page_range_single(struct vm_area_struct *vma, unsigned long address,
 		unsigned long size, struct zap_details *details)
 {
@@ -2447,16 +2454,35 @@ static inline void unmap_mapping_range_tree(struct rb_root *root,
 
 	vma_interval_tree_foreach(vma, root,
 			details->first_index, details->last_index) {
-
+		/* vm_pgoff 指向文件映射的偏移量，这个变量的单位不是Byte,而是页面的大小(PAGE_SIZE)
+		 * 这里就是得到这块vma的文件映射偏移量
+		 */
 		vba = vma->vm_pgoff;
+		/* 得到这块vma结束的偏移量
+		 * static inline unsigned long vma_pages(struct vm_area_struct *vma)
+		 * {
+		 *	return (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
+		 * }
+		 */
 		vea = vba + vma_pages(vma) - 1;
+		/* 拿到details的first_index，也就是我们要unmap的起始index */
 		zba = details->first_index;
+		/* 如果需要unmap的起始index小于vma的起始index,说明我有部分区域不在
+		 * 你这范围内，你帮我unmap掉在你区域内的好了
+		 * 那么就把你这vma的起始index给我好了
+		 */
 		if (zba < vba)
 			zba = vba;
+		/* 如果需要unmap的结束index大于vma的结束index,说明我有部分区域不在
+		 * 你这范围内，你帮我unmap掉在你区域内的好了
+		 * 那么就把你这vma的结束index给我好了
+		 */
 		zea = details->last_index;
 		if (zea > vea)
 			zea = vea;
-
+		/* zba - vba 得到开始的page_index，然后加上vma->vm_start就得到了起始地址
+		 * zea- vba + 1得到的是结束的index,然后加上vma->vm_start就得到了结束的地址
+		 */
 		unmap_mapping_range_vma(vma,
 			((zba - vba) << PAGE_SHIFT) + vma->vm_start,
 			((zea - vba + 1) << PAGE_SHIFT) + vma->vm_start,

@@ -27,7 +27,7 @@ static __always_inline void __update_lru_size(struct lruvec *lruvec,
 				int nr_pages)
 {
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
-
+	/* 更新一下zone和node的计数 */
 	__mod_node_page_state(pgdat, NR_LRU_BASE + lru, nr_pages);
 	__mod_zone_page_state(&pgdat->node_zones[zid],
 				NR_ZONE_LRU_BASE + lru, nr_pages);
@@ -46,6 +46,7 @@ static __always_inline void update_lru_size(struct lruvec *lruvec,
 static __always_inline void add_page_to_lru_list(struct page *page,
 				struct lruvec *lruvec, enum lru_list lru)
 {
+	/* 先计算并更新lru的size，然后将其添加到lru链表里面去 */
 	update_lru_size(lruvec, lru, page_zonenum(page), hpage_nr_pages(page));
 	list_add(&page->lru, &lruvec->lists[lru]);
 }
@@ -103,14 +104,28 @@ static __always_inline enum lru_list page_off_lru(struct page *page)
  * Returns the LRU list a page should be on, as an index
  * into the array of LRU lists.
  */
+/* page_lru - 这个page应该放到哪个LRU链表里面
+ * @page: the page to test
+ *
+ * 返回这个page应该放入的LRU list，作为LRU lists数组的索引
+ */
 static __always_inline enum lru_list page_lru(struct page *page)
 {
 	enum lru_list lru;
-
+	/* 如果page是不可回收的，那么直接放到不可回收的page里面好了 */
 	if (PageUnevictable(page))
 		lru = LRU_UNEVICTABLE;
 	else {
+		/* 判断这个page是不是文件页
+		 * static inline enum lru_list page_lru_base_type(struct page *page)
+		 * {
+		 * 	if (page_is_file_cache(page))
+		 * 		return LRU_INACTIVE_FILE;
+		 *	return LRU_INACTIVE_ANON;
+		 * }
+		 */
 		lru = page_lru_base_type(page);
+		/* 然后再看是加入到LRU_ACTIVE还是LRU_UNACTIVE */
 		if (PageActive(page))
 			lru += LRU_ACTIVE;
 	}

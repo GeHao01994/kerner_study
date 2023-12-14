@@ -42,12 +42,16 @@
 
 /* How many pages do we try to swap or page in/out together? */
 int page_cluster;
-
+/* lru_add_pvec 将不处于lru链表的新页放入到lru链表中 */
 static DEFINE_PER_CPU(struct pagevec, lru_add_pvec);
+/* lru_rotate_pvecs INACTIVE 缓存已经在INACTIVE LRU链表中的非活动页，将这些页添加到INACTIVE LRU链表的尾部*/
 static DEFINE_PER_CPU(struct pagevec, lru_rotate_pvecs);
+/* 将一个page cache移到inactive lru里（比如手工触发drop cache释放pagecache) */
 static DEFINE_PER_CPU(struct pagevec, lru_deactivate_file_pvecs);
+/* 缓存已经在ACTIVE LRU链表中的页，清除掉PG_activate, PG_referenced标志后，将这些页加入到INACTIVE LRU链表中 */
 static DEFINE_PER_CPU(struct pagevec, lru_deactivate_pvecs);
 #ifdef CONFIG_SMP
+/* 将非活跃lru链表的页移动到活跃lru链表 */
 static DEFINE_PER_CPU(struct pagevec, activate_page_pvecs);
 #endif
 
@@ -182,9 +186,11 @@ static void pagevec_lru_move_fn(struct pagevec *pvec,
 	struct pglist_data *pgdat = NULL;
 	struct lruvec *lruvec;
 	unsigned long flags = 0;
-
+	/* 对pagevec里面的那个page进行处理 */
 	for (i = 0; i < pagevec_count(pvec); i++) {
+		/* 获取page */
 		struct page *page = pvec->pages[i];
+		/* 获得相应的pglist */
 		struct pglist_data *pagepgdat = page_pgdat(page);
 
 		if (pagepgdat != pgdat) {
@@ -195,6 +201,7 @@ static void pagevec_lru_move_fn(struct pagevec *pvec,
 		}
 
 		lruvec = mem_cgroup_page_lruvec(page, pgdat);
+		/* 调用我们传过来的move函数 */
 		(*move_fn)(page, lruvec, arg);
 	}
 	if (pgdat)
@@ -254,6 +261,12 @@ static void update_page_reclaim_stat(struct lruvec *lruvec,
 	struct zone_reclaim_stat *reclaim_stat = &lruvec->reclaim_stat;
 
 	reclaim_stat->recent_scanned[file]++;
+	/* recent_rotated
+	 * 在扫描不活跃链表时，统计那些被踢回活跃链表的页面数量到recent_rotated变量中，
+	 * 详见shrink_inactive_list()->putback_inactive_pages()函数。
+	 * 在扫描活跃页面时，访问引用的页面数量也被加到recent_rotated变量。
+	 * 总之，该变量反映了真实的活跃页面的数量
+	 */
 	if (rotated)
 		reclaim_stat->recent_rotated[file]++;
 }
@@ -581,10 +594,17 @@ static void lru_deactivate_fn(struct page *page, struct lruvec *lruvec,
  * Either "cpu" is the current CPU, and preemption has already been
  * disabled; or "cpu" is being hot-unplugged, and is already dead.
  */
+/* 排出cpu的pagevec的页面
+ * “cpu”是当前的cpu，并且抢占已经被禁用；
+ * 或者“cpu”正在被热插拔拔掉，并且已经死了
+ */
 void lru_add_drain_cpu(int cpu)
 {
+	/* lru_add_pvec 将不处于lru链表的新页放入到lru链表 */
 	struct pagevec *pvec = &per_cpu(lru_add_pvec, cpu);
-
+	/* 这里lru_add_pvec有东西，就开始__pagevec_lru_add
+	 * 而不需要判断这个向量表是不是满了
+	 */
 	if (pagevec_count(pvec))
 		__pagevec_lru_add(pvec);
 
@@ -857,12 +877,15 @@ void lru_add_page_tail(struct page *page, struct page *page_tail,
 static void __pagevec_lru_add_fn(struct page *page, struct lruvec *lruvec,
 				 void *arg)
 {
+	/* 判断它是不是pagecache */
 	int file = page_is_file_cache(page);
+	/* 判断该page是否为active page,用来判断它是否应该放到活跃链表 */
 	int active = PageActive(page);
+	/* 拿到你要放到那个lru链表的index */
 	enum lru_list lru = page_lru(page);
-
+	/* 如果你已经在LRU链表里面了，你还要加入，那就报个BUG吧 */
 	VM_BUG_ON_PAGE(PageLRU(page), page);
-
+	/* 设置PG_lru flag */
 	SetPageLRU(page);
 	add_page_to_lru_list(page, lruvec, lru);
 	update_page_reclaim_stat(lruvec, file, active);

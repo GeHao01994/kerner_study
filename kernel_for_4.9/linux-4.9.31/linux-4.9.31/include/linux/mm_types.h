@@ -297,6 +297,33 @@ struct vm_userfaultfd_ctx {};
  * space that has a special rule for the page-fault handlers (ie a shared
  * library, the executable area etc).
  */
+/*
+ * 对于文件页，vma->vm_start记录了vma的首虚拟地址，vma->vm_pgoff记录了该vma在对应的映射文件
+ *（或共享内存）中的偏移，而page->index记录了页面在文件（或共享内存）中的偏移.
+ * 通过vma->vm_pgoff和page->index能得到页面在vma中的偏移,加上vma->vm_start就能得到页面的虚拟地址;
+ * 而通过page->index就能得到页面在文件磁盘高速缓存中的位置
+ *
+ * 下面的还是太理想了，但是不影响我们理解，可以想一下如果内存不联系的情况，其实是一样的
+ *
+ *  —————————————————————————————
+ * ↓		page->index      ↓
+ *  ———————————————————
+ * ↓     vma->pgoff    ↓
+ *  ———— ———— ———— ———— ———— ———— ———— ———— ———— ————
+ * |    |    |    |    |    |    |    |    |    |    |
+ * |    |    |    |    |    |    |PAGE|    |    |    |  File
+ * |    |    |    |    |    |    |    |    |    |    |
+ *  ———— ———— ———— ———— ———— ———— ———— ———— ———— ————
+ *
+ *                      ———— ———— ———— ————
+ *                     |    |    |    |    |
+ *                     |    |    |    |    |		VMA
+ *                     |    |    |    |    |
+ *                      ———— ———— ———— ————
+ *
+ *                     ↑         ↑
+ *                  vm->start  page的虚拟地址
+ */
 struct vm_area_struct {
 	/* The first cache line has the info for VMA tree walking. */
 	/* 指定VMA在进程地址空间的起始地址 */

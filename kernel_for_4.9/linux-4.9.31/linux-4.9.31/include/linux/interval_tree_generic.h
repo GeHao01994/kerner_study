@@ -36,7 +36,24 @@
  * Note - before using this, please consider if non-generic version
  * (interval_tree.h) would work for you...
  */
-
+/*
+ * 用于实现区间树的模板
+ *
+ * ITSTRUCT:区间树节点的struct type
+ * ITRB：ITSTRUCT中rb_node结构体字段的名称
+ * ITTYPE: 区间端点的类型
+ * ITSUBTREE:ITSTRUCT中的ITTYPE字段的名称，在子树中保持最后一个
+ * ITSTART（n）：ITSTRUCT节点n的起始端点
+ * ITLAST（n）：ITSTRUCT节点n的最后一个端点
+ * ITSTATIC:“static”或空
+ * ITPREFIX:用于内联树定义的前缀
+ *
+ * Here is an example
+ * INTERVAL_TREE_DEFINE(struct vm_area_struct, shared.rb,
+ *			unsigned long, shared.rb_subtree_last,
+ *			vma_start_pgoff, vma_last_pgoff,, vma_interval_tree)
+ *
+ */
 #define INTERVAL_TREE_DEFINE(ITSTRUCT, ITRB, ITTYPE, ITSUBTREE,		      \
 			     ITSTART, ITLAST, ITSTATIC, ITPREFIX)	      \
 									      \

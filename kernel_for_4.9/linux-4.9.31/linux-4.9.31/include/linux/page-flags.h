@@ -72,27 +72,44 @@
  * SPARSEMEM_EXTREME with !SPARSEMEM_VMEMMAP).
  */
 enum pageflags {
+	/* page被锁定，说明有使用者正在操作该page */
 	PG_locked,		/* Page is locked. Don't touch. */
+	/* 状态标志，表示涉及该page的IO操作发生了错误 */
 	PG_error,
+	/* 表示page刚刚被访问过 */
 	PG_referenced,
+	/* 表示page的数据已经与后备存储器是同步的，是最新的 */
 	PG_uptodate,
+	/* 与后备存储器中的数据相比，该page的内容已经被修改 */
 	PG_dirty,
+	/* 表示该page处于LRU链表上 */
 	PG_lru,
+	/* 页为活动页，配合PG_lru就可以得出页是处于非活动页lru链表还是活动页lru链表 */
 	PG_active,
+	/* 该page属于slab分配器 */
 	PG_slab,
 	PG_owner_priv_1,	/* Owner use. If pagecache, fs may use*/
 	PG_arch_1,
+	/* 设置该标志，防止该page被交换到swap。*/
 	PG_reserved,
+	/* 页描述符中的page->private保存有数据 */
 	PG_private,		/* If pagecache, has fs-private data */
 	PG_private_2,		/* If pagecache, has fs aux data */
+	/* page中的数据正在被回写到后备存储器。*/
 	PG_writeback,		/* Page is under writeback */
 	PG_head,		/* A head page */
+	/* 已经加入到了swap cache中(只有非文件页使用) */
 	PG_swapcache,		/* Swap page: swp_entry_t in private */
+	/* 表示page中的数据在后备存储器中有对应的块 */
 	PG_mappedtodisk,	/* Has blocks allocated on-disk */
+	/* 页正在进行回收，只有在内存回收时才会对需要回收的页进行此标记 */
 	PG_reclaim,		/* To be reclaimed asap */
+	/* 此页可写入swap分区，一般用于表示此页是非文件页 */
 	PG_swapbacked,		/* Page is backed by RAM/swap */
+	/* 表示这个页面不能回收 */
 	PG_unevictable,		/* Page is "unevictable"  */
 #ifdef CONFIG_MMU
+	/* 页被锁在内存中（此标志可以保证不被换出，但是无法保证不被被做内存迁移) */
 	PG_mlocked,		/* Page is vma mlocked */
 #endif
 #ifdef CONFIG_ARCH_USES_PG_UNCACHED

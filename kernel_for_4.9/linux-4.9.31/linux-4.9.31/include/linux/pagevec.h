@@ -13,7 +13,11 @@
 
 struct page;
 struct address_space;
-
+/* pagevec数据结构，借助一个数组来保存特定数目的页，可以对这些页面执行同样的操作.
+ * 页向量会以“批处理的方式”执行，比单独处理一个页的方式效率更高.
+ * 一个 pagevec 结构最多可以存在 14 个这样的项（PAGEVEC_SIZE 的默认值是 14).
+ * 当一个 pagevec 的结构满了，那么该 pagevec 中的所有页面会一次性地被移动到相应的 LRU 链表上去.
+ */
 struct pagevec {
 	unsigned long nr;
 	unsigned long cold;

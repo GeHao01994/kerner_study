@@ -1931,6 +1931,13 @@ extern atomic_long_t mmap_pages_allocated;
 extern int nommu_shrink_inode_mappings(struct inode *, size_t, size_t);
 
 /* interval_tree.c */
+/* 如这上面的注释，这一系列的操作都在interval_tree.c中
+ * 其中定义了
+ * INTERVAL_TREE_DEFINE(struct vm_area_struct, shared.rb,
+ *			unsigned long, shared.rb_subtree_last,
+ *			vma_start_pgoff, vma_last_pgoff,, vma_interval_tree)
+ * 然后跳到include/linux/interval_tree_generic.h里面定义各种各样的函数
+ */
 void vma_interval_tree_insert(struct vm_area_struct *node,
 			      struct rb_root *root);
 void vma_interval_tree_insert_after(struct vm_area_struct *node,
