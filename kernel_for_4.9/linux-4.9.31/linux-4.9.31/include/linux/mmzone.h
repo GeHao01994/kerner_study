@@ -207,7 +207,13 @@ static inline int is_active_lru(enum lru_list lru)
 {
 	return (lru == LRU_ACTIVE_ANON || lru == LRU_ACTIVE_FILE);
 }
-
+/* 统计扫描页面和活跃页面的情况
+ * 匿名页面存放在数组[0]中，文件缓存存放在数组[1]中.
+ * recent_rotated / recent_scanned的比值比较大，说明这些被缓存起来的页面越有价值，
+ * 它们更应该留下来.
+ * 以匿名页面为例，recent_rotated值越小，说明LRU链表中匿名页面价值越小，
+ * 那么就应该多扫描一些匿名页面，尽量把没有缓存价值的页面换出去
+ */
 struct zone_reclaim_stat {
 	/*
 	 * The pageout code in vmscan.c keeps track of how many of the
@@ -217,7 +223,15 @@ struct zone_reclaim_stat {
 	 *
 	 * The anon LRU stats live in [0], file LRU stats in [1]
 	 */
+	/* 在扫描不活跃链表时，统计那些被踢回活跃链表的页面数量到recent_rotated变量中，
+	 * 详见shrink_inactive_list()->putback_inactive_pages()函数。
+	 * 在扫描活跃页面时，访问引用的页面数量也被加到recent_rotated变量。
+	 * 总之，该变量反映了真实的活跃页面的数量.
+	 */
 	unsigned long		recent_rotated[2];
+	/* recent_scanned:指最近扫描的页面的数量，在扫描活跃链表和不活跃链表时,
+	 * 会统计到recent_scanned变量中
+	 */
 	unsigned long		recent_scanned[2];
 };
 
@@ -285,8 +299,11 @@ struct per_cpu_nodestat {
 };
 
 #endif /* !__GENERATING_BOUNDS.H */
-//ͨ������£��ں� �е�ZONE��ΪZONE_DMA,ZONE_DMA32,ZONE_NORMAL,ZONE_HIGHMEM
-//������ЩҲû��ZONE_DAM ��ZONE_DMA32
+
+/* 通常情况下，内核中的ZONE分为ZONE_DMA,ZONE_DMA32,
+ * ZONE_NORMAL,ZONE_HIGHMEM
+ * 但是有些也没有ZONE_DAM 和ZONE_DMA32
+ */
 enum zone_type {
 #ifdef CONFIG_ZONE_DMA
 	/*
@@ -346,8 +363,10 @@ enum zone_type {
 
 struct zone {
 	/* Read-mostly fields */
-	//ÿ��zone��ϵͳ������ʱ������3��ˮλֵ���ֱ���WMARK_MIN,WMARK_LOW��WMARK_HIGHˮλ
-	//����ҳ���������kswapdҳ������л��õ�
+	/* 每个zone在系统启动的时候会计算3个水位值，
+	 * 分别是WMARK_MIN,WMARK_LOW和WMARK_HIGH水位
+	 * 这在页面分配器和kswapd页面回收中会用到
+	 */
 	/* zone watermarks, access with *_wmark_pages(zone) macros */
 	unsigned long watermark[NR_WMARK];
 
@@ -362,15 +381,15 @@ struct zone {
 	 * recalculated at runtime if the sysctl_lowmem_reserve_ratio sysctl
 	 * changes.
 	 */
-	 //zoneԤ�����ڴ�
+	/* zone预留的内存 */
 	long lowmem_reserve[MAX_NR_ZONES];
 
 #ifdef CONFIG_NUMA
 	int node;
 #endif
-	//ָ���ڴ�Ľڵ�
+	/* 指向内存的节点 */
 	struct pglist_data	*zone_pgdat;
-	//����ά��Per-CPU��һϵ��ҳ�棬�Լ���������������
+	/* 用于维护Per-CPU上一系列页面，以减少自旋锁的争用 */
 	struct per_cpu_pageset __percpu *pageset;
 
 #ifndef CONFIG_SPARSEMEM
@@ -382,7 +401,7 @@ struct zone {
 #endif /* CONFIG_SPARSEMEM */
 
 	/* zone_start_pfn == zone_start_paddr >> PAGE_SHIFT */
-	//zone�п�ʼҳ���ҳ֡��
+	/* zone中开始页面的页帧号 */
 	unsigned long		zone_start_pfn;
 
 	/*
@@ -426,11 +445,11 @@ struct zone {
 	 * adjust_managed_page_count() should be used instead of directly
 	 * touching zone->managed_pages and totalram_pages.
 	 */
-	 //zone�����ϵͳ����������
+	/* zone被伙伴系统管理的数量 */
 	unsigned long		managed_pages;
-	//zone ������ҳ������
+	/* zone 包含的页面数量 */
 	unsigned long		spanned_pages;
-	//zone ��ʵ�ʹ�����ҳ�����������һЩ��ϵ�ṹ��˵����ֵ��spanned_pages���
+	/* zone 里实际管理的页面的数量。对一些体系结构来说，其值和spanned_pages相等 */
 	unsigned long		present_pages;
 
 	const char		*name;
@@ -453,14 +472,14 @@ struct zone {
 
 	/* Write-intensive fields used from the page allocator */
 	ZONE_PADDING(_pad1_)
-	//����������������飬�������������ȡ�
 	/* free areas of different sizes */
+	/* 管理空闲区域的数组，包含管理链表等 */
 	struct free_area	free_area[MAX_ORDER];
 
 	/* zone flags, see below */
 	unsigned long		flags;
-	//���з���ʱ���ڶ�zone������������
 	/* Primarily protects free_area */
+	/* 并行访问时用于对zone保护的自旋锁 */
 	spinlock_t		lock;
 
 	/* Write-intensive fields used by compaction and vmstats. */
@@ -499,8 +518,8 @@ struct zone {
 	bool			contiguous;
 
 	ZONE_PADDING(_pad3_)
-	//zone ����
 	/* Zone statistics */
+	/* zone 计数 */
 	atomic_long_t		vm_stat[NR_VM_ZONE_STAT_ITEMS];
 } ____cacheline_internodealigned_in_smp;
 
