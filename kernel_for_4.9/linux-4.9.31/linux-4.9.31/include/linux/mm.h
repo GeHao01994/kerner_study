@@ -1474,8 +1474,10 @@ static inline unsigned long get_mm_hiwater_vm(struct mm_struct *mm)
 
 static inline void update_hiwater_rss(struct mm_struct *mm)
 {
+	/* 可以看到上面，实际上就是MM_FILEPAGES + MM_ANONPAGES + MM_SHMEMPAGES */
+	/* 也就是整体的进程占用的物理地址 */
 	unsigned long _rss = get_mm_rss(mm);
-
+	/* 如果小于，那么就更新它 */
 	if ((mm)->hiwater_rss < _rss)
 		(mm)->hiwater_rss = _rss;
 }

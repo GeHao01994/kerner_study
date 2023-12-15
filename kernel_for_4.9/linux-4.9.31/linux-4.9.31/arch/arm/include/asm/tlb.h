@@ -191,9 +191,13 @@ tlb_remove_tlb_entry(struct mmu_gather *tlb, pte_t *ptep, unsigned long addr)
  * case where we're doing a full MM flush.  When we're doing a munmap,
  * the vmas are adjusted to only cover the region to be torn down.
  */
+/* 在tlb vma处理的情况下，我们可以在进行完整MM冲洗的情况下优化这些处理。
+ * 当我们进行munmap时，vma会被调整为只覆盖要拆除的区域
+ */
 static inline void
 tlb_start_vma(struct mmu_gather *tlb, struct vm_area_struct *vma)
 {
+	/* 如果不是刷新整个mm */
 	if (!tlb->fullmm) {
 		flush_cache_range(vma, vma->vm_start, vma->vm_end);
 		tlb->vma = vma;

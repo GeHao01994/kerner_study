@@ -47,6 +47,9 @@
  * Rearranging it a bit we get :
  *   (4 - n) * (PAGE_SHIFT - 3) + 3
  */
+/* 这个PAGE_SHITF根据你的页面大小来算的，假设你是4K的page，那么你的PAGE_SHITF就是12
+ * 所以这里ARM64_HW_PGTABLE_LEVEL_SHIFT =（4-n）* 9 + 4
+ */
 #define ARM64_HW_PGTABLE_LEVEL_SHIFT(n)	((PAGE_SHIFT - 3) * (4 - (n)) + 3)
 
 #define PTRS_PER_PTE		(1 << (PAGE_SHIFT - 3))
@@ -74,6 +77,36 @@
 /*
  * PGDIR_SHIFT determines the size a top-level page table entry can map
  * (depending on the configuration, this level can be 0, 1 or 2).
+ */
+/* PGDIR_SHIFT确定顶级页表项可以映射的大小(根据配置，此级别可以是0、1或2)
+ * 如果说我们定义的是4级页表，VA_BITS是48,
+ * 那么这里对应的是
+ * #define PGDIR_SHIFT		(4-0)*9+3=39
+ * #deifne PGDIR_SIZE		1 << 39
+ * #define PGD_MASK		~(1<<39 - 1)
+ * #define PTRS_PER_PGD		1<<(48-39)=1<<9
+ * 于是就得到了下面这张图
+ *  —— ————————————————————————  —————————— —————————— —————————— —————————— ——————————
+ * |  |				|          |          |          |          |	       |
+ * |  |				| L0 Index | L1 index | L2 index | L3 index | VA[11:0] |
+ * |  |				|          |          |          |          |          |
+ *  —— ————————————————————————  —————————— —————————— —————————— —————————— ——————————
+ *  ↓				     ↓	     	↓           ↓	       ↓	   ↓
+ * bit63		      bit47-bit39  bit38-bit30  bit29-bit21  bit20-bit12  bit11-bit0
+ *
+ * 如果输入的虚拟地址最高位bit[63]为1，那么这个地址是用于内核空间的，页表的
+ * 基地址寄存器用TTBR1_EL1(Translation Table Base Register 1).
+ * 如果bit[63]等于0，那么这个虚拟地址空间属于用户空间,
+ * 页表基地址寄存器用TTBR0.
+ * TTBRx寄存器保存了第0级页表的基地址(L0 Table base address,内核中称为PGD),
+ * L0页表中有512个表项(Table Descriptor),以虚拟地址的bit[47:39]作为索引值在
+ * L0页表中查找相应的表项.每个表项的内容含有下一个页表的基地址，即L1页表（linux内核中称为PUD)的基地址.
+ *
+ * PUD页表中有512个表项，以虚拟地址的bit[38:30]索引值在PUD表中查找相应的表项，
+ * 每个表项的内容含有下一级页表的基地址，即L2页表(Linux内核中成为PMD)的基地址.
+ *
+ * PMD表项中，以虚拟地址的bit[20:12]为索引值在PTE表中查找相应的表项,每个PTE表项中含有最终的物理地址的bit[47:12],
+ * 和虚拟地址的bit[11:0]合并成最终的物理地址，完成地址翻译过程
  */
 #define PGDIR_SHIFT		ARM64_HW_PGTABLE_LEVEL_SHIFT(4 - CONFIG_PGTABLE_LEVELS)
 #define PGDIR_SIZE		(_AC(1, UL) << PGDIR_SHIFT)

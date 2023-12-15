@@ -217,24 +217,52 @@ static bool tlb_next_batch(struct mmu_gather *tlb)
  *	tear-down from @mm. The @fullmm argument is used when @mm is without
  *	users and we're going to destroy the full address space (exit/execve).
  */
+/* 调用以初始化（在堆栈上）mmu_gather结构，以便从@mm中拆下页表.
+ * @fullmm参数在@mm没有使用者，我们将破坏整个地址空间(exit/execve)
+ */
 void tlb_gather_mmu(struct mmu_gather *tlb, struct mm_struct *mm, unsigned long start, unsigned long end)
 {
+	/* 赋值进程的内存描述符 */
 	tlb->mm = mm;
-
 	/* Is it from 0 to ~0? */
+	/* 如果是操作进程整个地址空间,则 start=0,end=-1，这个时候 fullmm会被赋值1 */
 	tlb->fullmm     = !(start | (end+1));
+	/* 把需要刷新全部的tlb设置为0 */
 	tlb->need_flush_all = 0;
+	/* 把本地批次的next指针设置为NULL */
 	tlb->local.next = NULL;
+	/* 把本地批次的积聚数组的页面个数设置为0 */
 	tlb->local.nr   = 0;
+	/* __pages表示“本地”批次积聚的物理页面.这里需要说明一点就是，mmu积聚操作会涉及到local批次和多批次操作，
+	 * local批次操作的物理页面相关的struct page数组内嵌到mmu_gather结构的__pages中.
+	 * 所以这里会把tlb->pages的数组大小给local.max
+	 */
 	tlb->local.max  = ARRAY_SIZE(tlb->__pages);
+	/* 把当前处理的的批次指向tlb->local */
 	tlb->active     = &tlb->local;
+	/* batch_count 表示积聚了多少个“批次” */
 	tlb->batch_count = 0;
 
 #ifdef CONFIG_HAVE_RCU_TABLE_FREE
 	tlb->batch = NULL;
 #endif
 	tlb->page_size = 0;
-
+	/* static inline void __tlb_reset_range(struct mmu_gather *tlb)
+	 * {
+	 *	 * 如果是fullmm,也就是说整个地址空间，那么就把
+	 *	 * tlb->start和tlb->end全都赋值给0xffffffff
+	 * 	 *
+	 *	if (tlb->fullmm) {
+	 *		tlb->start = tlb->end = ~0;
+	 *	} else {
+	 *		* 如果不是，那么就把start赋值给TASK_SIZE
+	 *		* end赋值给0
+	 *		*
+	 *		tlb->start = TASK_SIZE;
+	 *		tlb->end = 0;
+	 *	}
+	 * }
+	 */
 	__tlb_reset_range(tlb);
 }
 
@@ -1288,9 +1316,10 @@ void unmap_page_range(struct mmu_gather *tlb,
 {
 	pgd_t *pgd;
 	unsigned long next;
-
+	/* 如果地址大于结束地址，那肯定要报bug啦 */
 	BUG_ON(addr >= end);
 	tlb_start_vma(tlb, vma);
+	/* 拿到你这个address的pgd */
 	pgd = pgd_offset(vma->vm_mm, addr);
 	do {
 		next = pgd_addr_end(addr, end);
@@ -1307,18 +1336,23 @@ static void unmap_single_vma(struct mmu_gather *tlb,
 		unsigned long end_addr,
 		struct zap_details *details)
 {
+	/* 找到vma->vm_start和start_addr的最大值,避免误伤啊 */
 	unsigned long start = max(vma->vm_start, start_addr);
 	unsigned long end;
-
+	/* 如果start大于vma->vm_end,那也不用去干了 */
 	if (start >= vma->vm_end)
 		return;
+	/* 然后找到vma->vm_end和end_addr的最小值，也是防止误伤啊 */
 	end = min(vma->vm_end, end_addr);
+	/* 如果end比vm->start还小，那么也不用干了啊 */
 	if (end <= vma->vm_start)
 		return;
-
+	/* 处理uprobe ? */
 	if (vma->vm_file)
 		uprobe_munmap(vma, start, end);
-
+	/* VM_PFNMAP表示页帧号（Page Frame Number, PFN）映射，特殊映射不希望关联页描述符，直接使用页帧号，
+	 * 可能是因为页描述符不存在，也可能是因为不想使用页描述符
+	 */
 	if (unlikely(vma->vm_flags & VM_PFNMAP))
 		untrack_pfn(vma, 0, 0);
 
@@ -1341,6 +1375,7 @@ static void unmap_single_vma(struct mmu_gather *tlb,
 				i_mmap_unlock_write(vma->vm_file->f_mapping);
 			}
 		} else
+			/* 开始unmap了 */
 			unmap_page_range(tlb, vma, start, end, details);
 	}
 }
@@ -1390,10 +1425,19 @@ void zap_page_range(struct vm_area_struct *vma, unsigned long start,
 	struct mm_struct *mm = vma->vm_mm;
 	struct mmu_gather tlb;
 	unsigned long end = start + size;
-
+	/* 清掉你CPU里面的各种pagevec的页表,让他们指向该执行的操作*/
 	lru_add_drain();
+	/* 初始化一个mmu_gather结构体，用于拆解页表 */
 	tlb_gather_mmu(&tlb, mm, start, end);
+	/* 更新高水位线上的rss，也就是已经占用的物理页页数 */
 	update_hiwater_rss(mm);
+	/* mmu_notifier_invalidate_range_start/end只是調用MMU notifier鉤子;這些鉤子只存在於TLB失效時可以告訴其他內核代碼.
+	 * 設置MMU通知器的唯一地點是
+	 * KVM（硬件輔助虛擬化）使用它們處理換頁;它需要知道主機TLB失效以保持虛擬客機MMU與主機同步。
+	 * GRU（用於巨型SGI系統中專用硬件的驅動程序）使用MMU通知程序來保持GRU硬件中的映射表與CPU MMU同步。
+	 * 但是幾乎任何你稱之爲MMU notifier鉤子的地方，如果內核還沒有爲你做，你也應該調用TLB射擊函數
+	 */
+	/* 一个vma 一个vma的去拆解 */
 	mmu_notifier_invalidate_range_start(mm, start, end);
 	for ( ; vma && vma->vm_start < end; vma = vma->vm_next)
 		unmap_single_vma(&tlb, vma, start, end, details);

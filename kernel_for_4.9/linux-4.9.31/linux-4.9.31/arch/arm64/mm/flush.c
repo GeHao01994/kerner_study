@@ -28,6 +28,7 @@
 void flush_cache_range(struct vm_area_struct *vma, unsigned long start,
 		       unsigned long end)
 {
+	/* 如果vma是可执行的，那么刷新icache */
 	if (vma->vm_flags & VM_EXEC)
 		__flush_icache_all();
 }

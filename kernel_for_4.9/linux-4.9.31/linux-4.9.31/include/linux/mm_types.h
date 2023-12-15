@@ -459,15 +459,22 @@ struct mm_struct {
 						 * by mmlist_lock
 						 */
 
-
+	/* 进程拥有的最大页表数目 */
 	unsigned long hiwater_rss;	/* High-watermark of RSS usage */
+	/* 表示进程的线程区最大页数(虚拟地址的最大页数？) */
 	unsigned long hiwater_vm;	/* High-water virtual memory usage */
-
+	/* 表示进程的虚拟地址空间的总页数 */
 	unsigned long total_vm;		/* Total pages mapped */
+	/* 表示内存页被锁住的个数 , 这些内存页不能被换出 */
 	unsigned long locked_vm;	/* Pages that have PG_mlocked set */
+	/* pinned_vm  表示既不能换出，也不能移动的内存页总数 */
 	unsigned long pinned_vm;	/* Refcount permanently increased */
+	/* 这些变量均是表示进程虚拟内存空间中的虚拟内存使用情况 */
+	/* 表示数据段中映射的内存页数目 */
 	unsigned long data_vm;		/* VM_WRITE & ~VM_SHARED & ~VM_STACK */
+	/* exec_vm 是代码段中存放可执行文件的内存页数目 */
 	unsigned long exec_vm;		/* VM_EXEC & ~VM_WRITE & ~VM_STACK */
+	/* stack_vm 是栈中所映射的内存页数目 */
 	unsigned long stack_vm;		/* VM_STACK */
 	unsigned long def_flags;
 	unsigned long start_code, end_code, start_data, end_data;

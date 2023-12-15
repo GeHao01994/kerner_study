@@ -171,9 +171,15 @@ static inline void __tlb_adjust_range(struct mmu_gather *tlb,
 
 static inline void __tlb_reset_range(struct mmu_gather *tlb)
 {
+	/* 如果是fullmm,也就是说整个地址空间，那么就把
+	 * tlb->start和tlb->end全都赋值给0xffffffff
+	 */
 	if (tlb->fullmm) {
 		tlb->start = tlb->end = ~0;
 	} else {
+		/* 如果不是，那么就把start赋值给TASK_SIZE
+		 * end赋值给0
+		 */
 		tlb->start = TASK_SIZE;
 		tlb->end = 0;
 	}

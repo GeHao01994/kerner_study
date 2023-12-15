@@ -278,6 +278,10 @@ static inline void mmu_notifier_invalidate_page(struct mm_struct *mm,
 static inline void mmu_notifier_invalidate_range_start(struct mm_struct *mm,
 				  unsigned long start, unsigned long end)
 {
+	/* 如果mm的mmu_notifier_mm有东西
+	 * 那么就调用__mmu_notifier_invalidate_range_start
+	 * 这里面回去调用每个注册的invalidate_range_start
+	 */
 	if (mm_has_notifiers(mm))
 		__mmu_notifier_invalidate_range_start(mm, start, end);
 }
@@ -285,6 +289,10 @@ static inline void mmu_notifier_invalidate_range_start(struct mm_struct *mm,
 static inline void mmu_notifier_invalidate_range_end(struct mm_struct *mm,
 				  unsigned long start, unsigned long end)
 {
+	/* 如果mm的mmu_notifier_mm有东西
+	 * 那么就调用__mmu_notifier_invalidate_range_end
+	 * 这里面回去调用每个注册的invalidate_range_end
+	 */
 	if (mm_has_notifiers(mm))
 		__mmu_notifier_invalidate_range_end(mm, start, end);
 }
