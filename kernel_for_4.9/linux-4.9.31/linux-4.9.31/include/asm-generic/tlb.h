@@ -48,9 +48,13 @@
  * the implementation of tlb_remove_table_one().
  *
  */
+/* 用于积聚进程使用的各级页目录的物理页，在释放进程相关的页目录的物理页时使用（文章中称为页表批次的积聚结构) */
 struct mmu_table_batch {
+	/* rcu 用于rcu延迟释放页目录的物理页 */
 	struct rcu_head		rcu;
+	/* 表示页目录的物理页的积聚结构的page数组中页面个数 */
 	unsigned int		nr;
+	/* tables 表示页表积聚结构的page数组 */
 	void			*tables[0];
 };
 
@@ -69,9 +73,13 @@ extern void tlb_remove_table(struct mmu_gather *tlb, void *table);
 #define MMU_GATHER_BUNDLE	8
 
 struct mmu_gather_batch {
+	/* next 用于多批次积聚物理页时，连接下一个积聚批次结构 */
 	struct mmu_gather_batch	*next;
+	/* nr 表示本次批次的积聚数组的页面个数 */
 	unsigned int		nr;
+	/* max 表示本次批次的积聚数组最大的页面个数 */
 	unsigned int		max;
+	/* pages 表示本次批次积聚结构的page数组 */
 	struct page		*pages[0];
 };
 
@@ -89,23 +97,47 @@ struct mmu_gather_batch {
 /* struct mmu_gather is an opaque type used by the mm code for passing around
  * any data needed by arch specific code for tlb_remove_page.
  */
+/* 通常在进程退出或者执行munmap的时候，内核会解除相关虚拟内存区域的页表映射，刷/无效tlb,
+ * 并释放/回收相关的物理页面，这一过程的正确顺序如下
+ * 1、解除页表映射
+ * 2、刷相关tlb
+ * 3、释放物理页面
+ * 在刷相关虚拟内存区域tlb之前，绝对不能先释放物理页面，否则可能导致不正确的结构，
+ * 而mmu-gather(mmu积聚)的作用就是保证这种顺序，并将需要释放的相关的物理页面聚集起来统一释放
+ */
 struct mmu_gather {
+	/*  mm 表示操作哪个进程的虚拟内存 */
 	struct mm_struct	*mm;
 #ifdef CONFIG_HAVE_RCU_TABLE_FREE
+	/* batch 用于积聚进程各级页目录的物理页 */
 	struct mmu_table_batch	*batch;
 #endif
+	/* start和end 表示操作的起始和结束虚拟地址
+	 * 这两个地址在处理过程中会被相应的赋值
+	 */
 	unsigned long		start;
 	unsigned long		end;
 	/* we are in the middle of an operation to clear
 	 * a full mm and can make some optimizations */
+	/* 我们正在进行清除整个mm的操作，可以进行一些优化 */
+	/* fullmm 表示是否操作整个用户地址空间 */
 	unsigned int		fullmm : 1,
 	/* we have performed an operation which
 	 * requires a complete flush of the tlb */
+	/* 我们已经执行了一个操作，该操作需要完全刷新tlb */
 				need_flush_all : 1;
-
+	/* active、local和__pages 和多批次释放物理页面相关;
+	 * active表示当前处理的批次，local表示“本地”批次，
+	 * __pages表示“本地”批次积聚的物理页面.这里需要说明一点就是，mmu积聚操作会涉及到local批次和多批次操作，
+	 * local批次操作的物理页面相关的struct page数组内嵌到mmu_gather结构的__pages中，
+	 * 且我们发现这个数组大小为8，也就是local批次最大积聚8 * 4k = 32k的内存大小，
+	 * 这因为mmu_gather结构通常在内核栈中分配，不能占用太多的内核栈空间，
+	 * 而多批次由于动态分配批次积聚结构所以每个批次能积聚更多的页面
+	 */
 	struct mmu_gather_batch *active;
 	struct mmu_gather_batch	local;
 	struct page		*__pages[MMU_GATHER_BUNDLE];
+	/* batch_count 表示积聚了多少个“批次” */
 	unsigned int		batch_count;
 	/*
 	 * __tlb_adjust_range  will track the new addr here,
