@@ -149,6 +149,9 @@ pgtable_t pgtable_trans_huge_withdraw(struct mm_struct *mm, pmd_t *pmdp)
 	assert_spin_locked(pmd_lockptr(mm, pmdp));
 
 	/* FIFO */
+	/* 为什么有个链表，我的理解是可能一块mm里面不止有一个THP
+	 * 所以这里需要有个链表把他们存起来，如果用了就删除一个
+	 */
 	pgtable = pmd_huge_pte(mm, pmdp);
 	pmd_huge_pte(mm, pmdp) = list_first_entry_or_null(&pgtable->lru,
 							  struct page, lru);

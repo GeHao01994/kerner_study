@@ -1639,26 +1639,55 @@ static void __split_huge_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
 		return;
 		/* 如果是huge zero page */
 	} else if (is_huge_zero_pmd(*pmd)) {
+		/* 分割zero THP */
 		return __split_huge_zero_page_pmd(vma, haddr, pmd);
 	}
+	/* 跑到这来，说明都是匿名页面了啊 */
+	/* 拿到pmd的page */
 	page = pmd_page(*pmd);
+	/* 如果compound_head(page)->_refcount等于0了，也就是说没人引用它了
+	 * 那么就报个bug吧，人家分配的时候都是1呢
+	 */
 	VM_BUG_ON_PAGE(!page_count(page), page);
+	/* static inline void page_ref_add(struct page *page, int nr)
+	 * {
+	 *	atomic_add(nr, &page->_refcount);
+	 *	if (page_ref_tracepoint_active(__tracepoint_page_ref_mod))
+	 *		__page_ref_mod(page, nr);
+	 * }
+	 * 这里是把这个page->_refcount + HPAGE_PMD_NR - 1 ?
+	 */
 	page_ref_add(page, HPAGE_PMD_NR - 1);
+	/* #define pte_write(pte)		(!!(pte_val(pte) & PTE_WRITE))
+	 * #define pmd_write(pmd)		pte_write(pmd_pte(pmd))
+	 */
+	/* 判断这个pmd是不是可写的 */
 	write = pmd_write(*pmd);
+	/* 判断是不是PTE_YOUNG
+	 * PTE_YOUNG：CPU访问该页时会设置该标志位。在页面换出时，如果该标志位置位了，说明该页刚被访问过，页面是young的，不适合把该页换出，同时清除该标志位
+	 */
 	young = pmd_young(*pmd);
+	/* 判断是不是drity的
+	 * PTE_DIRTY：CPU在写操作时会设置该标志位，表示对应页面被写过，为脏页
+	 */
 	dirty = pmd_dirty(*pmd);
+	/* 似乎ARM64没这东西 ？ */
 	soft_dirty = pmd_soft_dirty(*pmd);
 
 	pmdp_huge_split_prepare(vma, haddr, pmd);
+	/* 把预留的pte页表项目拿出来，从三级页表变四级页表需要新增1个页表项 */
 	pgtable = pgtable_trans_huge_withdraw(mm, pmd);
+	/* 把pgtable映射到临时的pmd */
 	pmd_populate(mm, &_pmd, pgtable);
-
+	/* 开始拆解了 */
 	for (i = 0, addr = haddr; i < HPAGE_PMD_NR; i++, addr += PAGE_SIZE) {
 		pte_t entry, *pte;
 		/*
 		 * Note that NUMA hinting access restrictions are not
 		 * transferred to avoid any possibility of altering
 		 * permissions across VMAs.
+		 *
+		 * 注意，NUMA hinting 访问限制不会转换，为了避免任何可能性改变跨VMA的访问权限
 		 */
 		if (freeze) {
 			swp_entry_t swp_entry;
@@ -1667,20 +1696,44 @@ static void __split_huge_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
 			if (soft_dirty)
 				entry = pte_swp_mksoft_dirty(entry);
 		} else {
+			/* 对pte进行填充 */
 			entry = mk_pte(page + i, READ_ONCE(vma->vm_page_prot));
+			/* 如果VMA是可写的 vma->vm_flags & VM_WRITE
+			 * static inline pte_t maybe_mkwrite(pte_t pte, struct vm_area_struct *vma)
+			 * {
+			 * 	if (likely(vma->vm_flags & VM_WRITE))
+			 * 		pte = pte_mkwrite(pte);
+			 *	return pte;
+			 * }
+			 */
 			entry = maybe_mkwrite(entry, vma);
+			/* 如果pmd不是可写的，那么清除PTE_WRITE位 */
 			if (!write)
 				entry = pte_wrprotect(entry);
+			/* 如果PMD不是PTE_YOUNG的
+			 * 清掉PTE的PTE_AF
+			 * PMD_SECT_AF（PTE_AF）中的AF是access flag的缩写，这个bit用来表示该entry是否第一次使用（当程序访问对应的page或者section的时候，
+			 * 就会使用该entry，如果从来没有被访问过，那么其值等于0，否者等于1）。该bit主要被操作系统用来跟踪一个page是否被使用过(最近是否被访问),
+			 * 当该page首次被创建的时候，AF等于0，当代码第一次访问该page的时候，会产生MMU fault，这时候，异常处理函数应该设定AF等于1,
+			 * 从而阻止下一次访问该page的时候产生MMU Fault.
+			 * 在这里，kernel image对应的page，其描述符的AF bit都设定为1，表示该page当前状态是actived(最近被访问),
+			 * 因为只有用户空间进程的page才会根据AF bit来确定哪些page被swap out，而kernel image对应的page是always actived的
+			 */
 			if (!young)
 				entry = pte_mkold(entry);
 			if (soft_dirty)
 				entry = pte_mksoft_dirty(entry);
 		}
+		/* 如果是drity的，那么把它设置为Page设置为dirty */
 		if (dirty)
 			SetPageDirty(page + i);
+		/* 然后根据addr算出pte */
 		pte = pte_offset_map(&_pmd, addr);
+		/* 如果PTE里面有东西，那么就报个BUG吧 */
 		BUG_ON(!pte_none(*pte));
+		/* 把我的pte给设置下去 */
 		set_pte_at(mm, addr, pte, entry);
+		/* 将mapcount+1 吧 */
 		atomic_inc(&page[i]._mapcount);
 		pte_unmap(pte);
 	}
@@ -1689,16 +1742,26 @@ static void __split_huge_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
 	 * Set PG_double_map before dropping compound_mapcount to avoid
 	 * false-negative page_mapped().
 	 */
+	/* 如果说这个组合页的引用技术大于1，说明除了我们还有人用到它
+	 * 那么就设置把DoubleMap的flag设置上
+	 */
 	if (compound_mapcount(page) > 1 && !TestSetPageDoubleMap(page)) {
+		/* 如果设置成了PageDoubleMap，那么我每个页面都被THP用到了
+		 * 所以这里_mapcout会+1
+		 */
 		for (i = 0; i < HPAGE_PMD_NR; i++)
 			atomic_inc(&page[i]._mapcount);
 	}
-
+	/* 如果说我THP的mapcount -1等于负数，那么说明THP已经没有人用了 */
 	if (atomic_add_negative(-1, compound_mapcount_ptr(page))) {
 		/* Last compound_mapcount is gone. */
+		/* 最后一个compound_mapcount已消失 */
+		/* 那就把THP的匿名页面 -1 */
 		__dec_node_page_state(page, NR_ANON_THPS);
+		/* 清掉我们的DoubleMap,TestClear函数是说Clear a bit and return its old value */
 		if (TestClearPageDoubleMap(page)) {
 			/* No need in mapcount reference anymore */
+			/* 因为我们分离的时候加上了1，所以这里我们都要 -1 */
 			for (i = 0; i < HPAGE_PMD_NR; i++)
 				atomic_dec(&page[i]._mapcount);
 		}
@@ -1725,8 +1788,20 @@ static void __split_huge_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
 	 * until the split is complete for this pmd), then we flush the SMP TLB
 	 * and finally we write the non-huge version of the pmd entry with
 	 * pmd_populate.
+	 *
+	 * 到目前为止，pmd是存在的并且是huge,在分裂过程中,可以完全访问hugepage（这发生在合适的地方).
+	 * 如果我们用not-huge版本指向的pte覆盖这个pmd（当然，如果所有CPU都没有错误，我们也可以这样做）
+	 * 用户空间能触发一个小页面大小的TLB miss在这个小尺寸TLB当hugepage TLB entry任然在huge TLB中
+	 * 一些CPU不喜欢这样
+	 * 看http://support.amd.com/us/processor_techdocs/41322.pdf，勘误表383页.
+	 * Inter应该是安全的，但是但它也警告说，只有当加载在两个TLB中的两个entry的permission和cache属性相同时（这里应该是这种情况），它才是安全的
+	 * 但通常更安全的做法是，永远不允许同时加载同一虚拟地址的small和huge TLB entry.
+	 * 所以取代"pmd_populate(); flush_pmd_tlb_range();"，我们首先mark当前的pmd不存在(原子性地，因为这里的pmd_trans_huge和
+	 * pmd_trans_splitting必须始终保持在pmd上设置，直到此pmd的拆分完成为止).
+	 * 然后我们刷新SMP TLB，最后用pmd_populate写入pmd条目的非巨大版本。
 	 */
 	pmdp_invalidate(vma, haddr, pmd);
+	/* 把它设置到我们的pmd里面去 */
 	pmd_populate(mm, pmd, pgtable);
 
 	if (freeze) {
