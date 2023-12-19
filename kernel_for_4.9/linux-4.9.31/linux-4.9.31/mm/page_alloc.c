@@ -2427,18 +2427,25 @@ void mark_free_pages(struct zone *zone)
  */
 void free_hot_cold_page(struct page *page, bool cold)
 {
+	/* 获取page对应页所在zone */
 	struct zone *zone = page_zone(page);
 	struct per_cpu_pages *pcp;
 	unsigned long flags;
+	/* 求出该页对应的pfn物理页框号 */
 	unsigned long pfn = page_to_pfn(page);
 	int migratetype;
-
+	/* 释放前检查该页是否满足释放条件,并对页相关数据和成员释放前的准备操作 */
 	if (!free_pcp_prepare(page))
 		return;
-
+	/* 获取页块所在的pageblock的内存块的迁移类型 */
 	migratetype = get_pfnblock_migratetype(page, pfn);
+	/* 设置页框迁移类型为所在pageblock的迁移类型，因为在页框使用过程中，
+	 * 这段pageblock可能移动到了其他类型: * page->index = migratetype
+	 */
 	set_pcppage_migratetype(page, migratetype);
+	/* 禁止irq中断 */
 	local_irq_save(flags);
+	/* 统计cpu上页面释放的次数 */
 	__count_vm_event(PGFREE);
 
 	/*
@@ -2448,6 +2455,11 @@ void free_hot_cold_page(struct page *page, bool cold)
 	 * areas back if necessary. Otherwise, we may have to free
 	 * excessively into the page allocator
 	 */
+	/* 根据页所在页块(pageblock)的迁移类型来判断该页最终因该释放的位置:
+	 * (1)MIGRATE_UNMOVABLE, MIGRATE_RECLAIMABLE, MIGRATE_MOVABLE三个按原来的类型释放
+	 * (2)MIGRATE_CMA, MIGRATE_HIGHATOMIC类型释放到MIGRATE_MOVABLE类型中
+	 * (3)MIGRATE_ISOLATE类型释放到伙伴系统order=0的对应迁移类型的空闲链表中
+	 */
 	if (migratetype >= MIGRATE_PCPTYPES) {
 		if (unlikely(is_migrate_isolate(migratetype))) {
 			free_one_page(zone, page, pfn, 0, migratetype);
@@ -2455,15 +2467,23 @@ void free_hot_cold_page(struct page *page, bool cold)
 		}
 		migratetype = MIGRATE_MOVABLE;
 	}
-
+	/* 获取当前cpu的pcp页链表 */
 	pcp = &this_cpu_ptr(zone->pageset)->pcp;
+	/* hot页加入到pcp list头部，优先分配，冷页加入到pcp list尾部.
+	 * 热页冷页的意思就是当一个页被释放时，默认设置为热页，因为该页可能有些地址的数据还处于映射到CPU cache的情况，
+	 * 当该CPU上有进程申请单个页框时，优先把这些热页分配出去，这样能提高cache命中率，提高效率。而实现方法也 很简单，
+	 * 如果是热页，则把它加入到CPU页框高速缓存链表的链表头，如果是冷页，则加入到链表尾
+	 */
 	if (!cold)
 		list_add(&page->lru, &pcp->lists[migratetype]);
 	else
 		list_add_tail(&page->lru, &pcp->lists[migratetype]);
+	/* pcp list空闲页+1 */
 	pcp->count++;
+	/* 若当前pcp list中的页块数量大于设置的最高值，则将pcp->patch数量的页框放回伙伴系统中 */
 	if (pcp->count >= pcp->high) {
 		unsigned long batch = READ_ONCE(pcp->batch);
+		/* 批量将隔离的页释放到伙伴系统对应迁移类型的0阶链表中 */
 		free_pcppages_bulk(zone, batch, pcp);
 		pcp->count -= batch;
 	}

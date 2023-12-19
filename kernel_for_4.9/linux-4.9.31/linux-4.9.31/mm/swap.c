@@ -59,9 +59,14 @@ static DEFINE_PER_CPU(struct pagevec, activate_page_pvecs);
  * This path almost never happens for VM activity - pages are normally
  * freed via pagevecs.  But it gets used by networking.
  */
+/* 这个path几乎重来不会发生在VM的活动-pages通常通过pagevec释放
+ * 但是他被networking使用
+ */
 static void __page_cache_release(struct page *page)
 {
+	/* 如果Page在LRU里面 */
 	if (PageLRU(page)) {
+		/* 获得page所在的zone */
 		struct zone *zone = page_zone(page);
 		struct lruvec *lruvec;
 		unsigned long flags;
@@ -69,7 +74,9 @@ static void __page_cache_release(struct page *page)
 		spin_lock_irqsave(zone_lru_lock(zone), flags);
 		lruvec = mem_cgroup_page_lruvec(page, zone->zone_pgdat);
 		VM_BUG_ON_PAGE(!PageLRU(page), page);
+		/* 清掉Page的LRU flag */
 		__ClearPageLRU(page);
+		/* 从lru链表里面拔掉这个page */
 		del_page_from_lru_list(page, lruvec, page_off_lru(page));
 		spin_unlock_irqrestore(zone_lru_lock(zone), flags);
 	}

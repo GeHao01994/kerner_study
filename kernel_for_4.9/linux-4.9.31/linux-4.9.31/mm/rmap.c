@@ -1310,28 +1310,40 @@ out:
 static void page_remove_file_rmap(struct page *page, bool compound)
 {
 	int i, nr = 1;
-
+	/* 如果compound为true但是该page不是PageHead,报个BUG吧 */
 	VM_BUG_ON_PAGE(compound && !PageHead(page), page);
 	lock_page_memcg(page);
 
 	/* Hugepages are not counted in NR_FILE_MAPPED for now. */
+	/* 如果是标准大页 */
 	if (unlikely(PageHuge(page))) {
 		/* hugetlb pages are always mapped with pmds */
+		/* atomic(&page[1].compound_mapcount); */
 		atomic_dec(compound_mapcount_ptr(page));
 		goto out;
 	}
-
+	/* 如果是透明大页 */
 	/* page still mapped by someone else? */
 	if (compound && PageTransHuge(page)) {
+		/* 以页为步长来做循环，HPAGE_PMD_NR是看一个大页有多少个PAGE */
 		for (i = 0, nr = 0; i < HPAGE_PMD_NR; i++) {
+			/* _mapcount引用技术表示这个页面被进程映射的个数，即已经映射了多少个用户pte页表.
+			 * 在32位Linux内核中，每个用户进程都拥有3GB的虚拟空间和一份独立的页表，
+			 * 所以有可能出现多个进程地址空间同时映射到一个物理页面的情况
+			 */
+			/* 把原子变量v的值加上i,判断相加后的原子变量值是否为负数,如果为负数返回真 */
+			/* 把上面两个注释结合一下，也就是说这个page没其他人使用,nr++ */
 			if (atomic_add_negative(-1, &page[i]._mapcount))
 				nr++;
 		}
+		/* 如果atomic_add_negative(-1,&page[1].compound_mapcount) 为负数了，那么就go out */
 		if (!atomic_add_negative(-1, compound_mapcount_ptr(page)))
 			goto out;
 		VM_BUG_ON_PAGE(!PageSwapBacked(page), page);
+		/* 将共享内存的NR_SHMEM_PMDMAPPED -1 */
 		__dec_node_page_state(page, NR_SHMEM_PMDMAPPED);
 	} else {
+		/* 如果page 没人用了，那么也go out吧 */
 		if (!atomic_add_negative(-1, &page->_mapcount))
 			goto out;
 	}
@@ -1341,6 +1353,7 @@ static void page_remove_file_rmap(struct page *page, bool compound)
 	 * these counters are not modified in interrupt context, and
 	 * pte lock(a spinlock) is held, which implies preemption disabled.
 	 */
+	/* 将pgdat的NR_FILE_MAPPED减去nr */
 	__mod_node_page_state(page_pgdat(page), NR_FILE_MAPPED, -nr);
 	mem_cgroup_update_page_stat(page, MEM_CGROUP_STAT_FILE_MAPPED, -nr);
 
@@ -1353,29 +1366,39 @@ out:
 static void page_remove_anon_compound_rmap(struct page *page)
 {
 	int i, nr;
-
+	/* 如果atomic_add_negative(-1,&page[1].compound_mapcount) 为负数了，那么就返回了
+	 * 也就是说明没人在用这块了
+	 */
 	if (!atomic_add_negative(-1, compound_mapcount_ptr(page)))
 		return;
 
 	/* Hugepages are not counted in NR_ANON_PAGES for now. */
+	/* 如果是传统的hugepage，那么也return */
 	if (unlikely(PageHuge(page)))
 		return;
-
+	/* 如果没有开透明大页，也返回 */
 	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE))
 		return;
-
+	/* 将NR_ANON_THPS -1 */
 	__dec_node_page_state(page, NR_ANON_THPS);
-
+	/* 大页在进程的页面中间目录 (PMD) 级别具有单个条目。
+	 * 相反，各个页面在底部页表条目 (PTE) 级别具有条目，如图所示。但是并没有说必须在所有进程中以相同的方式映射相同的内存；
+	 * 一个进程将 2MB 范围视为单个大页面而另一个进程将其映射为 512 个单独的 PTE 是完全合法的。
+	 * 如果支持这种类型的不同映射，一个进程可以调用mprotect()来更改大页面一部分的保护（导致映射在该进程的地址空间中被拆分），
+	 * 同时不会干扰其他进程中的大页面映射，不受保护变化的影响
+	 */
 	if (TestClearPageDoubleMap(page)) {
 		/*
 		 * Subpages can be mapped with PTEs too. Check how many of
 		 * themi are still mapped.
 		 */
+		/* 如果有PageDoubleMap,那么说明子页还映射了PTE，那么看看有多少个子页已经没有映射了 */
 		for (i = 0, nr = 0; i < HPAGE_PMD_NR; i++) {
 			if (atomic_add_negative(-1, &page[i]._mapcount))
 				nr++;
 		}
 	} else {
+		/* 如果没有双重映射，那么nr就等于HPAGE包含的page数目 */
 		nr = HPAGE_PMD_NR;
 	}
 
@@ -1383,7 +1406,12 @@ static void page_remove_anon_compound_rmap(struct page *page)
 		clear_page_mlock(page);
 
 	if (nr) {
+		/* 修改统计计数 */
 		__mod_node_page_state(page_pgdat(page), NR_ANON_MAPPED, -nr);
+		/* 当进程munmap大页的一部分时，并不会马上发生同步的大页分裂，因为在进程munmap的上下文进行大页分裂开销很高，现在是在反向映射时进行感知，
+		 * 通过deferred_split机制进行。当page发生反向映射时page_remove_rmap发现page的mapcount等于-1即已经没有进程对这个page进行映射。
+		 * 就会将此page通过deferred_split_huge_page加入链表中，在下次内存压力紧张时进行shrink拆分回收
+		 */
 		deferred_split_huge_page(page);
 	}
 }
@@ -1397,13 +1425,15 @@ static void page_remove_anon_compound_rmap(struct page *page)
  */
 void page_remove_rmap(struct page *page, bool compound)
 {
+	//如果是文件页，通过文件页的方式反向映射。主要是mapcount的统计差异
 	if (!PageAnon(page))
 		return page_remove_file_rmap(page, compound);
-
+	//如果是整体反向映射，整体对大页的mapcount计数进行减1
 	if (compound)
 		return page_remove_anon_compound_rmap(page);
 
 	/* page still mapped by someone else? */
+	/* 对page的mapcount减1后如果不等于-1，即还有进程进行映射，退出 */
 	if (!atomic_add_negative(-1, &page->_mapcount))
 		return;
 
@@ -1412,11 +1442,12 @@ void page_remove_rmap(struct page *page, bool compound)
 	 * these counters are not modified in interrupt context, and
 	 * pte lock(a spinlock) is held, which implies preemption disabled.
 	 */
+	/* 走到这里， page已经被进程映射了，计数处理 */
 	__dec_node_page_state(page, NR_ANON_MAPPED);
-
+	/* 如果page带mlock标记，清除它 */
 	if (unlikely(PageMlocked(page)))
 		clear_page_mlock(page);
-
+	/* 如果是thp大页，把page加到deferred_split的链表， 在下次内存紧张shrink时进分裂回收 */
 	if (PageTransCompound(page))
 		deferred_split_huge_page(compound_head(page));
 

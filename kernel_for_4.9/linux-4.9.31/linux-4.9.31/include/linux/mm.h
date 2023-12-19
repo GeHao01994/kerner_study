@@ -498,7 +498,9 @@ static inline int is_vmalloc_or_module_addr(const void *x)
 #endif
 
 extern void kvfree(const void *addr);
-
+/* compound_mapcount调用compound_head获得复合页的head页，然后获取复合页存在page[1]的compound_mapcount。
+ * 这个页用于跟踪整个大页的映射状态，即被以整体大页方式映射的进程数.
+ */
 static inline atomic_t *compound_mapcount_ptr(struct page *page)
 {
 	return &page[1].compound_mapcount;
@@ -775,7 +777,15 @@ static inline void get_page(struct page *page)
 static inline void put_page(struct page *page)
 {
 	page = compound_head(page);
-
+	/* static inline int put_page_testzero(struct page *page)
+	 * {
+	 *	VM_BUG_ON_PAGE(page_ref_count(page) == 0, page);
+	 *	return page_ref_dec_and_test(page);
+	 * }
+	 */
+	/* 也就是说这里将page的_refcount -1 然后判断它登不等于0
+	 * 如果等于0就释放掉
+	 */
 	if (put_page_testzero(page))
 		__put_page(page);
 
@@ -1767,6 +1777,7 @@ static inline void pgtable_pmd_page_dtor(struct page *page) {}
 
 static inline spinlock_t *pmd_lock(struct mm_struct *mm, pmd_t *pmd)
 {
+	/* 拿到spinlock，然后锁住 */
 	spinlock_t *ptl = pmd_lockptr(mm, pmd);
 	spin_lock(ptl);
 	return ptl;

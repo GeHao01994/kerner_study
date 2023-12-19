@@ -1260,14 +1260,26 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 {
 	pmd_t *pmd;
 	unsigned long next;
-
+	/* 拿到PMD项页表项的基地址 */
 	pmd = pmd_offset(pud, addr);
 	do {
+		/* 拿到下一个PMD的地址 */
 		next = pmd_addr_end(addr, end);
+		/* #define pmd_trans_huge(pmd)	(pmd_val(pmd) && !(pmd_val(pmd) & PMD_TABLE_BIT))
+		 * 也就是说pmd这里是块类型的，而不是页表类型的
+		 * 块类型是说它描述的是一块非常大的内存，这个页表项里面包含的输出地址就是最终的非常大块连续的物理内存的最终的物理地址，
+		 * 比如说2MB，比如说1G大小的物理内存
+		 */
 		if (pmd_trans_huge(*pmd) || pmd_devmap(*pmd)) {
+			/* 这种情况为什么会发生呢，也就是说我addr很调皮，没有在PAGE对齐
+			 * 也就是在一个PAGE中间的地址，你只想切断一部分，那我也只好
+			 * 把我的大页切成小页吧
+			 */
 			if (next - addr != HPAGE_PMD_SIZE) {
+				/* 如果是匿名页且读写锁没有人占有,那么就报个BUG吧 */
 				VM_BUG_ON_VMA(vma_is_anonymous(vma) &&
 				    !rwsem_is_locked(&tlb->mm->mmap_sem), vma);
+				/* 那就把大页给切成小页吧 */
 				split_huge_pmd(vma, pmd, addr);
 			} else if (zap_huge_pmd(tlb, vma, pmd, addr))
 				goto next;
@@ -1297,10 +1309,16 @@ static inline unsigned long zap_pud_range(struct mmu_gather *tlb,
 {
 	pud_t *pud;
 	unsigned long next;
-
+	/* 拿到PUD页表项的基地址 */
 	pud = pud_offset(pgd, addr);
 	do {
+		/* #define pud_addr_end(addr, end)	\
+		 * ({	unsigned long __boundary = ((addr) + PUD_SIZE) & PUD_MASK;	\
+		 * (__boundary - 1 < (end) - 1)? __boundary: (end);	\
+		 * })
+		 */
 		next = pud_addr_end(addr, end);
+		/* 如果pgd没填充东西，或者说是bad，那么直接continue吧 */
 		if (pud_none_or_clear_bad(pud))
 			continue;
 		next = zap_pmd_range(tlb, vma, pud, addr, next, details);
@@ -1322,7 +1340,14 @@ void unmap_page_range(struct mmu_gather *tlb,
 	/* 拿到你这个address的pgd */
 	pgd = pgd_offset(vma->vm_mm, addr);
 	do {
+		/* #define pmd_addr_end(addr, end)	\
+		 * ({	unsigned long __boundary = ((addr) + PMD_SIZE) & PMD_MASK;	\
+		 * (__boundary - 1 < (end) - 1)? __boundary: (end);		\
+		 * })
+		 */
+		/* 算出下一个pgd的地址 */
 		next = pgd_addr_end(addr, end);
+		/*  如果pgd没填充东西，或者说是bad，那么直接continue吧 */
 		if (pgd_none_or_clear_bad(pgd))
 			continue;
 		next = zap_pud_range(tlb, vma, pgd, addr, next, details);

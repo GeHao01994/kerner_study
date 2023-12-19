@@ -590,6 +590,10 @@ static int __do_huge_pmd_anonymous_page(struct fault_env *fe, struct page *page,
 		page_add_new_anon_rmap(page, vma, haddr, true);
 		mem_cgroup_commit_charge(page, memcg, false, true);
 		lru_cache_add_active_or_unevictable(page, vma);
+		/* 我们知道对于大页，页表一共有三级。而正常的4k页的页表是四级。
+		 * 所以当我们要拆分大页页表时，就需要补上这么一级。为了保证拆分时，
+		 * 不会因为内存不够导致不能展开到四级页表，所以在分配时就多预留了一个页表
+		 */
 		pgtable_trans_huge_deposit(vma->vm_mm, fe->pmd, pgtable);
 		set_pmd_at(vma->vm_mm, haddr, fe->pmd, entry);
 		add_mm_counter(vma->vm_mm, MM_ANONPAGES, HPAGE_PMD_NR);
@@ -1568,20 +1572,33 @@ static void __split_huge_zero_page_pmd(struct vm_area_struct *vma,
 
 	/* leave pmd empty until pte is filled */
 	pmdp_huge_clear_flush_notify(vma, haddr, pmd);
-
+	/* 把预留的pte页表项目拿出来，从三级页表变四级页表需要新增1个页表项 */
 	pgtable = pgtable_trans_huge_withdraw(mm, pmd);
+	/* pmd目录指向pte */
 	pmd_populate(mm, &_pmd, pgtable);
 
 	for (i = 0; i < HPAGE_PMD_NR; i++, haddr += PAGE_SIZE) {
 		pte_t *pte, entry;
+		/* 将pfn化身为pte */
 		entry = pfn_pte(my_zero_pfn(haddr), vma->vm_page_prot);
+		/* set_pte_bit(pte, __pgprot(PTE_SPECIAL))
+		 * 正常的页面都没有PTE_SPECIAL
+		 * PTE_SPECIAL为特殊标志，因为都是零页、特殊物理页面(VM_PFNMAP/VM_MIXEDMAP不需要和struct page打交道
+		 */
 		entry = pte_mkspecial(entry);
+		/* #define pte_offset_map(dir,addr)	pte_offset_kernel((dir), (addr))
+		 * #define pte_offset_kernel(dir,addr)	((pte_t *)__va(pte_offset_phys((dir), (addr))))
+		 * #define pte_offset_phys(dir,addr)	(pmd_page_paddr(*(dir)) + pte_index(addr) * sizeof(pte_t))
+		 */
 		pte = pte_offset_map(&_pmd, haddr);
 		VM_BUG_ON(!pte_none(*pte));
+		/* 实际这里最后做的就是set_pte(ptep, pte) */
+		/* 也就是把entry 写入到pte里面 */
 		set_pte_at(mm, haddr, pte, entry);
 		pte_unmap(pte);
 	}
 	smp_wmb(); /* make pte visible before pmd */
+	/* 上面只是压入一个临时的，要注意看是_pmd哦，这里才是真正的pmd */
 	pmd_populate(mm, pmd, pgtable);
 }
 
@@ -1602,22 +1619,28 @@ static void __split_huge_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
 	VM_BUG_ON(!pmd_trans_huge(*pmd) && !pmd_devmap(*pmd));
 
 	count_vm_event(THP_SPLIT_PMD);
-
+	/* 如果vma不是匿名页面 */
 	if (!vma_is_anonymous(vma)) {
 		_pmd = pmdp_huge_clear_flush_notify(vma, haddr, pmd);
+		/* DAX -> Direct Access
+		 * 具体可以看一下内核文档filesystems/dax.rst
+		 * 那么直接返回了
+		 */
 		if (vma_is_dax(vma))
 			return;
+		/* 获得这块page */
 		page = pmd_page(_pmd);
 		if (!PageReferenced(page) && pmd_young(_pmd))
 			SetPageReferenced(page);
+		/* take down pte mapping from a page */
 		page_remove_rmap(page, true);
 		put_page(page);
 		add_mm_counter(mm, MM_FILEPAGES, -HPAGE_PMD_NR);
 		return;
+		/* 如果是huge zero page */
 	} else if (is_huge_zero_pmd(*pmd)) {
 		return __split_huge_zero_page_pmd(vma, haddr, pmd);
 	}
-
 	page = pmd_page(*pmd);
 	VM_BUG_ON_PAGE(!page_count(page), page);
 	page_ref_add(page, HPAGE_PMD_NR - 1);
@@ -1719,21 +1742,32 @@ void __split_huge_pmd(struct vm_area_struct *vma, pmd_t *pmd,
 {
 	spinlock_t *ptl;
 	struct mm_struct *mm = vma->vm_mm;
+	/* 把地址根据HPAGE_PMD_MASK对齐，因为你要拆分为整个THP，
+	 * 那么你这里需要找到你大页的起始地址啊
+	 */
 	unsigned long haddr = address & HPAGE_PMD_MASK;
 
 	mmu_notifier_invalidate_range_start(mm, haddr, haddr + HPAGE_PMD_SIZE);
+	/* 拿到锁，然后锁住 */
 	ptl = pmd_lock(mm, pmd);
 
 	/*
 	 * If caller asks to setup a migration entries, we need a page to check
 	 * pmd against. Otherwise we can end up replacing wrong page.
+	 * 如果调用者要求设置一个迁移的entries,我们需要一个页面再去检查pmd
+	 * 否则我们以替换错误的页面结束
 	 */
 	VM_BUG_ON(freeze && !page);
+	/* 检查一下传进来的参数page，如果非空，但是又不是thp对应的page,out掉 */
 	if (page && page != pmd_page(*pmd))
 	        goto out;
-
+	/* 如果是THP */
 	if (pmd_trans_huge(*pmd)) {
+		/* 拿到这个THP的page */
 		page = pmd_page(*pmd);
+		/* 如果这个page有mlocked标志
+		 * 清掉mlocked标志
+		 */
 		if (PageMlocked(page))
 			clear_page_mlock(page);
 	} else if (!pmd_devmap(*pmd))
@@ -2199,12 +2233,13 @@ void deferred_split_huge_page(struct page *page)
 {
 	struct pglist_data *pgdata = NODE_DATA(page_to_nid(page));
 	unsigned long flags;
-
+	/* 如果这个PAGE不是THP，那么报个BUG吧 */
 	VM_BUG_ON_PAGE(!PageTransHuge(page), page);
 
 	spin_lock_irqsave(&pgdata->split_queue_lock, flags);
 	if (list_empty(page_deferred_list(page))) {
 		count_vm_event(THP_DEFERRED_SPLIT_PAGE);
+		/* 将其添加到pgdata->split_queue的尾部 */
 		list_add_tail(page_deferred_list(page), &pgdata->split_queue);
 		pgdata->split_queue_len++;
 	}

@@ -364,9 +364,19 @@ void pmd_clear_bad(pmd_t *);
 
 static inline int pgd_none_or_clear_bad(pgd_t *pgd)
 {
+	/* 如果说pgd里面没有值 */
 	if (pgd_none(*pgd))
 		return 1;
+	/* 如果pgd是bad
+	 * #define pgd_bad(pgd)		(!(pgd_val(pgd) & 2))
+	 * pgd表项，可以查看arm手册，bit[1]=0表示是块映射
+	 * bit[1]=1 表示是页表映射
+	 * 所以说如果不是1的话，那么这里就没有下文了
+	 */
 	if (unlikely(pgd_bad(*pgd))) {
+		/* 报一行error之后
+		 * 把bad的pgd设置为0
+		 */
 		pgd_clear_bad(pgd);
 		return 1;
 	}
@@ -375,6 +385,7 @@ static inline int pgd_none_or_clear_bad(pgd_t *pgd)
 
 static inline int pud_none_or_clear_bad(pud_t *pud)
 {
+	/* 如果说pud里面没有值 */
 	if (pud_none(*pud))
 		return 1;
 	if (unlikely(pud_bad(*pud))) {

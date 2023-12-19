@@ -316,6 +316,13 @@ static inline int pmd_protnone(pmd_t pmd)
  */
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+/* 也就是说pmd这里是块类型的，而不是页表类型的
+ * 块类型是说它描述的是一块非常大的内存，这个页表项里面包含的输出地址就是最终的非常大块连续的物理内存的最终的物理地址，
+ * 比如说2MB，比如说1G大小的物理内存
+ * 如果是48位-4KB的页表，那么THP的PAGE SIZE是2的24次方也就是2的21次方，也就是2M的大小
+ * 如果是48位-64KB的页表，那么THP的PAGE SIZE就是2的29次方，也就是512*1024*1025=512MB
+ */
+
 #define pmd_trans_huge(pmd)	(pmd_val(pmd) && !(pmd_val(pmd) & PMD_TABLE_BIT))
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
 
@@ -428,8 +435,13 @@ static inline phys_addr_t pmd_page_paddr(pmd_t pmd)
 #if CONFIG_PGTABLE_LEVELS > 2
 
 #define pmd_ERROR(pmd)		__pmd_error(__FILE__, __LINE__, pmd_val(pmd))
-
+/* 如果pud里面没有东西 */
 #define pud_none(pud)		(!pud_val(pud))
+/* #define PUD_TABLE_BIT		(_AT(pgdval_t, 1) << 1)
+ * 同理，pud表项，可以查看arm手册，bit[1]=0表示是块映射
+ * bit[1]=1 表示是页表映射
+ * 所以说如果不是1的话，那么这里就没有下文了
+ */
 #define pud_bad(pud)		(!(pud_val(pud) & PUD_TABLE_BIT))
 #define pud_present(pud)	(pud_val(pud))
 
@@ -483,6 +495,10 @@ static inline phys_addr_t pud_page_paddr(pud_t pud)
 #define pud_ERROR(pud)		__pud_error(__FILE__, __LINE__, pud_val(pud))
 
 #define pgd_none(pgd)		(!pgd_val(pgd))
+/* 同理，pgd表项，可以查看arm手册，bit[1]=0表示是块映射
+ * bit[1]=1 表示是页表映射
+ * 所以说如果不是1的话，那么这里就没有下文了
+ */
 #define pgd_bad(pgd)		(!(pgd_val(pgd) & 2))
 #define pgd_present(pgd)	(pgd_val(pgd))
 
