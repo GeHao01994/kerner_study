@@ -1403,7 +1403,9 @@ int zap_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 {
 	pmd_t orig_pmd;
 	spinlock_t *ptl;
-
+	/* Returns page table lock pointer if a given pmd maps a thp, NULL otherwise.
+	 * 这里就是获得pmd的锁，并且锁住
+	 */
 	ptl = __pmd_trans_huge_lock(pmd, vma);
 	if (!ptl)
 		return 0;
@@ -1412,12 +1414,21 @@ int zap_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 	 * when calling pmdp_huge_get_and_clear. So do the
 	 * pgtable_trans_huge_withdraw after finishing pmdp related
 	 * operations.
+	 *
+	 * 对于像ppc64这样的体系结构，我们在调用pmdp_huge_get_and_clear时会查看沉积的pgtable。
+	 * 因此，在完成pmdp相关操作后，请执行pgtable_trans_huge_withdraw。
 	 */
+	/* 将页表项清空（即是解除了映射关系），并返回原来的页表项的内容 */
 	orig_pmd = pmdp_huge_get_and_clear_full(tlb->mm, addr, pmd,
 			tlb->fullmm);
 	tlb_remove_pmd_tlb_entry(tlb, pmd, addr);
+	/* DAX -> Direct Access
+	 * 具体可以看一下内核文档filesystems/dax.rst
+	 * 那么直接返回了
+	 */
 	if (vma_is_dax(vma)) {
 		spin_unlock(ptl);
+		/* 如果是zero page */
 		if (is_huge_zero_pmd(orig_pmd))
 			tlb_remove_page(tlb, pmd_page(orig_pmd));
 	} else if (is_huge_zero_pmd(orig_pmd)) {

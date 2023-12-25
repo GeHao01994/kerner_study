@@ -159,13 +159,19 @@ extern bool __tlb_remove_page_size(struct mmu_gather *tlb, struct page *page,
 static inline void __tlb_adjust_range(struct mmu_gather *tlb,
 				      unsigned long address)
 {
+	/* 计算start的地址，取start和address的最小值 */
 	tlb->start = min(tlb->start, address);
+	/* 计算end的地址，取tlb->end和address+PAGE_SIZE的最大值 */
 	tlb->end = max(tlb->end, address + PAGE_SIZE);
 	/*
 	 * Track the last address with which we adjusted the range. This
 	 * will be used later to adjust again after a mmu_flush due to
 	 * failed __tlb_remove_page
 	 */
+	/* Track 当我们调整range时最后的地址.
+	 * 它将在一个mmu_flush因为__tlb_remove_page失败后在此用于调整
+	 */
+	/* 把address给它 */
 	tlb->addr = address;
 }
 
@@ -189,6 +195,7 @@ static inline void tlb_remove_page_size(struct mmu_gather *tlb,
 					struct page *page, int page_size)
 {
 	if (__tlb_remove_page_size(tlb, page, page_size)) {
+		/* 刷tlb */
 		tlb_flush_mmu(tlb);
 		tlb->page_size = page_size;
 		__tlb_adjust_range(tlb, tlb->addr);
@@ -250,6 +257,11 @@ static inline bool __tlb_remove_pte_page(struct mmu_gather *tlb, struct page *pa
  * Record the fact that pte's were really unmapped by updating the range,
  * so we can later optimise away the tlb invalidate.   This helps when
  * userspace is unmapping already-unmapped pages, which happens quite a lot.
+ */
+/* 为之后的tlb 无效 记录 pte的unmappping
+ *
+ * 记录通过更新range确实未映射的pte，这样我们之后能优化消除tlb无效.
+ * 当用户空间取消映射已经映射的页面时，这会有所帮助，这种情况经常发生
  */
 #define tlb_remove_tlb_entry(tlb, ptep, address)		\
 	do {							\

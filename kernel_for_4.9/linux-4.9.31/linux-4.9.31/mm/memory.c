@@ -187,26 +187,35 @@ static void check_sync_rss_stat(struct task_struct *task)
 static bool tlb_next_batch(struct mmu_gather *tlb)
 {
 	struct mmu_gather_batch *batch;
-
+	/* 拿到active的tlb */
 	batch = tlb->active;
+	/* 如果有next就把active指向next之后返回true */
 	if (batch->next) {
 		tlb->active = batch->next;
 		return true;
 	}
-
+	/* 如果tlb的batch_out等于了最大的batch
+	 * 那么就返回false吧
+	 */
 	if (tlb->batch_count == MAX_GATHER_BATCH_COUNT)
 		return false;
-
+	/* 分配一个batch */
 	batch = (void *)__get_free_pages(GFP_NOWAIT | __GFP_NOWARN, 0);
 	if (!batch)
 		return false;
-
+	/* batch_count++ */
 	tlb->batch_count++;
+	/* batch->next 设置为NULL */
 	batch->next = NULL;
+	/* batch->nr 设置为0
+	 * 将本batch的页面个数设置为0
+	 */
 	batch->nr   = 0;
+	/* 设置本batch的最大页面个数为MAX_GATHER_BATCH */
 	batch->max  = MAX_GATHER_BATCH;
-
+	/* 设置active->next为此batch */
 	tlb->active->next = batch;
+	/* 设置此batch为active batch */
 	tlb->active = batch;
 
 	return true;
@@ -323,27 +332,38 @@ void tlb_finish_mmu(struct mmu_gather *tlb, unsigned long start, unsigned long e
  *	When out of page slots we must call tlb_flush_mmu().
  *returns true if the caller should flush.
  */
+/*
+ * __tlb_remove_page
+ * 必须执行等效于__free_pte（pte_get_and_clear（ptep））的操作，处理SMP中由其他CPU在其TLB中缓存有效映射引起的额外争用。
+ * 返回剩余的可用页面插槽数。当页面插槽不足时，我们必须调用tlb_flush_mmu（）。如果调用者应该刷新，则返回true
+ */
 bool __tlb_remove_page_size(struct mmu_gather *tlb, struct page *page, int page_size)
 {
 	struct mmu_gather_batch *batch;
 
 	VM_BUG_ON(!tlb->end);
-
+	/* 如果tlb->page_size为空
+	 * 那么填充这个page_size
+	 */
 	if (!tlb->page_size)
 		tlb->page_size = page_size;
 	else {
+		/* 如果page_size和tlb->page_size不相等
+		 * 那么也返回true
+		 */
 		if (page_size != tlb->page_size)
 			return true;
 	}
-
+	/* 拿到active的mmu_gather_batch */
 	batch = tlb->active;
+	/* 如果number已经等于max了，那么再申请一个？ */
 	if (batch->nr == batch->max) {
 		if (!tlb_next_batch(tlb))
 			return true;
 		batch = tlb->active;
 	}
 	VM_BUG_ON_PAGE(batch->nr > batch->max, page);
-
+	/* 然后把这个page添加到这个batch里面去 */
 	batch->pages[batch->nr++] = page;
 	return false;
 }
@@ -1280,7 +1300,11 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 				VM_BUG_ON_VMA(vma_is_anonymous(vma) &&
 				    !rwsem_is_locked(&tlb->mm->mmap_sem), vma);
 				/* 那就把大页给切成小页吧 */
+				/* 注意，切成小页之后并没有返回，而是接着往下走
+				 * 也就是说下面再解除映射
+				 */
 				split_huge_pmd(vma, pmd, addr);
+				/* 跑到下面的else if说明我是整个THP,那我就取消映射整个THP吧 */
 			} else if (zap_huge_pmd(tlb, vma, pmd, addr))
 				goto next;
 			/* fall through */

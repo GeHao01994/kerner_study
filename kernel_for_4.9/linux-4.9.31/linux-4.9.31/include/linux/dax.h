@@ -61,6 +61,10 @@ static inline int dax_pmd_fault(struct vm_area_struct *vma, unsigned long addr,
 int dax_pfn_mkwrite(struct vm_area_struct *, struct vm_fault *);
 #define dax_mkwrite(vma, vmf, gb)	dax_fault(vma, vmf, gb)
 
+/* DAX -> Direct Access
+ * 具体可以看一下内核文档filesystems/dax.rst
+ * 那么直接返回了
+ */
 static inline bool vma_is_dax(struct vm_area_struct *vma)
 {
 	return vma->vm_file && IS_DAX(vma->vm_file->f_mapping->host);

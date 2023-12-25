@@ -640,12 +640,27 @@ static inline pte_t ptep_get_and_clear(struct mm_struct *mm,
 	unsigned int tmp;
 
 	asm volatile("//	ptep_get_and_clear\n"
+	/* 处理器可能投机性地访问内存，即把程序没有请求过的内存位置的数据自动加载到缓存中。
+	 * 程序可以指示处理器哪个数据将来被使用，让处理器预先把数据读到缓存中。
+	 * ARM64处理器提供了预加载提示指令（PRFM，它是Prefetch from Memory的缩写）：
+	 * PRFM , | label
+	 * PLD表示加载预取（prefetch for load），PST表示存储预取（prefetch for store）。
+	 * L1表示1级缓存，L2表示2级缓存，L3表示3级缓存。
+	 * KEEP表示把预取的数据保存在缓存中（因为预取的数据会被使用多次），称为保存预取（retain prefetch）或暂存预取（temporal prefetch）；
+	 * STRM（stream）表示直接把预取的数据传给处理器的核（因为预取的数据只会使用一次，不需要保存在缓存中），称为流动预取（streaming prefetch）或非暂存预取（non-temporal prefetch)
+	 */
 	"	prfm	pstl1strm, %2\n"
+	/* 把ptep独占加载到 old_pteval 中 */
 	"1:	ldxr	%0, %2\n"
+	/* xzr是0 寄存器
+	 * 独占的方式把xzr 内容写入到pte中
+	 * w1 表示结果，wd为0表示成功，wd为1表示不成功
+	 * 如果不成功就接着跳到1知道返回成功为止
+	 */
 	"	stxr	%w1, xzr, %2\n"
 	"	cbnz	%w1, 1b\n"
 	: "=&r" (old_pteval), "=&r" (tmp), "+Q" (pte_val(*ptep)));
-
+	/* 返回旧的pte */
 	return __pte(old_pteval);
 }
 
