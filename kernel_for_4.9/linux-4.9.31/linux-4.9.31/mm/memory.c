@@ -301,7 +301,9 @@ static void tlb_flush_mmu_free(struct mmu_gather *tlb)
 
 void tlb_flush_mmu(struct mmu_gather *tlb)
 {
+	/* 刷TLB */
 	tlb_flush_mmu_tlbonly(tlb);
+	/* free相关的page */
 	tlb_flush_mmu_free(tlb);
 }
 
@@ -1169,19 +1171,22 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
 	struct page *pending_page = NULL;
 
 again:
+	/* 初始化rss数组 */
 	init_rss_vec(rss);
+	/* 拿到pte的指针 */
 	start_pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
 	pte = start_pte;
 	arch_enter_lazy_mmu_mode();
 	do {
 		pte_t ptent = *pte;
+		/* 如果pte是node，那就下一个吧 */
 		if (pte_none(ptent)) {
 			continue;
 		}
-
+		/* 虚拟页相关的物理页在内存中（如没有被换出到swap) */
 		if (pte_present(ptent)) {
 			struct page *page;
-
+			/* 获得虚拟页相关的物理页 */
 			page = vm_normal_page(vma, addr, ptent);
 			if (unlikely(details) && page) {
 				/*
@@ -1193,31 +1198,49 @@ again:
 				    details->check_mapping != page_rmapping(page))
 					continue;
 			}
+			/* 将页表项清空（即是解除了映射关系），并返回原来的页表项的内容 */
 			ptent = ptep_get_and_clear_full(mm, addr, pte,
 							tlb->fullmm);
+			/* 这就是把地址放到mmu_gather里面 */
 			tlb_remove_tlb_entry(tlb, pte, addr);
 			if (unlikely(!page))
 				continue;
-
+			/* 如果是文件页 */
 			if (!PageAnon(page)) {
+				/* 是脏页 */
 				if (pte_dirty(ptent)) {
 					/*
 					 * oom_reaper cannot tear down dirty
 					 * pages
+					 * oom_reaper无法撕下脏页
 					 */
 					if (unlikely(details && details->ignore_dirty))
 						continue;
 					force_flush = 1;
+					/* 脏标志传递到page结构 */
 					set_page_dirty(page);
 				}
+				/* 如果页表项访问标志置位
+				 * VM_SEQ_READ 的设置用来暗示内核，应用程序对这块虚拟内存区域的读取是会采用顺序读的方式进行，
+				 * 内核会根据实际情况决定预读后续的内存页数，以便加快下次顺序访问速度.
+				 * 则标记页面被访问
+				 */
 				if (pte_young(ptent) &&
 				    likely(!(vma->vm_flags & VM_SEQ_READ)))
 					mark_page_accessed(page);
 			}
 			rss[mm_counter(page)]--;
+			/* 移除page的映射 */
 			page_remove_rmap(page, false);
+			/* 如果mapcount小于0，那么直接输出bad pte */
 			if (unlikely(page_mapcount(page) < 0))
 				print_bad_pte(vma, addr, ptent, page);
+			/* 加入到tlb释放的page数组里面去
+			 * 只有tlb->batch_count == MAX_GATHER_BATCH_COUNT
+			 * 或者page_size变了，再要么就是没有内存了这里才会返回
+			 * true
+			 * 将物理页记录到积聚结构中， 如果达到最大值进行批量释放
+			 */
 			if (unlikely(__tlb_remove_page(tlb, page))) {
 				force_flush = 1;
 				pending_page = page;
@@ -1227,27 +1250,38 @@ again:
 			continue;
 		}
 		/* only check swap_entries if explicitly asked for in details */
+		/* 只有在details里要求才会检查swap_entries
+		 * 所以这里只有details->check_swap_entries为true是才往下走
+		 */
 		if (unlikely(details && !details->check_swap_entries))
 			continue;
-
+		/* 获取我们的swap entry */
 		entry = pte_to_swp_entry(ptent);
+		/* 如果是传统的swap entry,那么MM_SWAPENTS -- */
 		if (!non_swap_entry(entry))
 			rss[MM_SWAPENTS]--;
+		/* 如果是迁移标记进来的 */
 		else if (is_migration_entry(entry)) {
 			struct page *page;
-
+			/* 拿到这个迁移过来的page */
 			page = migration_entry_to_page(entry);
+			/* 将其对应的页面类型 - 1 */
 			rss[mm_counter(page)]--;
 		}
+		/* 删掉swap和对应的cache空间 */
 		if (unlikely(!free_swap_and_cache(entry)))
 			print_bad_pte(vma, addr, ptent, NULL);
+		/* 再清一次？*/
 		pte_clear_not_present_full(mm, addr, pte, tlb->fullmm);
 	} while (pte++, addr += PAGE_SIZE, addr != end);
-
+	/* 将结果同步到mm的rss里面去 */
 	add_mm_rss_vec(mm, rss);
 	arch_leave_lazy_mmu_mode();
 
 	/* Do the actual TLB flush before dropping ptl */
+	/* 如果说前面的__tlb_remove_page 返回啦false
+	 * 那么这里先刷掉TLB
+	 */
 	if (force_flush)
 		tlb_flush_mmu_tlbonly(tlb);
 	pte_unmap_unlock(start_pte, ptl);
@@ -1258,9 +1292,15 @@ again:
 	 * entries before releasing the ptl), free the batched
 	 * memory too. Restart if we didn't do everything.
 	 */
+	/* 如果我们强制执行TLB刷新（要么是因为批处理缓冲区用完，
+	 * 要么是因为我们需要在释放ptl之前刷新脏的TLB条目），
+	 * 也要释放批处理内存。如果我们没有做好所有事情，就重新开始
+	 */
 	if (force_flush) {
 		force_flush = 0;
+		/* 释放掉我们mmu_gather里面所有的页面 */
 		tlb_flush_mmu_free(tlb);
+		/* 如果还有pending_page,那么把它放进来 */
 		if (pending_page) {
 			/* remove the page with new size */
 			__tlb_remove_pte_page(tlb, pending_page);
@@ -1315,6 +1355,10 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 		 * none or trans huge it can change under us. This is
 		 * because MADV_DONTNEED holds the mmap_sem in read
 		 * mode.
+		 */
+		/* 这里可能有其他并发的MADV_DONTNEED或trans huge page faults 运行
+		 * 如果pmd为none或trans huge,它可能会在我们的控制下更改。
+		 * 这是因为MADV_DONTNED在读取模式下保持mmap_sem
 		 */
 		if (pmd_none_or_trans_huge_or_clear_bad(pmd))
 			goto next;

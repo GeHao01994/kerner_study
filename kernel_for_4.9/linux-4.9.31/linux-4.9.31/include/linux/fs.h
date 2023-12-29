@@ -963,6 +963,9 @@ struct file {
 		/* 链入到所属文件系统超级块的s_files链表的“连接件” */
 		struct llist_node	fu_llist;
 		/* 用于rcu机制的域 */
+		/* 实际上是用于文件释放的时候，详情可以看看fput函数
+		 * 就可以理解了
+		 */
 		struct rcu_head 	fu_rcuhead;
 	} f_u;
 	/* 文件路径，包含这个文件的vfsmount以及和文件关联的dentry */

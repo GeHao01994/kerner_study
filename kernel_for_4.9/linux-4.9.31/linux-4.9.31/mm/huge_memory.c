@@ -1428,26 +1428,38 @@ int zap_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 	 */
 	if (vma_is_dax(vma)) {
 		spin_unlock(ptl);
-		/* 如果是zero page */
+		/* 如果是zero page
+		 * 刷TLB和减去引用计数
+		 */
 		if (is_huge_zero_pmd(orig_pmd))
 			tlb_remove_page(tlb, pmd_page(orig_pmd));
 	} else if (is_huge_zero_pmd(orig_pmd)) {
+		/* 释放我们之前预留的为了分解pte预留的page */
 		pte_free(tlb->mm, pgtable_trans_huge_withdraw(tlb->mm, pmd));
+		/* 然后把mm的ptes减去1 */
 		atomic_long_dec(&tlb->mm->nr_ptes);
 		spin_unlock(ptl);
+		/* 刷TLB和减去引用计数 */
 		tlb_remove_page(tlb, pmd_page(orig_pmd));
 	} else {
+		/* 拿到这个page */
 		struct page *page = pmd_page(orig_pmd);
+		/* take down pte mapping from a page */
 		page_remove_rmap(page, true);
 		VM_BUG_ON_PAGE(page_mapcount(page) < 0, page);
 		VM_BUG_ON_PAGE(!PageHead(page), page);
+		/* 如果Page是匿名页面 */
 		if (PageAnon(page)) {
 			pgtable_t pgtable;
+			/* 删掉预留的page */
 			pgtable = pgtable_trans_huge_withdraw(tlb->mm, pmd);
 			pte_free(tlb->mm, pgtable);
+			/* 然后mm 的ptes -1 */
 			atomic_long_dec(&tlb->mm->nr_ptes);
+			/* 减去 MM_ANONPAGES的HPAGE_PMD_NR个数 */
 			add_mm_counter(tlb->mm, MM_ANONPAGES, -HPAGE_PMD_NR);
 		} else {
+			 /* 减去 MM_FILEPAGES的HPAGE_PMD_NR个数 */
 			add_mm_counter(tlb->mm, MM_FILEPAGES, -HPAGE_PMD_NR);
 		}
 		spin_unlock(ptl);

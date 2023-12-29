@@ -158,9 +158,18 @@ static inline void tracehook_signal_handler(int stepping)
  * it will enter the kernel and call tracehook_notify_resume() soon.
  * If it's blocked, it will not be woken.
  */
+/*
+ * set_notify_resume - 造成tracehook_notify_resume被调用
+ * @task:	调用tracehook_notify_resume的task
+ *
+ * @task在返回用户模式之前调用tracehook_notify_resume().
+ * 如果它已经在用户模式下运行，它将很快进入内核并调用tracehook_notify_resume().
+ * 如果它被阻塞，它将不会被唤醒.
+ */
 static inline void set_notify_resume(struct task_struct *task)
 {
 #ifdef TIF_NOTIFY_RESUME
+	/* 返回的是没有修改之前的值 */
 	if (!test_and_set_tsk_thread_flag(task, TIF_NOTIFY_RESUME))
 		kick_process(task);
 #endif

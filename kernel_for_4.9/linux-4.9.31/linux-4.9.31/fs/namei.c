@@ -3852,15 +3852,23 @@ opened:
 	/* 静态度量相关检查 */
 	if (!error)
 		error = ima_file_check(file, op->acc_mode, *opened);
+	/* 处理截断文件 */
 	if (!error && will_truncate)
 		error = handle_truncate(file);
 out:
+	/* 如果出错，就调用fput
+	 * 调用函数fput释放file实例:把引用计数减1,如果引用计数是0,那么把file实例添加到链表delayed_fput_list中,
+	 * 然后调用延迟工作项delayed_fput_work.
+	 * 延迟工作项delayed_fput_work的处理函数是flush_delayed_fput,遍历链表delayed_fput_list,
+	 * 针对每个file实例,调用函数__fput来加以释放.
+	 */
 	if (unlikely(error) && (*opened & FILE_OPENED))
 		fput(file);
 	if (unlikely(error > 0)) {
 		WARN_ON(1);
 		error = -EINVAL;
 	}
+	/* 通知文件系统，丢弃写操作? */
 	if (got_write)
 		mnt_drop_write(nd->path.mnt);
 	return error;

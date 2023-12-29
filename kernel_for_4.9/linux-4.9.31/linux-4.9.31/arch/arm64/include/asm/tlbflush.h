@@ -36,6 +36,18 @@
  * not. The macros handles invoking the asm with or without the
  * register argument as appropriate.
  */
+
+
+/* TLB entry的layout如下图，VA代表虚拟地址，PA代表物理地址
+ * ASID:address space ID
+ * Attributes: 属性
+ *  ———————— ———————— ———————— ——————————————————
+ * |        |        |        |        		 |
+ * | VA     | ASID   |  PA    |Attributes        |
+ *  ———————— ———————— ———————— ——————————————————
+ */
+
+
 #define __TLBI_0(op, arg)		asm ("tlbi " #op)
 #define __TLBI_1(op, arg)		asm ("tlbi " #op ", %0" : : "r" (arg))
 #define __TLBI_N(op, arg, n, ...)	__TLBI_##n(op, arg)
@@ -46,14 +58,32 @@
  * 包括VA(Virtual Address)，IPA(Intermediate Physical Address)，ASID（Adress Space Identifier），VMID（Virtual Mechine Identifier）等。
  * 在虚拟化模式下，IPA即EL1层的物理地址，它需要经过EL2层的转化才能成为最终的物理地址。
  * ASID是区别有相同虚拟地址的不同进程的，VMID是区别有相同虚拟地址的不同虚拟机的。
- * "Xt"是可选参数，表示通用寄存器X0到X30。例如 “TLBI VAE1, X0”，表示将flush虚拟地址（type为VA）等于X0寄存器值的这个TLB entry。
+ * "Xt"是可选参数,由虚拟地址和ASID组成的参数，
+ * Bit[63:48]:ASID
+ * Bit[47:44]:TTL，用于指明使哪一级的页表保存的地址无效。若为0，表示需要使所有级别的页表无效。在Linux内核实现中，该域设置为0
+ * Bit[43:0]:虚拟地址的Bit[55:12]位
+ *
  * 当然也可以使用“TLBI ALLELn”将TLB中的所有entries全部flush。
  * "IS"（Inner Shareable）也是可选参数。Inner和Outer是描述cache属性的，通常一个CPU独有的（比如L1 cache）和一个cluster下的CPU共享的（比如L2 cache）被定义为inner，
  * 不同cluster的CPU共享的（比如L3 cache）被定义为outer。
- * TLB也是一种cache，但不管是L1 data/instuction TLB，还是L2 LTB，都是每个CPU单独一份，所以都是inner的。
+ * TLB也是一种cache，但不管是L1 data/instuction TLB，还是L2 TLB，都是每个CPU单独一份，所以都是inner的。
  * Shareable是描述内存属性的，表示该内存区域是否可被多核共享。
  * 对于多核共享的内存，当其中的某个核，比如，对共享内存中的某个page做了访问限制，它需要通过发出IPI（Inter Processor Interrupt）的方式，
  * 来通知其他核flush各自的TLB，这种方式被称为TLB击落（shootdown），在ARM指令上的体现就是TLBI IS.
+ *
+ * 		TLBI指令的操作符
+ * 操作符				描述
+ * ALLEn			使Eln中所有的TLB无效
+ * ALLEnIS			使Eln中所有内部共享的TLB无效
+ * ASIDE1			使EL1中ASID包含的TLB无效，只对本核
+ * ASIDE1is			使EL1中ASID包含的所有核的TLB无效
+ * VAAE1			使EL1中虚拟地址指定的所有TLB(包含所有ASID)无效,只对本核
+ * VAAE1IS			使EL1中虚拟地址指定的所有TLB(包含所有ASID)无效，所有核
+ * VAEn				使ELn中所有由虚拟地址指定的TLB无效，只对本核
+ * VAEnIS			使ELn中所有由虚拟地址指定的TLB无效，所有核
+ * VALEn			使ELn中所有由虚拟地址指定的TLB无效，但只使最后一级TLB无效
+ * VMALLE1			在当前VMID中，使EL1中指定的TLB无效，这里仅仅包括虚拟化场景下阶段1的页表项
+ * VMALLS12E1			在当前VMID中，使EL1中指定的TLB无效，这里包括虚拟化场景下阶段1和阶段2的页表项
  */
 #define __tlbi(op, ...)		__TLBI_N(op, ##__VA_ARGS__, 1, 0)
 
@@ -96,15 +126,24 @@
  *		only require the D-TLB to be invalidated.
  *		- kaddr - Kernel virtual memory address
  */
+/*
+ * flush_tlb_all和local_flush_tlb_all的区别
+ * 1）指令dsb中的ish换成了nsh,nsh是非共享，表示数据同步屏障指令仅在当前核起作用
+ * 2）指令tlbi没有携带is，表示仅仅使当前核的TLB表项失效.
+ */
+/* 使本地CPU对应的整个TLB（包括内核空间和用户空间的TLB）无效 */
 static inline void local_flush_tlb_all(void)
 {
+	/* 确保之前更新页表的操作已经完成 */
 	dsb(nshst);
 	/* tlbi vmalle1 */
 	__tlbi(vmalle1);
+	/* 确保使TLB无效的操作已经完成 */
 	dsb(nsh);
+	/* 丢弃所有从旧页表映射中获取的指令 */
 	isb();
 }
-
+/* 使所有处理器上的整个TLB（包括内核空间和用户空间的TLB）无效 */
 static inline void flush_tlb_all(void)
 {
 	dsb(ishst);
@@ -113,6 +152,7 @@ static inline void flush_tlb_all(void)
 	isb();
 }
 
+/* 使一个进程的整个用户空间地址的TLB无效 */
 static inline void flush_tlb_mm(struct mm_struct *mm)
 {
 	unsigned long asid = ASID(mm) << 48;
@@ -122,6 +162,7 @@ static inline void flush_tlb_mm(struct mm_struct *mm)
 	dsb(ish);
 }
 
+/* 使虚拟地址addr所映射页面的TLB页表项无效 */
 static inline void flush_tlb_page(struct vm_area_struct *vma,
 				  unsigned long uaddr)
 {
@@ -150,12 +191,16 @@ static inline void __flush_tlb_range(struct vm_area_struct *vma,
 		flush_tlb_mm(vma->vm_mm);
 		return;
 	}
-
+	/* 将地址和asid并起来 */
 	start = asid | (start >> 12);
 	end = asid | (end >> 12);
 
 	dsb(ishst);
 	for (addr = start; addr < end; addr += 1 << (PAGE_SHIFT - 12)) {
+		/* 这里的区别就是val和va的区别
+		 * val表示eln中所有由虚拟地址指定的TLB无效，但只使最后一级的TLB无效
+		 * va 表示eln中所有由虚拟地址指定的TLB无效
+		 */
 		if (last_level)
 			__tlbi(vale1is, addr);
 		else

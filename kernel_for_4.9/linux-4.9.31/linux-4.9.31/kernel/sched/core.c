@@ -1486,6 +1486,20 @@ unsigned long wait_task_inactive(struct task_struct *p, long match_state)
  * the kernel. If the IPI races and the task has been migrated
  * to another CPU then no harm is done and the purpose has been
  * achieved as well.
+ *
+ * kick_process- 启动正在运行的线程以进入/退出内核
+ * @p： 要kick的线程
+ * 使在另一个CPU上运行的进程进入内核模式，没有任何延迟。（以处理信号.)
+ *
+ * 注意：此函数不必获取运行队列锁，因为它只想确保远程任务进入内核.
+ * 如果IPI竞赛并且任务已迁移到另一个CPU，则不会造成任何伤害，并且目的也已实现.
+ *
+ *
+ * 函数的注释已经写得很清楚了，kick_process的目的就是让进程陷入内核然后在下次返回用户态之前有机会处理信号。
+ * smp_send_reschedule本质就是给进程所在的核发个IPI中断，从而导致正在运行的进程被打断陷入内核态。
+ * 但是发IPI中断也要满足两个前提条件：
+ * 目标进程所在的cpu不是当前cpu，也就是说信号的发送者和接收者不在一个核上。如果在一个核上，目标进程肯定已经在内核态了。
+ * 目标进程正在核上运行，注意这里是正在运行，而不是在runqueue上
  */
 void kick_process(struct task_struct *p)
 {
@@ -3487,7 +3501,7 @@ asmlinkage __visible void __sched schedule_user(void)
 void __sched schedule_preempt_disabled(void)
 {
 	sched_preempt_enable_no_resched();
-	//����������������ں˵ĵ���ϵͳ�����������ǵ�Linuxϵͳ��ʼת������
+	/* 调用这个函数开启内核的调度系统，到这里我们的Linux系统开始转起来了 */
 	schedule();
 	preempt_disable();
 }

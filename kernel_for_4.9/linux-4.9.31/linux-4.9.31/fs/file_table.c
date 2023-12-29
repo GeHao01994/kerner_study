@@ -274,14 +274,28 @@ void flush_delayed_fput(void)
 }
 
 static DECLARE_DELAYED_WORK(delayed_fput_work, delayed_fput);
-
+/*
+ * 调用函数fput释放file实例:把引用计数减1,如果引用计数是0,那么把file实例添加到链表delayed_fput_list中,
+ * 然后调用延迟工作项delayed_fput_work.
+ * 延迟工作项delayed_fput_work的处理函数是flush_delayed_fput,遍历链表delayed_fput_list,针对每个file实例,
+ * 调用函数__fput来加以释放.
+ */
 void fput(struct file *file)
 {
+	/* 将file->f_count减一，然后判断它是不是等于0，如果等于0的话说明没有人用它了 */
 	if (atomic_long_dec_and_test(&file->f_count)) {
 		struct task_struct *task = current;
-
+		/* 如果不在中断上下文中，并且不是内核线程 */
 		if (likely(!in_interrupt() && !(task->flags & PF_KTHREAD))) {
+			/*
+			 * 把____fput 赋值给file->f_u.fu_rcuhead的func成员
+			 * static inline void init_task_work(struct callback_head *twork, task_work_func_t func)
+			 * {
+			 *	twork->func = func;
+			 * }
+			 */
 			init_task_work(&file->f_u.fu_rcuhead, ____fput);
+			/* */
 			if (!task_work_add(task, &file->f_u.fu_rcuhead, true))
 				return;
 			/*

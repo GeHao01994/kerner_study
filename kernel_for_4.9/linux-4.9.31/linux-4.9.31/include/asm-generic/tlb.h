@@ -92,6 +92,9 @@ struct mmu_gather_batch {
  * is zapped during unmapping.
  * 10K pages freed at once should be safe even without a preemption point.
  */
+/* 限制mmu_gather批次的最大数量以降低在大型机器上安装不可抢占的内核当大量内存在取消映射过程中被占用时soft lockups的影响
+ * 即使没有抢占点，一次释放的10K页也应该是安全的
+ */
 #define MAX_GATHER_BATCH_COUNT	(10000UL/MAX_GATHER_BATCH)
 
 /* struct mmu_gather is an opaque type used by the mm code for passing around
@@ -194,10 +197,15 @@ static inline void __tlb_reset_range(struct mmu_gather *tlb)
 static inline void tlb_remove_page_size(struct mmu_gather *tlb,
 					struct page *page, int page_size)
 {
+	/* 这里的话，是为了聚集而做的，只有在batch->nr == batch->max
+	 * 或者tlb->batch_count == MAX_GATHER_BATCH_COUNT
+	 */
 	if (__tlb_remove_page_size(tlb, page, page_size)) {
 		/* 刷tlb */
 		tlb_flush_mmu(tlb);
+		/* 设置page_size */
 		tlb->page_size = page_size;
+		/*  计算range,然后在做一次 */
 		__tlb_adjust_range(tlb, tlb->addr);
 		__tlb_remove_page_size(tlb, page, page_size);
 	}

@@ -23,6 +23,14 @@ static struct callback_head work_exited; /* all we need is ->next == NULL */
  * RETURNS:
  * 0 if succeeds or -ESRCH.
  */
+/* task_work_add-要求@task执行@work->func()
+ * task: 应该运行callback的task
+ * work: 要运行的callback
+ * 如果为true,发送notification
+ * 在下面为task_work_run（）排队@work，如果@notify，则通知@task。
+ * 如果@task正在退出/已经退出，则失败，因此无法处理此@work。
+ * 否则@task从内核返回或者退出时将调用@work->func()
+ */
 int
 task_work_add(struct task_struct *task, struct callback_head *work, bool notify)
 {
@@ -33,6 +41,10 @@ task_work_add(struct task_struct *task, struct callback_head *work, bool notify)
 		if (unlikely(head == &work_exited))
 			return -ESRCH;
 		work->next = head;
+		/* cmpxchg是说task->task_works和head相比较
+		 * 如果相等，那么就把work给task->task_works
+		 * 返回task->task_works的原始内容
+		 */
 	} while (cmpxchg(&task->task_works, head, work) != head);
 
 	if (notify)

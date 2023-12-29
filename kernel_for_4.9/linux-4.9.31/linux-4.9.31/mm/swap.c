@@ -800,6 +800,7 @@ void lru_add_drain_all(void)
  * Decrement the reference count on all the pages in @pages.  If it
  * fell to zero, remove the page from the LRU and free it.
  */
+/* 递减@pages中所有页面的引用计数。如果它降到零，从LRU中删除页面并释放它. */
 void release_pages(struct page **pages, int nr, bool cold)
 {
 	int i;
@@ -817,11 +818,13 @@ void release_pages(struct page **pages, int nr, bool cold)
 		 * excessive with a continuous string of pages from the
 		 * same pgdat. The lock is held only if pgdat != NULL.
 		 */
+		/* 确保来自同一pgdat连续字符的页面不会使IRQ安全锁保持时间过长。只有当pgdat！=NULL才拿到锁 */
+		/* 这里就是减少锁占用的时间，如果是同一个内存节点，就不要一直去切换解锁和上锁了 */
 		if (locked_pgdat && ++lock_batch == SWAP_CLUSTER_MAX) {
 			spin_unlock_irqrestore(&locked_pgdat->lru_lock, flags);
 			locked_pgdat = NULL;
 		}
-
+		/* 如果page是huge zero page，那么就continue吧 */
 		if (is_huge_zero_page(page))
 			continue;
 		/* 实际上就是这里去把它的引用计数-1了，如果-1之后不为0
@@ -830,7 +833,7 @@ void release_pages(struct page **pages, int nr, bool cold)
 		page = compound_head(page);
 		if (!put_page_testzero(page))
 			continue;
-
+		/* 如果该页是个组合页,在这里进行处理 */
 		if (PageCompound(page)) {
 			if (locked_pgdat) {
 				spin_unlock_irqrestore(&locked_pgdat->lru_lock, flags);
@@ -839,11 +842,13 @@ void release_pages(struct page **pages, int nr, bool cold)
 			__put_compound_page(page);
 			continue;
 		}
-
+		/* 如果Page在LRU里面 */
 		if (PageLRU(page)) {
+			/* 得到我们page所在的内存节点 */
 			struct pglist_data *pgdat = page_pgdat(page);
-
+			/* 如果locked_pgdat不等于现在的pgdat */
 			if (pgdat != locked_pgdat) {
+				/* 那就解锁，然后把自己锁上 */
 				if (locked_pgdat)
 					spin_unlock_irqrestore(&locked_pgdat->lru_lock,
 									flags);
@@ -854,18 +859,22 @@ void release_pages(struct page **pages, int nr, bool cold)
 
 			lruvec = mem_cgroup_page_lruvec(page, locked_pgdat);
 			VM_BUG_ON_PAGE(!PageLRU(page), page);
+			/* 清除page的LRU flag */
 			__ClearPageLRU(page);
+			/* 从lru链表里面删除该page */
 			del_page_from_lru_list(page, lruvec, page_off_lru(page));
 		}
 
 		/* Clear Active bit in case of parallel mark_page_accessed */
+		/* 万一并行发生了mark_page_accessed，清除Active bit */
 		__ClearPageActive(page);
-
+		/* 把要free的page放到pages_to_free链表里面 */
 		list_add(&page->lru, &pages_to_free);
 	}
+	/* 解锁 */
 	if (locked_pgdat)
 		spin_unlock_irqrestore(&locked_pgdat->lru_lock, flags);
-
+	/* 把page给释放掉 */
 	mem_cgroup_uncharge_list(&pages_to_free);
 	free_hot_cold_page_list(&pages_to_free, cold);
 }

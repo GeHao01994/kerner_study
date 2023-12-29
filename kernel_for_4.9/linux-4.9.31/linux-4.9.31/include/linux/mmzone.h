@@ -302,7 +302,7 @@ struct per_cpu_nodestat {
 
 /* 通常情况下，内核中的ZONE分为ZONE_DMA,ZONE_DMA32,
  * ZONE_NORMAL,ZONE_HIGHMEM
- * 但是有些也没有ZONE_DAM 和ZONE_DMA32
+ * 但是有些也没有ZONE_DMA 和ZONE_DMA32
  */
 enum zone_type {
 #ifdef CONFIG_ZONE_DMA
