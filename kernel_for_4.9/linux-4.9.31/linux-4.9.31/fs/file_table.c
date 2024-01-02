@@ -196,39 +196,58 @@ struct file *alloc_file(struct path *path, fmode_t mode,
 EXPORT_SYMBOL(alloc_file);
 
 /* the real guts of fput() - releasing the last reference to file
+ *
+ * 释放对文件的最后一个引用
  */
 static void __fput(struct file *file)
 {
+	/* 获得文件的dentry */
 	struct dentry *dentry = file->f_path.dentry;
+	/* 获得vfsmout */
 	struct vfsmount *mnt = file->f_path.mnt;
+	/* 获取inode */
 	struct inode *inode = file->f_inode;
 
 	might_sleep();
-
+	/* 通知文件已经关闭 */
 	fsnotify_close(file);
 	/*
 	 * The function eventpoll_release() should be the first called
 	 * in the file cleanup chain.
 	 */
 	eventpoll_release(file);
-	locks_remove_file(file);
 
+	/* 释放文件锁相关 */
+	locks_remove_file(file);
+	/* 如果文件需要同步，则调用具体文件系统的接口来同步到磁盘 */
 	if (unlikely(file->f_flags & FASYNC)) {
 		if (file->f_op->fasync)
 			file->f_op->fasync(-1, file, 0);
 	}
+	/* 释放静态度量 */
 	ima_file_free(file);
+	/* 调用具体文件系统的release接口 */
 	if (file->f_op->release)
 		file->f_op->release(inode, file);
 	security_file_free(file);
+
+	/* 如果是字符设备，则调用字符设备的释放接口 */
 	if (unlikely(S_ISCHR(inode->i_mode) && inode->i_cdev != NULL &&
 		     !(file->f_mode & FMODE_PATH))) {
 		cdev_put(inode->i_cdev);
 	}
+
+	/* 递减f_op的引用计数 */
 	fops_put(file->f_op);
+
+	/* 递减pid的引用计数 */
 	put_pid(file->f_owner.pid);
+
+	/* 如果是只读，递减inode引用计数 */
 	if ((file->f_mode & (FMODE_READ | FMODE_WRITE)) == FMODE_READ)
 		i_readcount_dec(inode);
+
+	/* 这个应该是如果有创建文件之类的操作，则释放相关资源 */
 	if (file->f_mode & FMODE_WRITER) {
 		put_write_access(inode);
 		__mnt_drop_write(mnt);
@@ -236,8 +255,11 @@ static void __fput(struct file *file)
 	file->f_path.dentry = NULL;
 	file->f_path.mnt = NULL;
 	file->f_inode = NULL;
+	/* 调用kmem_cache_free释放file结构，把内存退还给file缓存 */
 	file_free(file);
+	/* 减少dentry引用计数，有可能释放或者缓存dentry */
 	dput(dentry);
+	/* 释放文件系统的引用计数 */
 	mntput(mnt);
 }
 
@@ -302,6 +324,9 @@ void fput(struct file *file)
 			 * After this task has run exit_task_work(),
 			 * task_work_add() will fail.  Fall through to delayed
 			 * fput to avoid leaking *file.
+			 */
+			/* 此任务运行exit_task_work（）后，task_work_add（）将失败。
+			 * 通过延迟fput来避免*文件泄漏。
 			 */
 		}
 

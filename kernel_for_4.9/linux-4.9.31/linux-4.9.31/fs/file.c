@@ -648,8 +648,20 @@ EXPORT_SYMBOL(put_unused_fd);
  * by get_files_struct(current) done by whoever had given it to you,
  * or really bad things will happen.  Normally you want to use
  * fd_install() instead.
+ *
+ * 在fd数组中安装一个文件指针
+ * VFS是一个我们解除了文件锁在设置open_fds文件位图和在file 数组中安装file的地方
+ * 在任何这样的情况下，我们都容易受到dup2的竞争，在我们之前安装file在数组里.
+ * 我们需要检测到这一点，并且fput() struct file 在这种我们即将覆盖的情况下.
+ *
+ * 这不应该发生—— 如果我们允许dup2（）这样做，那么糟糕的事情就会随之而来.
+ * 
+ * 注意：__fd_install（）变体非常非常低级；
+ * 不要使用它，除非你被真正糟糕的API逼到喉咙里.
+ * 'files' 必须是current->files 或者通过无论谁给你的get_files_st（current）获得的，
+ * 否则会发生非常糟糕的事情.
+ * 通常您需要使用fd_install（）.
  */
-
 void __fd_install(struct files_struct *files, unsigned int fd,
 		struct file *file)
 {
@@ -657,17 +669,24 @@ void __fd_install(struct files_struct *files, unsigned int fd,
 
 	might_sleep();
 	rcu_read_lock_sched();
-
+	/* 这里是你改变文件的大小，譬如你append的形势打开文件
+	 * 那么就等他处理完
+	 */
 	while (unlikely(files->resize_in_progress)) {
 		rcu_read_unlock_sched();
 		wait_event(files->resize_wait, !files->resize_in_progress);
 		rcu_read_lock_sched();
 	}
 	/* coupled with smp_wmb() in expand_fdtable() */
+	/*  内存屏障，确保在此之前的读操作完成后再进行后续的读操作 */
 	smp_rmb();
+	/* 通过RCU机制获取文件描述符表结构体指针 */
 	fdt = rcu_dereference_sched(files->fdt);
+	/* 检查是否存在文件描述符已被占用的BUG */
 	BUG_ON(fdt->fd[fd] != NULL);
+	/* 针对给定的文件描述符设置对应的文件指针 */
 	rcu_assign_pointer(fdt->fd[fd], file);
+	/* 释放RCU读取锁 */
 	rcu_read_unlock_sched();
 }
 

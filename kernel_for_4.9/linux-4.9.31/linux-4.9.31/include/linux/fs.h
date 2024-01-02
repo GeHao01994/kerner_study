@@ -961,6 +961,7 @@ static inline int ra_has_index(struct file_ra_state *ra, pgoff_t index)
 struct file {
 	union {
 		/* 链入到所属文件系统超级块的s_files链表的“连接件” */
+		/* 这个也用于delayed_fput的场景，详见fput_many */
 		struct llist_node	fu_llist;
 		/* 用于rcu机制的域 */
 		/* 实际上是用于文件释放的时候，详情可以看看fput函数

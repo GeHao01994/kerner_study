@@ -4015,6 +4015,7 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
 		filp = path_openat(&nd, op, flags);
 	if (unlikely(filp == ERR_PTR(-ESTALE)))
 		filp = path_openat(&nd, op, flags | LOOKUP_REVAL);
+	/* 重新导入nameidata */
 	restore_nameidata();
 	return filp;
 }
