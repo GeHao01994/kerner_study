@@ -820,6 +820,25 @@ cleanup_file:
  * an error occurs in ->atomic_open(), it needs to clean up with fput().
  *
  * Returns zero on success or -errno if the open failed.
+ *
+ * finish_open-完成打开文件
+ * @file：文件指针
+ * @dentry：指向dentry的指针
+ * @open:打开回调
+ * @opened：打开状态
+ *
+ * 这可用于finish opening a file 传递给i_op->atomic_open()。
+ * 如果open回调设置为NULL，那么标准的f_op->open（）文件系统回调将被替换.
+ *
+ * 注意：dentry引用是_not_ consumed(消耗).
+ * 例如，如果dentry是d_splice_alias（）的返回值，
+ * 那么调用者需要在finish_open（）之后对其执行dput().
+ *
+ * 成功返回时，@file是一个完全实例化的打开文件.
+ * 之后，如果->atomic_open（）中发生错误，则需要使用fput（）进行清理.
+ *
+ * 成功时返回零，打开失败时返回-errno.
+ *
  */
 int finish_open(struct file *file, struct dentry *dentry,
 		int (*open)(struct inode *, struct file *),
@@ -1140,7 +1159,7 @@ SYSCALL_DEFINE3(open, const char __user *, filename, int, flags, umode_t, mode)
 	/* flags 会在64位kernel的情况下强制加上O_LARGEFILE标志位，表示允许打开长度超过4GB的大文件 */
 	if (force_o_largefile())
 		flags |= O_LARGEFILE;
-
+	/* AT_FDCWD表示从当前目录开始查找 */
 	return do_sys_open(AT_FDCWD, filename, flags, mode);
 }
 

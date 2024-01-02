@@ -3882,43 +3882,55 @@ static int do_tmpfile(struct nameidata *nd, unsigned flags,
 	struct dentry *child;
 	struct inode *dir;
 	struct path path;
+	/* 找到父目录 */
 	int error = path_lookupat(nd, flags | LOOKUP_DIRECTORY, &path);
 	if (unlikely(error))
 		return error;
+	/* 检查父目录写权限 */
 	error = mnt_want_write(path.mnt);
 	if (unlikely(error))
 		goto out;
 	dir = path.dentry->d_inode;
 	/* we want directory to be writable */
+	/* 因为要创建文件，所以要检查在这个目录的写，执行权限 */
 	error = inode_permission(dir, MAY_WRITE | MAY_EXEC);
 	if (error)
 		goto out2;
+	/* 如果文件系统没有tmpfile这个指针，则不支持临时文件 */
 	if (!dir->i_op->tmpfile) {
 		error = -EOPNOTSUPP;
 		goto out2;
 	}
+	/* 申请一个dentry */
 	child = d_alloc(path.dentry, &name);
 	if (unlikely(!child)) {
 		error = -ENOMEM;
 		goto out2;
 	}
 	dput(path.dentry);
+	/* 设置成刚创建的文件 */
 	path.dentry = child;
+	/* 调用具体文件系统创建临时文件 */
 	error = dir->i_op->tmpfile(dir, child, op->mode);
 	if (error)
 		goto out2;
+	/* 打印审计日志 */
 	audit_inode(nd->name, child, 0);
 	/* Don't check for other permissions, the inode was just created */
+	/* 检查打开权限 */
 	error = may_open(&path, 0, op->open_flag);
 	if (error)
 		goto out2;
+	/* 设置文件的挂载点指针 */
 	file->f_path.mnt = path.mnt;
 	error = finish_open(file, child, NULL, opened);
 	if (error)
 		goto out2;
+
 	error = open_check_o_direct(file);
 	if (error) {
 		fput(file);
+	/* 如果没有O_EXCL标志，则表示文件是可链接的 */
 	} else if (!(op->open_flag & O_EXCL)) {
 		struct inode *inode = file_inode(file);
 		spin_lock(&inode->i_lock);
@@ -3962,7 +3974,9 @@ static struct file *path_openat(struct nameidata *nd,
 		error = do_tmpfile(nd, flags, op, file, &opened);
 		goto out2;
 	}
-
+	/* O_PATH 将不会真正打开一个文件，而只是准备好该文件的文件描述符，而且如果使用该标志位的话系统会忽略大部分其他的标志位.
+	 * 特别是如果配合使用 O_NOFOLLOW，那么遇到符号链接的时候将会返回这个符号链接本身的文件描述符，而非符号链接所指的对象.
+	 */
 	if (unlikely(file->f_flags & O_PATH)) {
 		error = do_o_path(nd, flags, file);
 		if (!error)
