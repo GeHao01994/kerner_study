@@ -410,6 +410,7 @@ void iov_iter_init(struct iov_iter *i, int direction,
 			size_t count)
 {
 	/* It will get better.  Eventually... */
+	/* 如果是内核空间，那么就用内核的kvec */
 	if (segment_eq(get_fs(), KERNEL_DS)) {
 		direction |= ITER_KVEC;
 		i->type = direction;

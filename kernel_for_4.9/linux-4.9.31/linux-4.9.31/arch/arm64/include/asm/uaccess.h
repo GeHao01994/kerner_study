@@ -59,6 +59,17 @@ struct exception_table_entry
 
 extern int fixup_exception(struct pt_regs *regs);
 
+/* 在内核中使用有些系统调用（如打开，写文件等操作）需要使用get_fs,set_fs对他们进行保护.
+ * 如： oldfs=get_fs();
+ *	set_fs(KERNEL_DS);
+ *	filp->f_op->write(filp,buf,size,&filp->f_pos);
+ *	set_fs(oldfs);
+ * 只有使用上面的方法，才能在内核中使用open,write等的系统调用.
+ * 其实这样做的主要原因是open,write的参数在用户空间，在这些系统调用的实现里需要对参数进行检查，就是检查它的参数指针地址是不是用户空间的.
+ * 系统调用本来是提供给用户空间的程序访问的，所以，对传递给它的参数（比如上面的buf），它默认会认为来自用户空间，在->write()函数中,
+ * 为了保护内核空间，一般会用get_fs()得到的值来和USER_DS进行比较，从而防止用户空间程序“蓄意”破坏内核空间.
+ * 为了解决这个问题； set_fs(KERNEL_DS)将其能访问的空间限制扩大到KERNEL_DS,这样就可以在内核顺利使用系统调用了!
+ */
 #define KERNEL_DS	(-1UL)
 #define get_ds()	(KERNEL_DS)
 

@@ -31,7 +31,7 @@ file_ra_state_init(struct file_ra_state *ra, struct address_space *mapping)
 {
 	/* 将bdi的最大预读页设置到这里 */
 	ra->ra_pages = inode_to_bdi(mapping->host)->ra_pages;
-	/* prev_pos 字段存放着进程在上一次读操作中所请求页的最后一页的索引,
+	/* prev_pos 字段存放着进程在上一次读操作时，最后的访问位置
 	 * 它的初值是-1
 	 */
 	ra->prev_pos = -1;
@@ -241,6 +241,12 @@ int force_page_cache_readahead(struct address_space *mapping, struct file *filp,
  * for 128k (32 page) max ra
  * 1-8 page = 32k initial, > 8 page = 128k initial
  */
+/*
+ * 设置初始窗口大小，四舍五入到2的次幂，
+ * 平方表示小，x4表示中等，x2表示大
+ * 对于128k（32页）max ra
+ * 1-8页=32k初始，>8页=128k 初始
+ */
 static unsigned long get_init_ra_size(unsigned long size, unsigned long max)
 {
 	unsigned long newsize = roundup_pow_of_two(size);
@@ -262,9 +268,13 @@ static unsigned long get_init_ra_size(unsigned long size, unsigned long max)
 static unsigned long get_next_ra_size(struct file_ra_state *ra,
 						unsigned long max)
 {
+	/* ra->size表示当前预读的页数 */
 	unsigned long cur = ra->size;
 	unsigned long newsize;
-
+	/* 如果当前预读的页数小于最大预读数/16
+	 * 那么预读大小乘以4
+	 * 否则乘以2
+	 */
 	if (cur < max / 16)
 		newsize = 4 * cur;
 	else
@@ -310,6 +320,24 @@ static unsigned long get_next_ra_size(struct file_ra_state *ra,
  *
  * The code ramps up the readahead size aggressively at first, but slow down as
  * it approaches max_readhead.
+ */
+/* 按需预读设计
+ * struct file_ra_state中的字段表示最近执行的预读尝试：
+ * 为了使应用程序思考时间和磁盘I/O时间重叠，我们进行了“预读流水线”：不要等到应用程序消耗了所有预读页面并在readahead_index的缺失页面上停滞；
+ * 相反，只要预读窗口中只剩下async_size页面，就提交异步预读I/O。通常，async_size将等于size，以实现最大流水线.
+ *
+ * 在交错顺序读取中，同一fd上的并发流可能会使彼此的预读状态无效.
+ * 因此，我们用PG_readahead在（start+size-async_size）处标记新的预读页面，并将其用作预读指示符.
+ * 该标志不会在已经缓存的页面上设置，以避免无需大惊小怪的预读，从而节省毫无意义的页面缓存查找.
+ *
+ * prev_pos跟踪前一次读请求中最后访问的字节.
+ * 它应该由调用者维护,并将用于检测小的随机读取.
+ * 请注意，预读算法检查顺序模式的松散。因此，交错读取可以作为顺序读取.
+ *
+ * 有一种特殊情况：如果应用程序试图读取的第一页恰好是文件的第一页，则假设即将发生线性读取，
+ * 并且窗口立即设置为基于I/O请求大小和max_readahead的初始化大小
+ *
+ * 代码一开始会大幅增加预读大小，但随着接近max_readhead，速度会减慢.
  */
 
 /*
@@ -373,23 +401,35 @@ ondemand_readahead(struct address_space *mapping,
 		   bool hit_readahead_marker, pgoff_t offset,
 		   unsigned long req_size)
 {
+	/* 获得最大的预读页面 */
 	unsigned long max = ra->ra_pages;
 	pgoff_t prev_offset;
 
 	/*
 	 * start of file
 	 */
+	/* 第一次读文件成立，从文件头开始预读
+	 * 也就是如果是文件头，跳转到initial_readahead */
 	if (!offset)
 		goto initial_readahead;
 
 	/*
 	 * It's the expected callback offset, assume sequential access.
 	 * Ramp up sizes, and push forward the readahead window.
+	 *
+	 * 这是预期的回调偏移量，假设按顺序访问。加大尺寸，并向前推进预读窗口。
+	 */
+	/* start表示当前预读的第一页的索引
+	 * size表示当前预读的页数
+	 * async_size指定一个阈值，预读窗口剩余这么多页时，就开始异步预读
+	 * 刚好等于说明是个连续顺序读 ?
 	 */
 	if ((offset == (ra->start + ra->size - ra->async_size) ||
 	     offset == (ra->start + ra->size))) {
 		ra->start += ra->size;
+		/* 加大预读的步伐 */
 		ra->size = get_next_ra_size(ra, max);
+		/* 把预读的阈值设置成size */
 		ra->async_size = ra->size;
 		goto readit;
 	}
@@ -400,20 +440,32 @@ ondemand_readahead(struct address_space *mapping,
 	 * Query the pagecache for async_size, which normally equals to
 	 * readahead size. Ramp it up and use it as the new readahead size.
 	 */
+	/* 在没有有效预读状态的情况下点击标记的页面.
+	 * 例如，交错读取。
+	 * 查询页面缓存中的async_size，它通常等于预读大小。将其放大并用作新的预读大小.
+	 */
+	/* 读取到PG_readahead的page时启动异步预读 */
 	if (hit_readahead_marker) {
 		pgoff_t start;
 
 		rcu_read_lock();
+		/* 从offset开始，找下一个未在cache中的page作为下一次预读window的起始page */
 		start = page_cache_next_hole(mapping, offset + 1, max);
 		rcu_read_unlock();
-
+		/* 如果找不到未cache的page了或者如果找到的start - offeset大于max
+		 * 那么直接返回算了
+		 */
 		if (!start || start - offset > max)
 			return 0;
-
+		/* 预读的start 设置为我们刚刚找到的那个 */
 		ra->start = start;
+		/* start - offset 看成是老的async_size */
 		ra->size = start - offset;	/* old async_size */
+		/* 加上我们req_size */
 		ra->size += req_size;
+		/* 然后加上我们扩充后的预读size */
 		ra->size = get_next_ra_size(ra, max);
+		/* 复制给asyn_size */
 		ra->async_size = ra->size;
 		goto readit;
 	}
@@ -421,6 +473,7 @@ ondemand_readahead(struct address_space *mapping,
 	/*
 	 * oversize read
 	 */
+	/*  一次性读取大量page，直接开始新一轮预读 */
 	if (req_size > max)
 		goto initial_readahead;
 
@@ -428,6 +481,12 @@ ondemand_readahead(struct address_space *mapping,
 	 * sequential cache miss
 	 * trivial case: (offset - prev_offset) == 1
 	 * unaligned reads: (offset - prev_offset) == 0
+	 */
+	/* 探测到有新的顺序读，开始新一轮预读
+	 * 顺序缓存未命中
+	 * 琐碎情况：（offset-prev_offset）==1
+	 * 未对齐的读取：（offset-prev_offset）==0
+	 *
 	 */
 	prev_offset = (unsigned long long)ra->prev_pos >> PAGE_SHIFT;
 	if (offset - prev_offset <= 1UL)
@@ -437,6 +496,7 @@ ondemand_readahead(struct address_space *mapping,
 	 * Query the page cache and look for the traces(cached history pages)
 	 * that a sequential stream would leave behind.
 	 */
+	/* 根据offset之前的page在cache里的情况判断是否是顺序读 */
 	if (try_context_readahead(mapping, ra, offset, req_size, max))
 		goto readit;
 
@@ -444,11 +504,15 @@ ondemand_readahead(struct address_space *mapping,
 	 * standalone, small random read
 	 * Read as is, and do not pollute the readahead state.
 	 */
+	/* 判断为随机读，仅读取请求大小的page，不改变file_ra_state和PG_readahead状态 */
 	return __do_page_cache_readahead(mapping, filp, offset, req_size, 0);
 
 initial_readahead:
 	ra->start = offset;
 	ra->size = get_init_ra_size(req_size, max);
+	/* async_size如果ra->size > reqsize的情况，那么就取ra->size-req_size
+	 * 否则就取ra->size
+	 */
 	ra->async_size = ra->size > req_size ? ra->size - req_size : ra->size;
 
 readit:
@@ -461,7 +525,9 @@ readit:
 		ra->async_size = get_next_ra_size(ra, max);
 		ra->size += ra->async_size;
 	}
-
+	/* 根据file_ra_state调用__do_page_cache_readahead()读取相应page，
+	 * 设置(start+size-async_size)的page为PG_readahead
+	 */
 	return ra_submit(ra, mapping, filp);
 }
 
@@ -479,15 +545,27 @@ readit:
  * pages onto the read request if access patterns suggest it will improve
  * performance.
  */
+/* page_cache_sync_readahead-通用文件readahead
+ * @mapping：保存pagecache和I/O矢量的address_space
+ * @ra:file_ra_state，它保持预读状态
+ * @filp：传递到->readpage（）和->readpages（）
+ * @offset：开始偏移到@mapping，以页面缓存页面大小为单位
+ * @req_size:hint：caller执行在pageche pages整个读的大小
+ *
+ * 当缓存未命中时，应调用page_cache_sync_readahead（）：它将提交读取.
+ * 如果访问模式表明预读逻辑将提高性能，则预读逻辑可以决定将更多页面装载到读取请求上
+ */
 void page_cache_sync_readahead(struct address_space *mapping,
 			       struct file_ra_state *ra, struct file *filp,
 			       pgoff_t offset, unsigned long req_size)
 {
 	/* no read-ahead */
+	/* 如果当前预读最大页面为NULL，那么直接返回 */
 	if (!ra->ra_pages)
 		return;
 
 	/* be dumb */
+	/* 随机读 */
 	if (filp && (filp->f_mode & FMODE_RANDOM)) {
 		force_page_cache_readahead(mapping, filp, offset, req_size);
 		return;

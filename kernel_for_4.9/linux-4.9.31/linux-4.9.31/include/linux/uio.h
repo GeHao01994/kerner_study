@@ -27,17 +27,30 @@ enum {
 	ITER_PIPE = 8,
 };
 
+/* iov_iter是iovec的迭代,使用iov_iter结构体的本质是用于协助处理用户态缓冲区
+ * 数据和页缓存之间的映射关系
+ */
 struct iov_iter {
+	/* 标识读or写，以及其他属性 */
 	int type;
+	/* 第一个iovec中，数据起始偏移
+	 * 多个数据块是存放在一个指针数组的，数组的一个元素指向一个数据块，
+	 * 而iov_offset就是数组第一个元素指向的数据块中的偏移。
+	 */
 	size_t iov_offset;
+	/* 数据大小 */
 	size_t count;
 	union {
+		/* 结构与kvec一致，描述用户态的一段空间 */
 		const struct iovec *iov;
+		/* 述内核态的一段空间 */
 		const struct kvec *kvec;
+		/* 描述一个内存页中的一段空间 */
 		const struct bio_vec *bvec;
 		struct pipe_inode_info *pipe;
 	};
 	union {
+		/* iovec数量 */
 		unsigned long nr_segs;
 		struct {
 			int idx;
@@ -137,6 +150,10 @@ static inline bool iter_is_iovec(const struct iov_iter *i)
  * greater than the amount of data in iov_iter is fine - it'll just do
  * nothing in that case.
  */
+/* 按给定的限额限制iov_iter;
+ * 请注意，第二个参数不是new size，它是上限.
+ * 给它传递一个大于iov_iter的数据是最好的，他将什么都不会做
+ */
 static inline void iov_iter_truncate(struct iov_iter *i, u64 count)
 {
 	/*
@@ -144,6 +161,10 @@ static inline void iov_iter_truncate(struct iov_iter *i, u64 count)
 	 * operands to u64 here and any value that would be truncated by
 	 * conversion in assignement is by definition greater than all
 	 * values of size_t, including old i->count.
+	 */
+	/* count不必适合size_t- comparison(比较) 在这里将两个操作数都扩展到u64，
+	 * 任何通过定义分配时通过转换被截断的的任何值都大于size_t的所有值
+	 * 包括旧的i->count.
 	 */
 	if (i->count > count)
 		i->count = count;

@@ -1687,15 +1687,23 @@ static ssize_t do_generic_file_read(struct file *filp, loff_t *ppos,
 	unsigned long offset;      /* offset into pagecache page */
 	unsigned int prev_offset;
 	int error = 0;
-
+	/* s_maxbytes表示文件的最大长度
+	 * 如果当前文件的偏移量大于等于了文件的最大长度，那么说明读完了，直接返回吧
+	 */
 	if (unlikely(*ppos >= inode->i_sb->s_maxbytes))
 		return 0;
+	/* 这里就是如果你的iov_iter->count也就是数据大小大于inode->i_sb->s_maxbytes
+	 * 那么直接赋值给它
+	 */
 	iov_iter_truncate(iter, inode->i_sb->s_maxbytes);
-
+	/* index表示当前正处理页面在页面缓存中的索引编号 */
 	index = *ppos >> PAGE_SHIFT;
+	/* prev_pos 字段存放着进程在上一次读操作中的偏移量 */
 	prev_index = ra->prev_pos >> PAGE_SHIFT;
 	prev_offset = ra->prev_pos & (PAGE_SIZE-1);
+	/* last_index为要读取的最后一个页面在页面缓存中的索引编号 */
 	last_index = (*ppos + iter->count + PAGE_SIZE-1) >> PAGE_SHIFT;
+	/* offset为要读取的第一个字节在所属页面中的偏移 */
 	offset = *ppos & ~PAGE_MASK;
 
 	for (;;) {
@@ -1710,17 +1718,22 @@ find_page:
 			error = -EINTR;
 			goto out;
 		}
-
+		/* 在页面缓存中查到指定索引值的页面 */
 		page = find_get_page(mapping, index);
+		/* 如果没有，表示请求的页面不在页面缓存，尝试执行预读逻辑代码 */
 		if (!page) {
 			page_cache_sync_readahead(mapping,
 					ra, filp,
 					index, last_index - index);
+			/* 预读后再次调用find_get_page函数查找页面，
+			 * 如果依然没有找到，那么就跳转到no_cached_page处 */
 			page = find_get_page(mapping, index);
 			if (unlikely(page == NULL))
 				goto no_cached_page;
 		}
+		/* 如果当前page设置了"PG_Readahead"预读标记位，说明本次读取的文件页数据正好命中上一次的预读窗口的文件页 */
 		if (PageReadahead(page)) {
+			/* 这里发起异步文件预读 */
 			page_cache_async_readahead(mapping,
 					ra, filp, page,
 					index, last_index - index);
@@ -1934,7 +1947,12 @@ generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 
 	if (!count)
 		goto out; /* skip atime */
-
+	/* 处理direct io的情况 */
+	/* 在大多数情况下，页面缓存有助于提高系统性能，但是不是所有情况都如此.
+	 * 有时我们需要绕开页面缓存，在用户缓冲区和磁盘之间直接传输数据.
+	 * 如果数据不会在短期内被再次使用(例如，在进行磁盘备份时)，或者应用程序有的缓存机制，
+	 * 采用直接IO反而能够提升性能.
+	 */
 	if (iocb->ki_flags & IOCB_DIRECT) {
 		struct address_space *mapping = file->f_mapping;
 		struct inode *inode = mapping->host;
@@ -1942,13 +1960,15 @@ generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 		loff_t size;
 
 		size = i_size_read(inode);
+		/* 因为数据有可能保存在页面缓存，还没来得及写入磁盘，
+		 * 因此，在进行I/O之前需要调用filemap_write_and_wait_range将相关数据冲刷到磁盘，并等待结束 */
 		retval = filemap_write_and_wait_range(mapping, iocb->ki_pos,
 					iocb->ki_pos + count - 1);
 		if (retval < 0)
 			goto out;
 
 		file_accessed(file);
-
+		/* 尽管需要绕开页面缓存(Page Cahe),直接IO操作还是定义在address_space_operations结构中 */
 		retval = mapping->a_ops->direct_IO(iocb, &data);
 		if (retval >= 0) {
 			iocb->ki_pos += retval;
@@ -1963,6 +1983,9 @@ generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 		 * and return.  Otherwise fallthrough to buffered io for
 		 * the rest of the read.  Buffered reads will not work for
 		 * DAX files, so don't bother trying.
+		 */
+		/* 如果是直接I/O读出的字节数，则返回给调用者.
+		 * 如果返回为0,则切换到缓存I/O(Buffered I/O)的方式读取
 		 */
 		if (retval < 0 || !iov_iter_count(iter) || iocb->ki_pos >= size ||
 		    IS_DAX(inode))

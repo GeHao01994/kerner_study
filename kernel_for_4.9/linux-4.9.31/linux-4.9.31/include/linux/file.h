@@ -45,7 +45,12 @@ extern unsigned long __fdget(unsigned int fd);
 extern unsigned long __fdget_raw(unsigned int fd);
 extern unsigned long __fdget_pos(unsigned int fd);
 extern void __f_unlock_pos(struct file *);
-
+/*
+ * __to_fd也是内联，参数只有一个v，代表file指针，但指针低2位包含了额外的flag信息.
+ * 一个flag是FDPUT_FPUT, 代表read结束后需要减小文件引用计数.
+ * 另外一个flag是FDPUT_POS_UNLOCK, 代表read结束后需要释放文件位置锁.
+ * __to_fd把原始的file指针和flag信息分离了出来.
+ */
 static inline struct fd __to_fd(unsigned long v)
 {
 	return (struct fd){(struct file *)(v & ~3),v & 3};

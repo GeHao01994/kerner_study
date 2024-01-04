@@ -90,8 +90,11 @@ struct files_struct {
   /*
    * read mostly part
    */
-	/* 引用计数 */
+	/* 引用计数,也就是使用该表的进程数 */
 	atomic_t count;
+	/* 这个就是说当一个文件已append打开时，它会在文件结尾
+	 * 写东西，导致大小改变
+	 */
 	bool resize_in_progress;
 	wait_queue_head_t resize_wait;
 	/* 指向打开文件表的指针 */
@@ -131,10 +134,14 @@ struct dentry;
  */
 static inline struct file *__fcheck_files(struct files_struct *files, unsigned int fd)
 {
+	/* 拿到我们的fdt */
 	struct fdtable *fdt = rcu_dereference_raw(files->fdt);
-
+	/* 如果fd小于当前可打开文件的最大数目
+	 * 那么就返回数组里面对应的file
+	 */
 	if (fd < fdt->max_fds)
 		return rcu_dereference_raw(fdt->fd[fd]);
+	/* 否则，返回NULL */
 	return NULL;
 }
 

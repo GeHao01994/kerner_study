@@ -136,8 +136,15 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
 /* Write access to underlying fs */
 #define FMODE_WRITER		((__force fmode_t)0x10000)
 /* Has read method(s) */
+/*
+ * if ((f->f_mode & FMODE_READ) && likely(f->f_op->read || f->f_op->aio_read))
+ *	f->f_mode |= FMODE_CAN_READ;
+ */
 #define FMODE_CAN_READ          ((__force fmode_t)0x20000)
 /* Has write method(s) */
+/* if ((f->f_mode & FMODE_WRITE) && likely(f->f_op->write || f->f_op->aio_write))
+ *	f->f_mode |= FMODE_CAN_WRITE;
+ */
 #define FMODE_CAN_WRITE         ((__force fmode_t)0x40000)
 
 /* File was opened by fanotify and shouldn't generate fanotify events */
@@ -340,12 +347,16 @@ struct writeback_control;
 #define IOCB_DSYNC		(1 << 4)
 #define IOCB_SYNC		(1 << 5)
 #define IOCB_WRITE		(1 << 6)
-
+/* 读/写操作是在内核控制块(kernel I/O Control Block)的控制之下进行的. */
 struct kiocb {
+	/* 指向和当前进行的I/O操作关联的文件对象的指针 */
 	struct file		*ki_filp;
+	/* 当前进行的I/O 操作的文件位置 */
 	loff_t			ki_pos;
+	/* IO完成时的回调 */
 	void (*ki_complete)(struct kiocb *iocb, long ret, long ret2);
 	void			*private;
+	/* IO属性 */
 	int			ki_flags;
 };
 
@@ -358,6 +369,7 @@ static inline int iocb_flags(struct file *file);
 
 static inline void init_sync_kiocb(struct kiocb *kiocb, struct file *filp)
 {
+	/* 将指和当前进行的I/O 操作关联的文件对象的指针ki_filp进行赋值 */
 	*kiocb = (struct kiocb) {
 		.ki_filp = filp,
 		.ki_flags = iocb_flags(filp),
@@ -373,13 +385,25 @@ static inline void init_sync_kiocb(struct kiocb *kiocb, struct file *filp)
  * The simplest case just copies the data to user
  * mode.
  */
+/* 它之前是被do_generic_file_read使用的.
+ * 假设已经将文件读到页面缓存，再如何使用这些数据就要看具体用户了,
+ * 最简单的情况是将数据复制到用户空间缓冲区，这也是这个流程的用法.
+ * 但是也可能有其他的用法，比如可以将从套接字读取,即网络上接收到的数据.
+ * 写入管道或者写入iSCSI连接等.
+ * 为了让这些不同的用户可以使用同一套读代码，所以引入了这个数据结构
+ */
 typedef struct {
+	/* 数据用户已消耗的字节数(一般是复制到用户空间缓冲区的字节数) */
 	size_t written;
+	/* 剩余的字节数 */
 	size_t count;
 	union {
+		/* 指向用户空间缓冲区的指针 */
 		char __user *buf;
+		/* 被其他用户，例如socket,自己定义和解释 */
 		void *data;
 	} arg;
+	/* 保存负的错误码，如果出现错误的话 */
 	int error;
 } read_descriptor_t;
 
@@ -387,43 +411,144 @@ typedef int (*read_actor_t)(read_descriptor_t *, struct page *,
 		unsigned long, unsigned long);
 
 struct address_space_operations {
+	/* writepage函数一般用于基于磁盘的文件系统，它将文件在内存页面中的数据更新到磁盘上.
+	 * 在调用这个函数之前，内存页面中已经包含了文件的最新数据.
+	 * 第一个参数为指向要写到磁盘的页面描述符的指针;
+	 * 第二个参数为指向控制回写行为的结构的指针.
+	 * writepage 可能为数据完整性原因，或者为释放内存目的，区别在于回写控制的sync_mode.
+	 */
 	int (*writepage)(struct page *page, struct writeback_control *wbc);
+	/* readpage函数一般用于基于磁盘的文件系统，它从磁盘上读取文件到数据到内存页面中.
+	 * 第一个参数为指向要读取的文件描述符的指针;
+	 * 第二个参数为指向目标内存页面的指针，其中给出了所读取页面在页面缓存中的索引位置.
+	 * 具体文件系统在该函数的实现中通常调用mpage_readpage或者block_read_full_page.
+	 * 调用时传入一个函数指针，该函数被用来确定如何将相对于文件开始的文件块编号转换为相对于块设备开始的逻辑块编号
+	 */
 	int (*readpage)(struct file *, struct page *);
-
+	/* 被调用从地址空间中写多个“脏”页面到磁盘.
+	 * 第一个参数为指向地址空间的指针;
+	 * 第二个参数为指向回写控制结构的指针.
+	 * 如果同步模式为WBC_SYNC_ALL，则回写控制会指定要写出页面的范围;
+	 * 否则，如果是WBC_SYNC_NONE,那么回写控制会给定要尽量写出的页面数目
+	 */
 	/* Write back some dirty pages from this mapping. */
 	int (*writepages)(struct address_space *, struct writeback_control *);
 
 	/* Set a page dirty.  Return true if this dirtied it */
+	/* 设置页面为脏，特别用在具体文件系统的地址空间页面中有关联的私有数据,并且这些数据在页面“弄脏”的同时被更新的场合.
+	 * 这个函数只有一个参数，为指向要处理页面的指针.
+	 * 如果成功，返回true.
+	 */
 	int (*set_page_dirty)(struct page *page);
-
+	/* 从磁盘上读取多个页面到地址空间中，它可以被看做readpage的向量版本，用于请求多个页面.
+	 * 一般用在预读的场合，所以读取错误可以被忽略.
+	 * 第一个参数为指向文件描述符的指针;
+	 * 第二个参数为指向地址空间描述符的指针;
+	 * 第三个参数为指向页面链表的表头;
+	 * 第四个参数为链表中的页面数目
+	 */
 	int (*readpages)(struct file *filp, struct address_space *mapping,
 			struct list_head *pages, unsigned nr_pages);
-
+	/* 被调用的缓存I/O代码调用，要求具体文件系统准备将给定的偏移和长度的数据写入到文件.
+	 * 换句话说，VFS通过调用write_begin通知具体文件系统，准备写文件的字节begin~end到给定的页面.
+	 * 具体文件系统要负责确保本次写操作能够完成，包括必要时分配空间，在非覆写时先从磁盘读取数据到页面等
+	 *
+	 * 第一个参数为指向文件的指针;
+	 * 第二个参数为指向地址空间的指针;
+	 * 第三个参数为起始偏移值;
+	 * 第四个字节为要写的字节数;
+	 * 第五个参数为flags
+	 * 第六个参数为指向页面描述符的双重指针，它是输入/输出参数，如果输入为NULL，则需要有具体文件系统分配的页面,
+	 * 并通过它返回加锁的页面，以便调用者安全写入数据;
+	 * 第七个参数为返回指向由具体文件系统解释的数据结构，它被传递给write_end函数,
+	 * 例如，reiserfs文件系统使用它传递特定的标志，表示是否在cont_expand(expanding truncate)环境下被调用,
+	 * 如果是这样，则用它通知write_end做协调处理.
+	 * 这个函数在成功时返回0;否则返回负的错误码.
+	 * 如果出错，write_end函数不会被调用
+	 */
 	int (*write_begin)(struct file *, struct address_space *mapping,
 				loff_t pos, unsigned len, unsigned flags,
 				struct page **pagep, void **fsdata);
+	/* 在成功调用write_begin，并完成数据复制之后，write_end必须被调用.
+	 * VFS通过调用write_end告诉具体文件系统，数据已经被复制到页面，现在可以被提交到磁盘上.
+	 * 第一个参数为指向文件的指针;
+	 * 第二个参数为指向地址空间的指针;
+	 * 第三个参数为起始偏移值;
+	 * 第四个字节为要写的字节数，即最初传递给write_begin的长度;
+	 * 第五个字节为已写的字节数，即已从用户缓冲区复制到页面的字节数;
+	 * 第六个参数为指向页面的指针;
+	 * 第七个参数为指向由具体文件系统结束的数据结构，从write_begin函数传递过来.
+	 * 具体文件系统需要负责解锁页面，释放它的引用计数，并更新i_size.失败返回负的错误码;
+	 * 否则返回能够被复制到页面缓存页面的字节数(<=cpoied)
+	 */
 	int (*write_end)(struct file *, struct address_space *mapping,
 				loff_t pos, unsigned len, unsigned copied,
 				struct page *page, void *fsdata);
 
 	/* Unfortunately this kludge is needed for FIBMAP. Don't use it */
+	/* 将文件中的逻辑块扇区编号映射为对应设备上的物理块扇区编号.
+	 * 这个回调函数被用于FIBMAP ioctl和交换文件(swap file)一起工作.
+	 * 要交换到一个文件，文件必须在块设备上有稳定的映射.
+	 * 交换系统并不通过文件系统，而是直接使用bmap找到并使用文件数据块在设备上的地址.
+	 * 第一个参数为地址空间
+	 * 第二个参数为文件的逻辑块扇区编号.
+	 */
 	sector_t (*bmap)(struct address_space *, sector_t);
+	/* 使某个页面全部或部分失效，被用在截断文件时.
+	 * 第一个参数为指向页面描述符的指针;
+	 * 第二个参数为要使之失效的起始字节偏移，为0表示使整个页面失效.
+	 */
 	void (*invalidatepage) (struct page *, unsigned int, unsigned int);
+	/* 被日志文件系统使用以准备释放页面.
+	 * 第一个参数为指向页面描述符的指针;
+	 * 第二个参数为分配标志
+	 */
 	int (*releasepage) (struct page *, gfp_t);
 	void (*freepage)(struct page *);
+	/* 被通用read/write函数调用执行direct_IO---即I/O请求会绕过页面缓存(Page Cache),
+	 * 在磁盘与应用程序缓冲区之间进行直接数据传输.
+	 * 第一个参数是指向内核I/O控制块的指针;
+	 * 第二个参数iov_iter表示一个迭代器,用于迭代数据的读写
+	 */
 	ssize_t (*direct_IO)(struct kiocb *, struct iov_iter *iter);
 	/*
 	 * migrate the contents of a page to the specified target. If
 	 * migrate_mode is MIGRATE_ASYNC, it must not block.
 	 */
+	/* 将页面的内容移动到指定的目标.
+	 * 第一个参数为指向地址空间的指针;
+	 * 第二个参数为指向新页面的指针;
+	 * 第三个参数为指向旧页面的指针.
+	 * 这个函数被用于compact物理内存使用.如果需要重新定位一个页面(比如接收到信号表明内存卡即将出错),
+	 * 会换入一个新页面和一个旧页面到这个函数.
+	 * 而它要负责转移所有的私有数据，以及更新引用计数.
+	 * 页面成功完成分离后,内存管理的页面迁移就会调用migratepage 来迁移页面.
+	 * migratepage的作用是将旧页面的内容移动到新页面，并设置new page的字段.
+	 * 在完成页面迁移的动作后，驱动还需要`__ClearPageMovable(page)， 来指old page不再可移动.
+	 */
 	int (*migratepage) (struct address_space *,
 			struct page *, struct page *, enum migrate_mode);
+	/* 在页面迁移的某些场景中，如memory hotplug， memory compaction 会调用isolate_memory_page()函数来分离页面,
+	 * 当页面分离之后，这些页面会被标记成PG_isolated, 这样其他CPU在并发分离页面时会忽略这个页面.
+	 */
 	bool (*isolate_page)(struct page *, isolate_mode_t);
+	/* 在页面迁移失败时， 驱动需要把分离的页面返回到自己的数据结构中 */
 	void (*putback_page)(struct page *);
+	/* 在释放一个页面之前被调用——回写一个“脏”页面.
+	 * 这个函数只有一个参数，即指向页面描述符的指针
+	 */
 	int (*launder_page) (struct page *);
+	/* 在处理缓冲读I/O请求时，被调用以判断要读取的这部分数据在页面中是否为新的.
+	 * 第一个参数为指向页面描述符的指针;
+	 * 函数返回1表明页面相关数据已经被更新;否则返回0;
+	 */
 	int (*is_partially_uptodate) (struct page *, unsigned long,
 					unsigned long);
 	void (*is_dirty_writeback) (struct page *, bool *, bool *);
+	/* 被内存故障处理代码使用.
+	 * 第一个参数为指向地址空间描述符的指针.
+	 * 第二个参数为指向页面描述符的指针
+	 */
 	int (*error_remove_page)(struct address_space *, struct page *);
 
 	/* swapfile support */
@@ -447,21 +572,51 @@ int pagecache_write_end(struct file *, struct address_space *mapping,
 				struct page *page, void *fsdata);
 
 struct address_space {
+	/* 指向内嵌了(host)这个地址空间的inode指针
+	 * 如果有的话，不管是常规文件或者块设备文件
+	 */
 	struct inode		*host;		/* owner: inode, block_device */
+	/* 地址空间页面组成基树(Radix)的形式，page_tree为树根
+	 * 文件的地址空间被分割为一个个以页面大小为单位的数据块，这些数据块(页)被组织成一个
+	 * 多叉树，被称为基(radix)数.树中所有叶子节点为一个个页面结构(struct page),表示用于缓存该文件的每一个页.
+	 * 在叶子层最左端的第一个页面保存着该文件的前4096个字节(如果页的大小为4096字节)，接下来的页面保存着文件第二个4096个字节，依次内推.
+	 * 树中的所有中间节点为组织节点，指示某一地址上的数据所在的页面.
+	 * 此树的层次可以从0层到6层，所支持的文件大小从0字节到16T个字节.
+	 * 树的更节点为地址空间的page_tree域.
+	 */
 	struct radix_tree_root	page_tree;	/* radix tree of all pages */
+	/* 用于保护基数的自旋锁 */
 	spinlock_t		tree_lock;	/* and lock protecting it */
+	/* 该地址空间中共享内存映射的数目 */
 	atomic_t		i_mmap_writable;/* count VM_SHARED mappings */
+	/* 为了便于查找，一个共享映射文件的所有虚拟内存区间或者私有映射文件的写时复制(copy-on-write)虚拟内存空间
+	 * 被组织成一个radix优先查找树(Priority Search Tree),文件地址空间的i_mmap域为树根
+	 *
+	 * 为方便页面回收，内核采用反向映射技术，将内存区间(vm_area_struct)组织成radix优先
+	 * 查找树的形式.该域为树根，vm_area_struct结构的prio_tree_node域为链入此树的链接件
+	 */
 	struct rb_root		i_mmap;		/* tree of private and shared mappings */
 	struct rw_semaphore	i_mmap_rwsem;	/* protect tree, count, list */
 	/* Protected by tree_lock together with the radix tree */
+	/* 地址空间中页面的总数 */
 	unsigned long		nrpages;	/* number of total pages */
 	/* number of shadow or DAX exceptional entries */
+	/* 影子或DAX异常项的数量 */
 	unsigned long		nrexceptional;
+	/*
+	 * 为了不占用过多资源，Linux内核将地址空间中页面回写的行为分成若干轮次.
+	 * writeback_index域记录了上次回写操作的最后页面索引，下一次回写操作将从该位置开始
+	 */
 	pgoff_t			writeback_index;/* writeback starts here */
+	/* 地址空间(页面)的操作函数 */
 	const struct address_space_operations *a_ops;	/* methods */
+	/* 错误位和内存分配标志 */
 	unsigned long		flags;		/* error bits */
+	/* 用于保护地址空间私有链表的自旋锁 */
 	spinlock_t		private_lock;	/* for use by the address_space */
+	/* 用于分配的隐式gfp掩码 */
 	gfp_t			gfp_mask;	/* implicit gfp mask for allocations */
+	/* 地址空间的私有链表,通常用来链接为文件的中间记录块所分配的buffer_head结构 */
 	struct list_head	private_list;	/* ditto */
 	void			*private_data;	/* ditto */
 } __attribute__((aligned(sizeof(long))));
@@ -943,7 +1098,7 @@ struct file_ra_state {
 	unsigned int ra_pages;		/* Maximum readahead window */
 	/* 预读命中失败计数器（用于内存映射）*/
 	unsigned int mmap_miss;		/* Cache miss stat for mmap accesses */
-	/* prev_pos 字段存放着进程在上一次读操作中所请求页的最后一页的索引，
+	/* prev_pos是前一次读取时，最后的访问位置
 	 * 它的初值是-1
 	 */
 	loff_t prev_pos;		/* Cache last read() position */
@@ -2535,7 +2690,7 @@ extern int generic_update_time(struct inode *, struct timespec *, int);
 
 /* /sys/fs */
 extern struct kobject *fs_kobj;
-
+/* MAX_RW_COUNT是一个宏：INT_MAX & PAGE_MASK，INT_MAX是2^31，理论上每次write可写的buff大小是2^31-2^12=2147479552 */
 #define MAX_RW_COUNT (INT_MAX & PAGE_MASK)
 
 #ifdef CONFIG_MANDATORY_FILE_LOCKING
@@ -2546,7 +2701,20 @@ extern int locks_mandatory_area(struct inode *, struct file *, loff_t, loff_t, u
  * Candidates for mandatory locking have the setgid bit set
  * but no group execute bit -  an otherwise meaningless combination.
  */
-
+/* 我们都知道rm -rf /在 Linux 中是非常危险的命令.如果我们以 root 用户身份执行该命令,它甚至可以删除正在运行的系统中的所有文件.
+ * 这是因为 Linux 通常不会自动给打开的文件加锁，所以即使是正在运行的文件，仍然有可能被 rm 命令删除.
+ * Linux 支持两种文件锁:协同锁(Advisory lock)和强制锁(Mandatory lock).
+ *
+ * 协同锁定不是强制性锁方案，仅当参与的进程通过显式获取锁进行协作时，它才有效.
+ * 否则,如果某个进程根本不知道锁，则这个协同锁会被忽略掉(意味着各个进程间必须协商并遵守这个协同锁的机制，才能发挥锁的作用)
+ *
+ * 强制锁(Mandatory Lock)
+ * 与协作锁不同，强制锁不需要参与进程之间的任何合作。一旦在文件上激活了强制锁，操作系统便会阻止其他进程读取或写入文件.
+ * 要在 Linux 中启用强制性文件锁定，必须满足两个要求:
+ * 1、我们必须使用 mand 选项挂载文件系统(挂载-o mand FILESYSTEM MOUNT_POINT).
+ * 2、我们必须为要锁定的文件（chmod g + s，g-x FILE）打开 set-group-ID 位，并关闭组执行位.
+ * 使用强制锁之后，这个锁会在操作系统级别进行管理和控制.
+ */
 static inline int __mandatory_lock(struct inode *ino)
 {
 	return (ino->i_mode & (S_ISGID | S_IXGRP)) == S_ISGID;
@@ -3429,10 +3597,15 @@ static inline bool io_is_direct(struct file *filp)
 static inline int iocb_flags(struct file *file)
 {
 	int res = 0;
+	/* 如果是追加的形势，这里设置IOCB_APPEND */
 	if (file->f_flags & O_APPEND)
 		res |= IOCB_APPEND;
+	/* 如果是如果是Direct */
 	if (io_is_direct(file))
 		res |= IOCB_DIRECT;
+	/* 如果设置了O_SYNC或者O_DSYNC标志就代表使用同步I/O了.
+	 * 如果设置了O_DSYNC标志就需要等待文件数据写入磁盘后才返回.
+	 * 而O_SYNC则在O_DSYNC的基础上要求文件元数据也要写入磁盘后才返回 */
 	if ((file->f_flags & O_DSYNC) || IS_SYNC(file->f_mapping->host))
 		res |= IOCB_DSYNC;
 	if (file->f_flags & __O_SYNC)

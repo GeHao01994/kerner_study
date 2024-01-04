@@ -403,16 +403,26 @@ int rw_verify_area(int read_write, struct file *file, const loff_t *ppos, size_t
 	struct inode *inode;
 	loff_t pos;
 	int retval = -EINVAL;
-
+	/* 获得该文件的inode */
 	inode = file_inode(file);
+	/* 如果count小于0 ，返回非法参数 */
 	if (unlikely((ssize_t) count < 0))
 		return retval;
+	/* 拿到当前文件的读写偏移量 */
 	pos = *ppos;
+	/* 如果pos小于0，也就是说这个文件太大了
+	 *  File is huge (eg. /dev/kmem)
+	 */
 	if (unlikely(pos < 0)) {
+		/* 如果 file->f_mode & FMODE_UNSIGNED_OFFSET
+		 * File is huge (eg. /dev/kmem): treat loff_t as unsigned
+		 */
 		if (!unsigned_offsets(file))
 			return retval;
+		/* 如果pos + count 超过了LLONG_MAX，那么已经overflow了 */
 		if (count >= -pos) /* both values are in 0..LLONG_MAX */
 			return -EOVERFLOW;
+		/* 如果pos + count < 0,那么如果没有FMODE_UNSIGNED_OFFSET也返回非法参数了 */
 	} else if (unlikely((loff_t) (pos + count) < 0)) {
 		if (!unsigned_offsets(file))
 			return retval;
@@ -434,9 +444,10 @@ static ssize_t new_sync_read(struct file *filp, char __user *buf, size_t len, lo
 	struct kiocb kiocb;
 	struct iov_iter iter;
 	ssize_t ret;
-
+	/* 初始化Kernel I/O Control Block */
 	init_sync_kiocb(&kiocb, filp);
 	kiocb.ki_pos = *ppos;
+	/* 初始化iov_iter */
 	iov_iter_init(&iter, READ, &iov, 1, len);
 
 	ret = filp->f_op->read_iter(&kiocb, &iter);
@@ -448,8 +459,10 @@ static ssize_t new_sync_read(struct file *filp, char __user *buf, size_t len, lo
 ssize_t __vfs_read(struct file *file, char __user *buf, size_t count,
 		   loff_t *pos)
 {
+	/* 同步读 */
 	if (file->f_op->read)
 		return file->f_op->read(file, buf, count, pos);
+	/* 异步读 */
 	else if (file->f_op->read_iter)
 		return new_sync_read(file, buf, count, pos);
 	else
@@ -460,23 +473,36 @@ EXPORT_SYMBOL(__vfs_read);
 ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
-
+	/* 检查它是否可读 */
 	if (!(file->f_mode & FMODE_READ))
 		return -EBADF;
+	/* FMODE_CAN_READ的意思是
+	 * if ((f->f_mode & FMODE_READ) && likely(f->f_op->read || f->f_op->aio_read))
+	 * 	f->f_mode |= FMODE_CAN_READ;
+	 */
 	if (!(file->f_mode & FMODE_CAN_READ))
 		return -EINVAL;
+	/* 因为该操作需要将数据复制到传入的用户控件缓冲区，验证这段缓冲区可以进行写访问 */
 	if (unlikely(!access_ok(VERIFY_WRITE, buf, count)))
 		return -EFAULT;
-
+	/* 检查要访问的文件部分是否有冲突的强制锁，通过inode结构lock当前要操作的区域.
+	 * 文件系统是否允许使用强制锁，可以在mount是指定，如果mount时指定了MS_MANDLOCK，则允许使用强制锁 */
 	ret = rw_verify_area(READ, file, pos, count);
 	if (!ret) {
+		/* 如果count大于最大的读写COUNT
+		 * MAX_RW_COUNT是一个宏：INT_MAX & PAGE_MASK，INT_MAX是2^31，
+		 * 理论上每次write可写的buff大小是2^31-2^12=2147479552
+		 */
 		if (count > MAX_RW_COUNT)
 			count =  MAX_RW_COUNT;
 		ret = __vfs_read(file, buf, count, pos);
 		if (ret > 0) {
+			/* 通知文件被读取 */
 			fsnotify_access(file);
+			/* 增加当前进程读取的字节数 */
 			add_rchar(current, ret);
 		}
+		/* 增加当前read系统调用的次数 */
 		inc_syscr(current);
 	}
 
@@ -583,16 +609,21 @@ static inline void file_pos_write(struct file *file, loff_t pos)
 
 SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 {
+	/* 通过fd获得struct fd数据结构 */
 	struct fd f = fdget_pos(fd);
 	ssize_t ret = -EBADF;
-
+	/* 如果有file，那么开始进行读操作了 */
 	if (f.file) {
+		/* 获取当前读/写位置，即记录在file描述符中的f_ops域的值 */
 		loff_t pos = file_pos_read(f.file);
+		/* 执行文件的读取操作，这个函数增加了一个输入/输出参数，即当前读/写位置 */
 		ret = vfs_read(f.file, buf, count, &pos);
+		/* 更新当前读/写位置，即修改file描述符中的f_pos域的值 */
 		if (ret >= 0)
 			file_pos_write(f.file, pos);
 		fdput_pos(f);
 	}
+	/* 返回读取数据的字节数 */
 	return ret;
 }
 

@@ -761,24 +761,35 @@ void do_close_on_exec(struct files_struct *files)
 
 static struct file *__fget(unsigned int fd, fmode_t mask)
 {
+	/* 获得当前进程的files_struct数据结构 */
 	struct files_struct *files = current->files;
 	struct file *file;
 
 	rcu_read_lock();
 loop:
+	/* 拿到struct file
+	 * 注意这里面是rcu的去获得
+	 */
 	file = fcheck_files(files, fd);
 	if (file) {
 		/* File object ref couldn't be taken.
 		 * dup2() atomicity guarantee is the reason
 		 * we loop to catch the new file (or NULL pointer)
 		 */
+		/* 无法获取文件对象ref.
+		 * dup2（）原子性保证是我们循环捕获新文件（或NULL指针）的原因
+		 */
 		if (file->f_mode & mask)
 			file = NULL;
+		/*
+		 * #define get_file_rcu(x) atomic_long_inc_not_zero(&(x)->f_count)
+		 * 如果原子变量v的值不是0，那么把原子变量v的值加上1，并且返回1，否则返回0
+		 */
 		else if (!get_file_rcu(file))
 			goto loop;
 	}
 	rcu_read_unlock();
-
+	/* 返回file */
 	return file;
 }
 
@@ -809,21 +820,37 @@ EXPORT_SYMBOL(fget_raw);
  *
  * The fput_needed flag returned by fget_light should be passed to the
  * corresponding fput_light.
+ *
+ *
+ * 轻量级文件查找-如果fd table 未共享，则无refcnt增量.
+ *
+ * 如果满足以下所有条件，你可以使用它代替fget
+ * 1) 在退出系统调用并将控制权返回到用户空间之前，必须调用fput_light（即，返回用户空间后你无法记住返回的struct file*).
+ * 2) 在对fget_light和fput_light的调用之间，不能对返回的struct file * 调用filp_close.
+ * 3) 不能clone当前的任务在调用fget_light和fput_light之间.
+ *
+ * fput_needed flag通过fget_light返回应该传递给相应的fput_light.
  */
 static unsigned long __fget_light(unsigned int fd, fmode_t mask)
 {
 	struct files_struct *files = current->files;
 	struct file *file;
-
+	/* 如果使用该表的进程数为1,也就是fd table未共享 */
 	if (atomic_read(&files->count) == 1) {
+		/* 拿到我们fdt里面的对应的file */
 		file = __fcheck_files(files, fd);
+		/* 如果file为NULL，或者file->f_mode刚好和传进来的mask相同
+		 * 那么返回0
+		 */
 		if (!file || unlikely(file->f_mode & mask))
 			return 0;
+		/* 返回file指针 */
 		return (unsigned long)file;
 	} else {
 		file = __fget(fd, mask);
 		if (!file)
 			return 0;
+		/* FDPUT_FPUT, 代表read结束后需要减小文件引用计数. */
 		return FDPUT_FPUT | (unsigned long)file;
 	}
 }
