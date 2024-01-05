@@ -118,21 +118,29 @@ static int read_pages(struct address_space *mapping, struct file *filp,
 	struct blk_plug plug;
 	unsigned page_idx;
 	int ret;
-
+	/* 这里就是初始化plug成员
+	 * 初始化三个链表
+	 * 然后把它放到current_task->plug = plug里面去
+	 */
 	blk_start_plug(&plug);
-
+	/* 如果a_ops里面有readpages，那么就调用它 */
 	if (mapping->a_ops->readpages) {
 		ret = mapping->a_ops->readpages(filp, mapping, pages, nr_pages);
 		/* Clean up the remaining pages */
+		/* 清除剩余的页面 */
 		put_pages_list(pages);
 		goto out;
 	}
 
 	for (page_idx = 0; page_idx < nr_pages; page_idx++) {
+		/* 拿到page */
 		struct page *page = lru_to_page(pages);
+		/* 把它从pages的链表里面删掉 */
 		list_del(&page->lru);
+		/* 加入LRU链表之后，然后读page */
 		if (!add_to_page_cache_lru(page, mapping, page->index, gfp))
 			mapping->a_ops->readpage(filp, page);
+		/* 计数 -1 */
 		put_page(page);
 	}
 	ret = 0;
@@ -151,6 +159,13 @@ out:
  *
  * Returns the number of pages requested, or the maximum amount of I/O allowed.
  */
+
+/* __do_page_cache_readahead（）实际上读取了一块磁盘.
+ * 它首先分配所有页面，然后将它们全部提交给I/O.
+ * 这样可以避免在页面分配导致VM写回时出现的非常糟糕的行为。
+ * 我们真的不想把阅读和写作混在一起.
+ * 返回请求的页数或允许的最大I/O量.
+ */
 int __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
 			pgoff_t offset, unsigned long nr_to_read,
 			unsigned long lookahead_size)
@@ -161,34 +176,42 @@ int __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
 	LIST_HEAD(page_pool);
 	int page_idx;
 	int ret = 0;
+	/* 获得文件的长度 */
 	loff_t isize = i_size_read(inode);
+	/* 获得gpf的mask */
 	gfp_t gfp_mask = readahead_gfp_mask(mapping);
 
+	/* 如果长度为0，那么直接out */
 	if (isize == 0)
 		goto out;
-
+	/* 算出文件的最大index */
 	end_index = ((isize - 1) >> PAGE_SHIFT);
 
 	/*
 	 * Preallocate as many pages as we will need.
 	 */
 	for (page_idx = 0; page_idx < nr_to_read; page_idx++) {
+		/* 算出page_offset，也就是相对于文件的页面偏移 */
 		pgoff_t page_offset = offset + page_idx;
-
+		/* 如果大于end_index,那么就退出吧 */
 		if (page_offset > end_index)
 			break;
 
 		rcu_read_lock();
+		/* 看一下这个page有没有被映射 */
 		page = radix_tree_lookup(&mapping->page_tree, page_offset);
 		rcu_read_unlock();
 		if (page && !radix_tree_exceptional_entry(page))
 			continue;
-
+		/* 分配pagecache */
 		page = __page_cache_alloc(gfp_mask);
 		if (!page)
 			break;
+		/* 把page_offset设置到page->index中 */
 		page->index = page_offset;
+		/* 把page放入到page_pool里面去 */
 		list_add(&page->lru, &page_pool);
+		/* 将async_size的page标记为Readahead */
 		if (page_idx == nr_to_read - lookahead_size)
 			SetPageReadahead(page);
 		ret++;
@@ -198,6 +221,8 @@ int __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
 	 * Now start the IO.  We ignore I/O errors - if the page is not
 	 * uptodate then the caller will launch readpage again, and
 	 * will then handle the error.
+	 *
+	 * 现在启动IO。我们忽略I/O错误-如果页面不是最新的，那么调用方将再次启动readpage，然后处理错误。
 	 */
 	if (ret)
 		read_pages(mapping, filp, &page_pool, ret, gfp_mask);

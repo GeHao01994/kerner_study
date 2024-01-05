@@ -1700,7 +1700,7 @@ static blk_qc_t blk_queue_bio(struct request_queue *q, struct bio *bio)
 		request_count = blk_plug_queued_count(q);
 
 	spin_lock_irq(q->queue_lock);
-	//elv_mergeºÏ²¢elvÊÇµçÌİµ÷¶ÈËã·¨µÄÒâË¼
+	/* elv_mergeåˆå¹¶elvæ˜¯ç”µæ¢¯è°ƒåº¦ç®—æ³•çš„æ„æ€ */
 	el_ret = elv_merge(q, &req, bio);
 	if (el_ret == ELEVATOR_BACK_MERGE) {
 		if (bio_attempt_back_merge(q, req, bio)) {
@@ -2040,9 +2040,10 @@ blk_qc_t generic_make_request(struct bio *bio)
 	bio_list_init(&bio_list_on_stack[0]);
 	current->bio_list = bio_list_on_stack;
 	do {
-		//bdev_get_queue»ñµÃ¶ÓÁĞ
-		//Õâ¸öqÊÇÊ²Ã´¶«Î÷
-		//ÊÇrequest_queue ÇëÇó¶ÓÁĞ
+		/* bdev_get_queueè·å¾—é˜Ÿåˆ—
+		 * è¿™ä¸ªqæ˜¯ä»€ä¹ˆä¸œè¥¿
+		 * æ˜¯request_queue è¯·æ±‚é˜Ÿåˆ—
+		 */
 		struct request_queue *q = bdev_get_queue(bio->bi_bdev);
 
 		if (likely(blk_queue_enter(q, false) == 0)) {
@@ -2051,8 +2052,9 @@ blk_qc_t generic_make_request(struct bio *bio)
 			/* Create a fresh bio_list for all subordinate requests */
 			bio_list_on_stack[1] = bio_list_on_stack[0];
 			bio_list_init(&bio_list_on_stack[0]);
-			//È»ºóÕâÀï¾ÍÊÇµ÷ÓÃ¶ÓÁĞÀïµÄÒ»¸öº¯Êı
-			//¿´Ãû×ÖÊÇ¹¹ÔìÇëÇóµÄº¯Êı£¬ÎÒÃÇÓĞÄ¬ÈÏµÄº¯Êı£¬ÎÒÃÇËÑË÷¿´Õâ¸ö±äÁ¿ÔÚÄÄÀï±»ÉèÖÃ
+			/* ç„¶åè¿™é‡Œå°±æ˜¯è°ƒç”¨é˜Ÿåˆ—é‡Œçš„ä¸€ä¸ªå‡½æ•°
+			 * çœ‹åå­—æ˜¯æ„é€ è¯·æ±‚çš„å‡½æ•°ï¼Œæˆ‘ä»¬æœ‰é»˜è®¤çš„å‡½æ•°ï¼Œæˆ‘ä»¬æœç´¢çœ‹è¿™ä¸ªå˜é‡åœ¨å“ªé‡Œè¢«è®¾ç½®
+			 */
 			ret = q->make_request_fn(q, bio);
 
 			blk_queue_exit(q);
@@ -2123,7 +2125,8 @@ blk_qc_t submit_bio(struct bio *bio)
 				count);
 		}
 	}
-//generic_make_request Í¨ÓÃµÄ¹¹ÔìÇëÇó Ê¹ÓÃbioÀ´¹¹ÔìÇëÇó
+
+	/* generic_make_request é€šç”¨çš„æ„é€ è¯·æ±‚ ä½¿ç”¨bioæ¥æ„é€ è¯·æ±‚ */
 	return generic_make_request(bio);
 }
 EXPORT_SYMBOL(submit_bio);
@@ -3158,6 +3161,16 @@ EXPORT_SYMBOL(kblockd_schedule_delayed_work_on);
  *   page belonging to that request that is currently residing in our private
  *   plug. By flushing the pending I/O when the process goes to sleep, we avoid
  *   this kind of deadlock.
+ */
+
+/*
+ * blk_start_plug-åˆå§‹åŒ–blk_plugå¹¶åœ¨task_structä¸­è·Ÿè¸ªå®ƒ
+ * @plugï¼šéœ€è¦åˆå§‹åŒ–çš„&struct blk_plug
+ *
+ * è¯´æ˜:
+ * å¦‚æœä»»åŠ¡æœ€ç»ˆåœ¨blk_start_plugï¼ˆï¼‰å’Œblk_finish_plugä¹‹é—´é˜»å¡ï¼Œåœ¨task_structä¸­è·Ÿè¸ªblk_plugå°†æœ‰åŠ©äºè‡ªåŠ¨åˆ·æ–°æŒ‚èµ·çš„I/O.
+ * ä»æ€§èƒ½çš„è§’åº¦æ¥çœ‹ï¼Œè¿™å¾ˆé‡è¦ï¼Œä½†ä¹Ÿèƒ½ç¡®ä¿æˆ‘ä»¬ä¸ä¼šæ­»é”.
+ * ä¾‹å¦‚ï¼Œå¦‚æœä»»åŠ¡æ­£åœ¨é˜»æ­¢å†…å­˜åˆ†é…ï¼Œé‚£ä¹ˆå†…å­˜å›æ”¶å¯èƒ½æœ€ç»ˆæƒ³è¦é‡Šæ”¾å±äºè¯¥è¯·æ±‚çš„é¡µé¢ï¼Œè¯¥é¡µé¢å½“å‰ä½äºæˆ‘ä»¬çš„privete plug.
  */
 void blk_start_plug(struct blk_plug *plug)
 {

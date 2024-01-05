@@ -1072,9 +1072,29 @@ static inline void blk_set_runtime_active(struct request_queue *q) {}
  * the plug list when the task sleeps by itself. For details, please see
  * schedule() where blk_schedule_flush_plug() is called.
  */
+
+/* blk_plugå…è®¸é€šè¿‡çŸ­æ—¶é—´ä¿å­˜I/Oç‰‡æ®µæ¥æ„å»ºç›¸å…³è¯·æ±‚çš„é˜Ÿåˆ—.
+ * è¿™å…è®¸å°†é¡ºåºè¯·æ±‚åˆå¹¶ä¸ºå•ä¸ªæ›´å¤§çš„è¯·æ±‚.
+ * å½“è¯·æ±‚ä»¥æ‰¹å¤„ç†çš„æ–¹å¼ä»per-task ç§»åŠ¨åˆ°è®¾å¤‡çš„request_queueæ—¶,
+ * è¿™ä¼šå¯¼è‡´å¯æ‰©å±•æ€§çš„æé«˜ï¼Œå› ä¸ºrequest_queueé”çš„é”äº‰ç”¨å‡å°‘äº†.
+ *
+ * å°†è¯·æ±‚æ·»åŠ åˆ°plug list æˆ–å°è¯•åˆå¹¶æ—¶ï¼Œå¯ä»¥ä¸ç¦ç”¨æŠ¢å ,
+ * å› ä¸ºblk_schedule_flush_listï¼ˆï¼‰åªä¼šåœ¨ä»»åŠ¡è‡ªèº«ä¼‘çœ æ—¶åˆ·æ–°æ’å…¥åˆ—è¡¨.
+ * æœ‰å…³è¯¦ç»†ä¿¡æ¯ï¼Œè¯·å‚é˜…scheduleï¼ˆï¼‰ï¼Œå…¶ä¸­è°ƒç”¨blk_schedule_flush_plug().
+ */
+/* blk_plugæ„å»ºäº†ä¸€ä¸ªç¼“å­˜ç¢ç‰‡IOçš„è¯·æ±‚é˜Ÿåˆ—.
+ * ç”¨äºå°†é¡ºåºè¯·æ±‚åˆå¹¶æˆä¸€ä¸ªå¤§çš„è¯·æ±‚.
+ * åˆå¹¶åè¯·æ±‚æ‰¹é‡ä»per-taské“¾è¡¨ç§»åŠ¨åˆ°è®¾å¤‡è¯·æ±‚é˜Ÿåˆ—ï¼Œ
+ * å‡å°‘äº†è®¾å¤‡è¯·æ±‚é˜Ÿåˆ—é”ç«äº‰ï¼Œä»è€Œæé«˜æ•ˆç‡
+ * blk_plugçš„ä½¿ç”¨å¾ˆç®€å•
+ * 1ã€è®¾ç½®è¯¥çº¿ç¨‹å¼€å¯è¯·æ±‚åˆå¹¶æ¨¡å¼ blk_start_plug
+ * 2ã€å…³é—­çº¿ç¨‹è¯·æ±‚åˆå¹¶blk_finish_plug
+*/
 struct blk_plug {
+	/* ç”¨äºç¼“å­˜è¯·æ±‚çš„é˜Ÿåˆ— */
 	struct list_head list; /* requests */
 	struct list_head mq_list; /* blk-mq requests */
+	/* å›è°ƒå‡½æ•°çš„é“¾è¡¨ï¼Œä¸‹å‘è¯·æ±‚æ—¶è°ƒç”¨ */
 	struct list_head cb_list; /* md requires an unplug callback */
 };
 #define BLK_MAX_REQUEST_COUNT 16
@@ -1674,9 +1694,9 @@ struct blk_dax_ctl {
 struct block_device_operations {
 	int (*open) (struct block_device *, fmode_t);
 	void (*release) (struct gendisk *, fmode_t);
-	//Óë×Ö·ûÉè±¸Çı¶¯ÀàËÆ,µ±Éè±¸±»´ò¿ªºÍ¹Ø±ÕÊ±½«µ÷ÓÃËüÃÇ
+	//ä¸å­—ç¬¦è®¾å¤‡é©±åŠ¨ç±»ä¼¼,å½“è®¾å¤‡è¢«æ‰“å¼€å’Œå…³é—­æ—¶å°†è°ƒç”¨å®ƒä»¬
 	int (*rw_page)(struct block_device *, sector_t, struct page *, bool);
-	//ioctl()ÏµÍ³µ÷ÓÃµÄÊµÏÖ,¿éÉè±¸°üº¬´óÁ¿µÄ±ê×¼ÇëÇó,ÕâĞ©±ê×¼ÇëÇóÓÉ Linux ¿éÉè±¸²ã ´¦Àí,Òò´Ë´ó²¿·Ö¿éÉè±¸Çı¶¯µÄ ioctl()º¯ÊıÏàµ±¶Ì¡£
+	//ioctl()ç³»ç»Ÿè°ƒç”¨çš„å®ç°,å—è®¾å¤‡åŒ…å«å¤§é‡çš„æ ‡å‡†è¯·æ±‚,è¿™äº›æ ‡å‡†è¯·æ±‚ç”± Linux å—è®¾å¤‡å±‚ å¤„ç†,å› æ­¤å¤§éƒ¨åˆ†å—è®¾å¤‡é©±åŠ¨çš„ ioctl()å‡½æ•°ç›¸å½“çŸ­
 	int (*ioctl) (struct block_device *, fmode_t, unsigned, unsigned long);
 	int (*compat_ioctl) (struct block_device *, fmode_t, unsigned, unsigned long);
 	long (*direct_access)(struct block_device *, sector_t, void **, pfn_t *,
@@ -1684,17 +1704,19 @@ struct block_device_operations {
 	unsigned int (*check_events) (struct gendisk *disk,
 				      unsigned int clearing);
 	/* ->media_changed() is DEPRECATED, use ->check_events() instead */
-//±»ÄÚºËµ÷ÓÃÀ´¼ì²éÊÇ·ñÇı¶¯Æ÷ÖĞµÄ½éÖÊÒÑ¾­¸Ä±ä,Èç¹ûÊÇ,Ôò·µ»ØÒ»¸ö·Ç 0 Öµ,·ñÔò·µ »Ø 0¡£
-//Õâ¸öº¯Êı½öÊÊÓÃÓÚÖ§³Ö¿ÉÒÆ¶¯½éÖÊµÄÇı¶¯Æ÷,Í¨³£ĞèÒªÔÚÇı¶¯ÖĞÔö¼ÓÒ»¸ö±íÊ¾½é ÖÊ×´Ì¬ÊÇ·ñ¸Ä±äµÄ±êÖ¾±äÁ¿,·Ç¿ÉÒÆ¶¯Éè±¸µÄÇı¶¯²»ĞèÒªÊµÏÖÕâ¸ö·½·¨¡£ struct gendisk ²ÎÊıÊÇÄÚºË±íÊ¾Ò»¸ö´ÅÅÌµÄÊı¾İ½á¹¹¡£
+	//è¢«å†…æ ¸è°ƒç”¨æ¥æ£€æŸ¥æ˜¯å¦é©±åŠ¨å™¨ä¸­çš„ä»‹è´¨å·²ç»æ”¹å˜,å¦‚æœæ˜¯,åˆ™è¿”å›ä¸€ä¸ªé 0 å€¼,å¦åˆ™è¿” å› 0.
+	/* è¿™ä¸ªå‡½æ•°ä»…é€‚ç”¨äºæ”¯æŒå¯ç§»åŠ¨ä»‹è´¨çš„é©±åŠ¨å™¨,é€šå¸¸éœ€è¦åœ¨é©±åŠ¨ä¸­å¢åŠ ä¸€ä¸ªè¡¨ç¤ºä»‹ è´¨çŠ¶æ€æ˜¯å¦æ”¹å˜çš„æ ‡å¿—å˜é‡,éå¯ç§»åŠ¨è®¾å¤‡çš„é©±åŠ¨ä¸éœ€è¦å®ç°è¿™ä¸ªæ–¹æ³•.
+	 * struct gendisk å‚æ•°æ˜¯å†…æ ¸è¡¨ç¤ºä¸€ä¸ªç£ç›˜çš„æ•°æ®ç»“æ„.
+	 */
 	int (*media_changed) (struct gendisk *);
 	void (*unlock_native_capacity) (struct gendisk *);
-//±»µ÷ÓÃÀ´ÏìÓ¦Ò»¸ö½éÖÊ¸Ä±ä,Çı¶¯½øĞĞ±ØÒªµÄ¹¤×÷,Ê¹ĞÂ½éÖÊ×¼±¸ºÃ¿ÉÊ¹ÓÃ¡£Õâ¸öº¯Êı ·µ»ØÒ»¸ö int Öµ, µ«ÊÇÖµ±»ÄÚºËºöÂÔ¡£
+	/* è¢«è°ƒç”¨æ¥å“åº”ä¸€ä¸ªä»‹è´¨æ”¹å˜,é©±åŠ¨è¿›è¡Œå¿…è¦çš„å·¥ä½œ,ä½¿æ–°ä»‹è´¨å‡†å¤‡å¥½å¯ä½¿ç”¨ã€‚è¿™ä¸ªå‡½æ•° è¿”å›ä¸€ä¸ª int å€¼, ä½†æ˜¯å€¼è¢«å†…æ ¸å¿½ç•¥. */
 	int (*revalidate_disk) (struct gendisk *);
-//¸Ãº¯Êı¸ù¾İÇı¶¯Æ÷µÄ¼¸ºÎĞÅÏ¢Ìî³äÒ»¸ö hd_geometry ½á¹¹Ìå,hd_geometry ½á¹¹Ìå°üº¬ ´ÅÍ·¡¢ÉÈÇø¡¢ÖùÃæµÈĞÅÏ¢¡£
+	/* è¯¥å‡½æ•°æ ¹æ®é©±åŠ¨å™¨çš„å‡ ä½•ä¿¡æ¯å¡«å……ä¸€ä¸ª hd_geometry ç»“æ„ä½“,hd_geometry ç»“æ„ä½“åŒ…å« ç£å¤´ã€æ‰‡åŒºã€æŸ±é¢ç­‰ä¿¡æ¯. */
 	int (*getgeo)(struct block_device *, struct hd_geometry *);
 	/* this callback is with swap_lock and sometimes page table lock held */
 	void (*swap_slot_free_notify) (struct block_device *, unsigned long);
-	//Ò»¸öÖ¸ÏòÓµÓĞÕâ¸ö½á¹¹µÄÄ£¿éµÄÖ¸Õë,³£³£±»³õÊ¼»¯Îª THIS_MODULE
+	/* ä¸€ä¸ªæŒ‡å‘æ‹¥æœ‰è¿™ä¸ªç»“æ„çš„æ¨¡å—çš„æŒ‡é’ˆ,å¸¸å¸¸è¢«åˆå§‹åŒ–ä¸º THIS_MODULE */
 	struct module *owner;
 	const struct pr_ops *pr_ops;
 };

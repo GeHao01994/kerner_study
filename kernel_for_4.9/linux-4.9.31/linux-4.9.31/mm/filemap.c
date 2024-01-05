@@ -658,38 +658,45 @@ static int __add_to_page_cache_locked(struct page *page,
 				      pgoff_t offset, gfp_t gfp_mask,
 				      void **shadowp)
 {
+	/* hugetlb的page ? */
 	int huge = PageHuge(page);
 	struct mem_cgroup *memcg;
 	int error;
 
 	VM_BUG_ON_PAGE(!PageLocked(page), page);
+	/* 此页可写入swap分区，一般用于表示此页是非文件页 */
 	VM_BUG_ON_PAGE(PageSwapBacked(page), page);
-
+	/* 如果不是hugetlb的page,让cgroup计数 */
 	if (!huge) {
 		error = mem_cgroup_try_charge(page, current->mm,
 					      gfp_mask, &memcg, false);
 		if (error)
 			return error;
 	}
-
+	/* radix_tree_preload分配了足够的内存,以便后续插入树中不会失败 */
 	error = radix_tree_maybe_preload(gfp_mask & ~__GFP_HIGHMEM);
 	if (error) {
 		if (!huge)
 			mem_cgroup_cancel_charge(page, memcg, false);
 		return error;
 	}
-
+	/* 增加page的引用计数 */
 	get_page(page);
+	/* 设置page的mappign为该mapping(地址空间) */
 	page->mapping = mapping;
+	/* 设置当前page的index */
 	page->index = offset;
 
 	spin_lock_irq(&mapping->tree_lock);
+	/* 把page插入到radix_tree里面去 */
 	error = page_cache_tree_insert(mapping, page, shadowp);
+	/* 因为我们前面radix_tree_maybe_preload 关闭了抢占，所以这里打开抢占 */
 	radix_tree_preload_end();
 	if (unlikely(error))
 		goto err_insert;
 
 	/* hugetlb pages do not participate in page cache accounting. */
+	/*  hugetlb页面不参与page cache 计数 */
 	if (!huge)
 		__inc_node_page_state(page, NR_FILE_PAGES);
 	spin_unlock_irq(&mapping->tree_lock);
@@ -730,7 +737,7 @@ int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 {
 	void *shadow = NULL;
 	int ret;
-
+	/* 先把page给lock起来 */
 	__SetPageLocked(page);
 	ret = __add_to_page_cache_locked(page, mapping, offset,
 					 gfp_mask, &shadow);
@@ -745,10 +752,14 @@ int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 		 * data from the working set, only to cache data that will
 		 * get overwritten with something else, is a waste of memory.
 		 */
+		/* 该页面可能是最近才从缓存中逐出的，在这种情况下，它应该像任何其他重复访问的页面一样变成activated.
+		 * 页面被重写是个例外;从working set 中驱逐其他数据，只是为了缓存将被其他数据覆盖的数据，这是对内存的浪费.
+		 */
 		if (!(gfp_mask & __GFP_WRITE) &&
 		    shadow && workingset_refault(shadow)) {
 			SetPageActive(page);
 			workingset_activation(page);
+			/* 加入不活跃链表 */
 		} else
 			ClearPageActive(page);
 		lru_cache_add(page);
@@ -1738,6 +1749,7 @@ find_page:
 					ra, filp, page,
 					index, last_index - index);
 		}
+		/* 如果Page不是最新的 */
 		if (!PageUptodate(page)) {
 			/*
 			 * See comment in do_read_cache_page on why
@@ -1747,9 +1759,15 @@ find_page:
 			error = wait_on_page_locked_killable(page);
 			if (unlikely(error))
 				goto readpage_error;
+			/* 如果页面是最新的 */
 			if (PageUptodate(page))
 				goto page_ok;
-
+			/* 如果文件逻辑块长度和页面长度相同，
+			 * 或者说地址空间操作表未定义is_partially_uptodate 回调函数
+			 * mapping->a_ops->is_partially_uptodate检查页面中的buffer是否都处于
+			 * update状态,因为块大小不等于页大小，一页可能包含多个块.
+			 * 若是VM读取到所需的块数据，那么就无需等待整个页读取完毕
+			 */
 			if (inode->i_blkbits == PAGE_SHIFT ||
 					!mapping->a_ops->is_partially_uptodate)
 				goto page_not_up_to_date;
