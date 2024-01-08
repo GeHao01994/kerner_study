@@ -1771,14 +1771,25 @@ find_page:
 			if (inode->i_blkbits == PAGE_SHIFT ||
 					!mapping->a_ops->is_partially_uptodate)
 				goto page_not_up_to_date;
-			/* pipes can't handle partially uptodate pages */
+			/* pipes can't handle partially uptodate pages
+			 * 管道无法处理部分最新的页面
+			 */
 			if (unlikely(iter->type & ITER_PIPE))
 				goto page_not_up_to_date;
+			/* is_partially_uptodate 函数调用需要外部对页面加锁,
+			 * 如果尝试加锁失败，跳转到page_not_up_to_date
+			 */
 			if (!trylock_page(page))
 				goto page_not_up_to_date;
 			/* Did it get truncated before we got the lock? */
 			if (!page->mapping)
 				goto page_not_up_to_date_locked;
+			/* mapping->a_ops->is_partially_uptodate检查页面中的buffer是否都处于
+			 * update状态,因为块大小不等于页大小，一页可能包含多个块.
+			 * 若是VM读取到所需的块数据，那么就无需等待整个页读取完毕
+			 * 如果is_partially_uptodate回调函数返回0，说明页面不是最新的
+			 * 那么就调转到page_not_up_to_date_locked
+			 */
 			if (!mapping->a_ops->is_partially_uptodate(page,
 							offset, iter->count))
 				goto page_not_up_to_date_locked;
@@ -1793,16 +1804,28 @@ page_ok:
 		 * part of the page is not copied back to userspace (unless
 		 * another truncate extends the file - this is desired though).
 		 */
-
+		/*
+		 * 在我们知道页面是最新的之后，必须检查i_size.
+		 *
+		 * 在检查允许我们去计算“nr”的正确值,这意味着页面的零填充部分不会复制回用户空间
+		 * (除非另一个截断扩展了文件-这是需要的).
+		 */
+		/* 获取文件的大小 */
 		isize = i_size_read(inode);
+		/* 获取文件的end_index */
 		end_index = (isize - 1) >> PAGE_SHIFT;
+		/* 如果isize为0,请求的index大于end_index，那么就直接退出了 */
 		if (unlikely(!isize || index > end_index)) {
+			/* page引用计数 -1 */
 			put_page(page);
 			goto out;
 		}
 
-		/* nr is the maximum number of bytes to copy from this page */
+		/* nr is the maximum number of bytes to copy from this page
+		 * nr是要从此页面复制的最大字节数
+		 */
 		nr = PAGE_SIZE;
+		/* 需要考虑最后一个页面，如果文件长度不是页面对齐 */
 		if (index == end_index) {
 			nr = ((isize - 1) & ~PAGE_MASK) + 1;
 			if (nr <= offset) {
@@ -1810,11 +1833,23 @@ page_ok:
 				goto out;
 			}
 		}
+		/* offset为要读取的第一个字节在所属页面中的偏移
+		 * 那nr - offser 得到我们最终要拷贝到用户空间的字节数
+		 */
 		nr = nr - offset;
 
 		/* If users can be writing to this page using arbitrary
 		 * virtual addresses, take care about potential aliasing
 		 * before reading the page on the kernel side.
+		 *
+		 * 如果用户可以使用任意虚拟地址对此页面进行写入，
+		 * 那么在读取内核端的页面之前，请注意潜在的混叠。
+		 *
+		 */
+
+		/* 也就是说如果用户使用不正常的虚拟地址写这个页，
+		 * 要flush_dcache_page,将dcache相应的page里的数据
+		 * 写到memory里面去，以保证dcache内的数据与memory内的数据的一致性
 		 */
 		if (mapping_writably_mapped(mapping))
 			flush_dcache_page(page);
@@ -1823,23 +1858,51 @@ page_ok:
 		 * When a sequential read accesses a page several times,
 		 * only mark it as accessed the first time.
 		 */
+		/*
+		 *
+		 * mark_page_accessed函数设置PG_reference或PG_active标志
+		 * 它表明页面当前正在被使用，不应该被缓存.
+		 * 如果同一个页面(或者页面的一部分)在连续执行do_generic_file_read时
+		 * 被多次读取，这一步只在第一次读取时做
+		 */
 		if (prev_index != index || offset != prev_offset)
 			mark_page_accessed(page);
+		/* 将prev_index赋值为我们现在访问的index */
 		prev_index = index;
 
 		/*
 		 * Ok, we have the page, and it's up-to-date, so
 		 * now we can copy it to user space...
 		 */
-
+		/* OK，我们有这个页面，它是最新的，
+		 * 所以现在我们可以将它复制到用户空间...
+		 */
 		ret = copy_page_to_iter(page, offset, nr, iter);
+
+		/* 根据有效传输到用户空间缓冲区的字节数修改局部变量index和offset.
+		 * 通常情况下，如果页面的最有一个字节被复制到用户空间缓冲区,index
+		 * 递增1，offset被设置为0;
+		 * 否则index不变，而offset增加页面中已经复制到用户空间缓冲区的字节数
+		 */
+
+		/* 把offet加上ret,也就是我们复制给用户空间的字节数 */
 		offset += ret;
+		/* 更新我们的index */
 		index += offset >> PAGE_SHIFT;
+		/* 更新我们的prev_offset */
 		offset &= ~PAGE_MASK;
 		prev_offset = offset;
-
+		/* 引用技术-1，如果为0的话就释放这个页面 */
 		put_page(page);
+		/* 更新已写会给用户空间的数据 */
 		written += ret;
+		/*
+		 * 如果本次内容全部复制到用户空间，并且还有更多的数据需要复制,
+		 * 则继续循环; 否则退出.
+		 *
+		 */
+
+		/* i->count == 0，out */
 		if (!iov_iter_count(iter))
 			goto out;
 		if (ret < nr) {
@@ -1847,7 +1910,10 @@ page_ok:
 			goto out;
 		}
 		continue;
-
+		/* 标号为page_not_up_to_data的代码段获取对页面的互斥访问
+		 * 具体是，在第1083行调用lock_page_killable函数获取对页面的互斥锁.
+		 * 如果PG_locked标志已经设置，lock_page挂起当前进程，知道在这个位被清除
+		 */
 page_not_up_to_date:
 		/* Get exclusive access to the page ... */
 		error = lock_page_killable(page);
@@ -1856,6 +1922,11 @@ page_not_up_to_date:
 
 page_not_up_to_date_locked:
 		/* Did it get truncated before we got the lock? */
+		/* 另一个进程可能就在前一步之前已经从页面缓存中删除了
+		 * 这个页面;因此，它检查是否页面描述符的mapping域已经为NULL;
+		 * 如果是，调用unlock_page解锁页面，递减其使用计数，继续循环，
+		 * 在同一个页面上处理.
+		 */
 		if (!page->mapping) {
 			unlock_page(page);
 			put_page(page);
@@ -1863,6 +1934,12 @@ page_not_up_to_date_locked:
 		}
 
 		/* Did somebody else fill it already? */
+		/* 在获取锁的过程中，其他进程已经填充了这个页面.
+		 * 在此检查PG_uptodate标志，因为另一个内核控制路径可能已经
+		 * 成功读入数据，设置页面为已更新
+		 * 如果标志被设置，它调用unlock_page，跳转到page_ok处，
+		 * 跳过读操作，直接进行复制到用户空间的处理
+		 */
 		if (PageUptodate(page)) {
 			unlock_page(page);
 			goto page_ok;
@@ -1876,6 +1953,9 @@ readpage:
 		 */
 		ClearPageError(page);
 		/* Start the actual read. The read will unlock the page. */
+		/* 调用文件的地址空间操作表上的readpage函数.
+		 * 对应的函数负责激活从磁盘到页面的I/O数据传输
+		 */
 		error = mapping->a_ops->readpage(filp, page);
 
 		if (unlikely(error)) {
@@ -1886,11 +1966,25 @@ readpage:
 			}
 			goto readpage_error;
 		}
-
+		/* 如果判断页面未更新，则调用lock_page_killable再次试图获得对页面的互斥锁,
+		 * 但因为页面已经被前一次的lock_page_killable已经被锁住，这时该进程进入等待，
+		 * 直到数据被读入后，页面设置为已更新，并被解锁(参见end_buffer_asyne_read和do_mpage_readpage函数).
+		 * 解锁页面调用unlock_page函数，它将从等待该页面解锁的队列上唤醒一个线程.
+		 * 我们没办法确保本次唤醒的是这个线程，因为有可能有别的线程因为读取该页面也由于
+		 * 试图要锁住页面而在第1083行等待，但是即使唤醒的是那个线程，它会发现页面已更新，很快也会调用unlock_page解锁页面，
+		 * 因而在此唤醒队列上的一个等待线程
+		 */
 		if (!PageUptodate(page)) {
 			error = lock_page_killable(page);
 			if (unlikely(error))
 				goto readpage_error;
+			/* 如果不幸，在再次获得页面的锁之后，发现页面依然不是最新状态.
+			 * 有两种可能，一种是在等待锁的过程中另一个进程已经从页面缓存中
+			 * 删除这个页面，这时页面描述符的mapping域应该为NULL.
+			 * 这时调用unlock_page解锁页面，递减其使用计数，继续循环，在同一个页面上处理
+			 * 另外一种可能就是从磁盘上读取数据失败，然后只能解锁该页面，然后缩减预读大小，设置错误码,
+			 * 跳转到标号readpage_error进行处理.
+			 */
 			if (!PageUptodate(page)) {
 				if (page->mapping == NULL) {
 					/*
@@ -1920,11 +2014,16 @@ no_cached_page:
 		 * Ok, it wasn't cached, so we need to create a new
 		 * page..
 		 */
+		/* 这个页面还没有被缓存，需要我们创建一个新的页面 */
 		page = page_cache_alloc_cold(mapping);
 		if (!page) {
 			error = -ENOMEM;
 			goto out;
 		}
+		/* 调用add_to_page_cache_lru将页面添加到地址空间
+		 * 如果这个过程中出现错误，记录错误码，退出循环.
+		 * 如果成功，则跳转到readpage标号处，这会从磁盘上读取数据到这个页面
+		 */
 		error = add_to_page_cache_lru(page, mapping, index,
 				mapping_gfp_constraint(mapping, GFP_KERNEL));
 		if (error) {
@@ -1939,6 +2038,9 @@ no_cached_page:
 	}
 
 out:
+	/* 退出循环后，除了设置一些预读状态的更新，最主要的是修改文件偏移量,
+	 * 作为参数传递回调用者以及调用更新文件的访问时间
+	 */
 	ra->prev_pos = prev_index;
 	ra->prev_pos <<= PAGE_SHIFT;
 	ra->prev_pos |= prev_offset;

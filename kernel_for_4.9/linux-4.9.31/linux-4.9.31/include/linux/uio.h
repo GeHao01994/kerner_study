@@ -43,7 +43,7 @@ struct iov_iter {
 	union {
 		/* 结构与kvec一致，描述用户态的一段空间 */
 		const struct iovec *iov;
-		/* 述内核态的一段空间 */
+		/* 描述内核态的一段空间 */
 		const struct kvec *kvec;
 		/* 描述一个内存页中的一段空间 */
 		const struct bio_vec *bvec;

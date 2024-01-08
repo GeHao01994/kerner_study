@@ -134,51 +134,79 @@ static size_t copy_page_to_iter_iovec(struct page *page, size_t offset, size_t b
 	const struct iovec *iov;
 	char __user *buf;
 	void *kaddr, *from;
-
+	/* 如果要拷贝到用户空间的大小大于iov_iter的数据大小
+	 * 那么更新掉
+	 */
 	if (unlikely(bytes > i->count))
 		bytes = i->count;
-
+	/* 如果要拷贝到用户空间的大小等于0，那么返回 */
 	if (unlikely(!bytes))
 		return 0;
-
+	/* 将wanted赋值成要拷贝到用户空间的字节数 */
 	wanted = bytes;
+	/* 获得iov */
 	iov = i->iov;
+	/* 第一个iovec中，数据起始偏移
+	 * 多个数据块是存放在一个指针数组的，数组的一个元素指向一个数据块，
+	 * 而iov_offset就是数组第一个元素指向的数据块中的偏移.
+	 */
 	skip = i->iov_offset;
+	/* buf就是要开始复制的地方 */
 	buf = iov->iov_base + skip;
 	copy = min(bytes, iov->iov_len - skip);
-
+	/* 如果空间处于高端内存，则调用kmap_atomic建立内核持久映射 */
 	if (IS_ENABLED(CONFIG_HIGHMEM) && !fault_in_pages_writeable(buf, copy)) {
 		kaddr = kmap_atomic(page);
 		from = kaddr + offset;
 
 		/* first chunk, usually the only one */
+		/* 将数据拷贝到用户空间，注意此时进程可能会被阻塞，因为访问用户空间时
+		 * 发生页面错误
+		 */
 		left = __copy_to_user_inatomic(buf, from, copy);
+		/* copy是要赋值给用户空间的值 */
 		copy -= left;
+		/* skip是数据起始的偏移 */
 		skip += copy;
+		/* from是拷贝的内核地址空间的地址 */
 		from += copy;
+		/* bytes是要要拷贝到用户空间的字节数 */
 		bytes -= copy;
-
+		/* 如果说left != 0,且还有字节数要拷贝 */
 		while (unlikely(!left && bytes)) {
+			/* 切到下一个iov */
 			iov++;
+			/* 获得iov中的用户空间的地址 */
 			buf = iov->iov_base;
+			/* 获得其需要拷贝的大小 */
 			copy = min(bytes, iov->iov_len);
+			/* 将数据拷贝到用户空间，注意此时进程可能会被阻塞，因为访问用户空间时
+			 * 发生页面错误
+			 */
 			left = __copy_to_user_inatomic(buf, from, copy);
 			copy -= left;
 			skip = copy;
 			from += copy;
 			bytes -= copy;
 		}
+		/* 如果说已经拷贝完了，那么退出吧 */
 		if (likely(!bytes)) {
+			/* 调用kunmap()解除地址映射 */
 			kunmap_atomic(kaddr);
 			goto done;
 		}
+		/* 到这说明上面__copy_to_user_inatomic失败了 */
+		/* 这个offset实际上就是我们偏移量,因为你是部分失败，所以这里记录一下 */
 		offset = from - kaddr;
+		/* buf也要加上copy */
 		buf += copy;
+		/* 调用kunmap()解除地址映射 */
 		kunmap_atomic(kaddr);
+		/* 算出还要拷贝的字节数 */
 		copy = min(bytes, iov->iov_len - skip);
 	}
 	/* Too bad - revert to non-atomic kmap */
-
+	/* 这就是说在no-atimic kmap下做这件事 */
 	kaddr = kmap(page);
 	from = kaddr + offset;
 	left = __copy_to_user(buf, from, copy);
@@ -199,6 +227,9 @@ static size_t copy_page_to_iter_iovec(struct page *page, size_t offset, size_t b
 	kunmap(page);
 
 done:
+	/* 如果skip刚好等于，说明这次iov已经完成了
+	 * 让他进下一个iov
+	 */
 	if (skip == iov->iov_len) {
 		iov++;
 		skip = 0;
@@ -591,14 +622,21 @@ EXPORT_SYMBOL(copy_from_iter_nocache);
 size_t copy_page_to_iter(struct page *page, size_t offset, size_t bytes,
 			 struct iov_iter *i)
 {
+	/* 如果iov_iter是ITER_BVEC(描述一个内存页中的一段空间)
+	 * 或ITER_KVEC(描述内核态的一段空间)
+	 * 进入copy_to_iter
+	 */
 	if (i->type & (ITER_BVEC|ITER_KVEC)) {
 		void *kaddr = kmap_atomic(page);
 		size_t wanted = copy_to_iter(kaddr + offset, bytes, i);
 		kunmap_atomic(kaddr);
 		return wanted;
+	/* 这里就是我们常用的iovec(用户态的一段空间)
+	 * 那么就调用copy_page_to_iter_iovec
+	 */
 	} else if (likely(!(i->type & ITER_PIPE)))
 		return copy_page_to_iter_iovec(page, offset, bytes, i);
-	else
+	else	/* 这里就是pipe的情况 */
 		return copy_page_to_iter_pipe(page, offset, bytes, i);
 }
 EXPORT_SYMBOL(copy_page_to_iter);
