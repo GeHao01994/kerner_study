@@ -17,27 +17,43 @@
 #ifdef CONFIG_BLOCK
 
 enum bh_state_bits {
+	/* 缓冲区包含有效数据时被置位 */
 	BH_Uptodate,	/* Contains valid data */
+	/* 如果缓冲区脏就置位（表示缓冲区中的数据必须写回块设备) */
 	BH_Dirty,	/* Is dirty */
+	/* 如果缓冲区加锁就置位，通常发生在缓冲区进行磁盘传输时 */
 	BH_Lock,	/* Is locked */
+	/* 如果已经为初始化缓冲区而请求数据传输就置位 */
 	BH_Req,		/* Has been submitted for I/O */
+	/* 由页面中的第一个bh使用，以串行化页面中其他缓冲的IO完成 */
 	BH_Uptodate_Lock,/* Used by the first bh in a page, to serialise
 			  * IO completion of other buffers in the page
 			  */
-
+	/* 如果缓冲区被映射到磁盘就置位，即：如果相应的缓冲区首部的b_bdev和b_blocknr是有效的就置位 */
 	BH_Mapped,	/* Has a disk mapping */
+	/* 如果相应的块刚被分配而还没有被访问过就置位 */
 	BH_New,		/* Disk mapping was newly created by get_block */
+	/* 如果在异步地读缓冲区就置位 */
 	BH_Async_Read,	/* Is under end_buffer_async_read I/O */
+	/* 如果在异步地写缓冲区就置位 */
 	BH_Async_Write,	/* Is under end_buffer_async_write I/O */
+	/* 如果还没有在磁盘上分配缓冲区就置位 */
 	BH_Delay,	/* Buffer is not yet allocated on disk */
+	/* 如果两个相邻的块在其中一个提交之后不再相邻就置位 */
 	BH_Boundary,	/* Block is followed by a discontiguity */
+	/* 如果写块时出现I/O错误就置位 */
 	BH_Write_EIO,	/* I/O error on write */
+	/* 缓冲区已分配到磁盘上，但未写入 */
 	BH_Unwritten,	/* Buffer is allocated on disk but not written */
+	/* 缓冲区错误提示保持安静 */
 	BH_Quiet,	/* Buffer Error Prinks to be quiet */
+	/* 缓冲区包含元数据 */
 	BH_Meta,	/* Buffer contains metadata */
+	/* 缓冲区应与REQ_PRIO一起提交 */
 	BH_Prio,	/* Buffer should be submitted with REQ_PRIO */
+	/* 将AIO完成延迟到工作队列 */
 	BH_Defer_Completion, /* Defer AIO completion to workqueue */
-
+	/* 不是状态位，而是可供其他entities进行私有分配的第一个有效位 */
 	BH_PrivateStart,/* not a state bit, but the first bit available
 			 * for private allocation by other entities
 			 */
@@ -59,21 +75,48 @@ typedef void (bh_end_io_t)(struct buffer_head *bh, int uptodate);
  * a page (via a page_mapping) and for wrapping bio submission
  * for backward compatibility reasons (e.g. submit_bh).
  */
+/*
+ * 所谓缓冲页面，是指将页面划分为一个个的缓冲块(Buffer Block,也称作为块缓冲区，Block Buffer)，
+ * 以缓冲块为单位进行I/O.管理缓冲块的数据结构为buffer_head，被称作为缓冲头.
+ * 历史上,buffer_head不仅被用来映射页面中的单个块,同时也是从文件系统到块层的I/O单元.
+ * 如今，I/O的基本单元已经换成bio，而buffer_heads仅被用于提取块映射(通过get_block_t调用)、跟踪页面的状态(通过page_mapping)
+ * 以及用于封装bio提交以向后兼容（例如submit_bh).
+ */
+
+/* 当一个页面用作缓冲页面，所有和它的块缓冲区相关的缓冲头组成一个循环单链表.
+ * 缓冲页面描述符的private域指向页面第一个块的缓冲头;
+ * 每个缓冲头的b_this_page域是指向链表中的下一个缓冲头的指针.
+ * 此外，每个缓冲头在b_page域中保存了缓冲页面描述符的地址.
+ * 如果页面在高端内存，那么b_data域保存了块缓冲区本身的偏移.
+ */
 struct buffer_head {
+	/* 缓冲区状态位图 */
 	unsigned long b_state;		/* buffer state bitmap (see above) */
+	/* 指向所属缓冲页面的缓冲头链表中下一个元素的指针 */
 	struct buffer_head *b_this_page;/* circular list of page's buffers */
+	/* 指向存放这个逻辑块的缓冲页面的指针 */
 	struct page *b_page;		/* the page this bh is mapped to */
-
+	/* 在块设备上的逻辑块编号 */
 	sector_t b_blocknr;		/* start block number */
+	/* 逻辑块缓冲区的长度 */
 	size_t b_size;			/* size of mapping */
+	/* 逻辑块在缓冲页面中存放的位置
+	 * bh->b_data应该是这个bh在内存中的位置，如果是高端页面就记录偏移
+	 * 如果是NORMAL，即可获得其虚拟地址
+	 */
 	char *b_data;			/* pointer to data within the page */
-
+	/* 指向块设备描述符的指针 */
 	struct block_device *b_bdev;
+	/* I/O 完成方法 */
 	bh_end_io_t *b_end_io;		/* I/O completion */
+	/* I/O 完成方法的参数 */
  	void *b_private;		/* reserved for b_end_io */
+	/* 链入到所关联地址空间的私有链表的连接件 */
 	struct list_head b_assoc_buffers; /* associated with another mapping */
+	/* 这个缓冲区所关联到的地址空间映射.例如为文件的中间记录块分配的缓冲头被关联到文件的地址空间 */
 	struct address_space *b_assoc_map;	/* mapping this buffer is
 						   associated with */
+	/* 引用计数器 */
 	atomic_t b_count;		/* users using this buffer_head */
 };
 

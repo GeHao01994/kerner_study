@@ -254,6 +254,11 @@ out:
 /*
  * Kick the writeback threads then try to free up some ZONE_NORMAL memory.
  */
+
+/* 该函数首先调用wakeup_bdflush( )唤醒pdflush内核线程触发写操作,从磁盘页面缓冲中写1024个dirty页面到磁盘上以释放包含缓冲、缓冲头和VFS的数据结构所占用的页表;
+ * 然后进行系统调用sched_yield( )，以使pdflush线程能够有机会运行;
+ * 最后该函数循环遍历系统节点,对每个节点上的低内存区(ZONE_DMA 和 ZONE_NORMAL)调用try_to_free_pages( )函数.
+ */
 static void free_more_memory(void)
 {
 	struct zoneref *z;
@@ -403,6 +408,19 @@ EXPORT_SYMBOL(end_buffer_async_write);
  *
  * PageLocked prevents anyone from starting writeback of a page which is
  * under read I/O (PageWriteback is only ever set against a locked page).
+ *
+ * 如果页面的缓冲区处于异步读入(end_buffer_async_read completion),
+ * 则另一个控制线程可能会在缓冲区完成后锁定其中一个缓冲区,但其他一些缓冲区尚未完成.
+ * 这个锁定的缓冲区会将end_buffer_async_read()混淆为不解锁页面.
+ * 因此，缺少BH_Async_Read()会告诉end_buffer_async_read(),该缓冲区不在异步I/O下。
+ *
+ * 当页面没有锁定的buffer_async缓冲区时，页面将解锁。
+ *
+ * PageLocked阻止任何启动新异步I/O的人读取任何缓冲区。
+ *
+ * PageWriteback用于防止对同一页同时进行写操作。
+ *
+ * PageLocked防止任何人开始对处于读I/O状态的页面进行写回（PageWriteback只针对锁定的页面设置）。
  */
 static void mark_buffer_async_read(struct buffer_head *bh)
 {
@@ -861,6 +879,12 @@ int remove_inode_buffers(struct inode *inode)
  *
  * The retry flag is used to differentiate async IO (paging, swapping)
  * which may not fail from ordinary buffer allocations.
+ *
+ * 当给定数据区域的页面和每个缓冲区的大小时，创建适当的缓冲区..
+ * 使用bh->b_this_page链接列表跟随创建的缓冲区.
+ * 如果无法创建更多缓冲区，则返回NULL.
+ *
+ * retry 标志用于区分可能不会失败的异步IO(分页、交换)和普通缓冲区分配.
  */
 struct buffer_head *alloc_page_buffers(struct page *page, unsigned long size,
 		int retry)
@@ -871,15 +895,25 @@ struct buffer_head *alloc_page_buffers(struct page *page, unsigned long size,
 try_again:
 	head = NULL;
 	offset = PAGE_SIZE;
+	/* 开始划分buffer_head了
+	 * 这里这里是从最后一个往前循坏的
+	 * 也就是最后一个的b_this_page = NULL
+	 * 然后在分配倒数第二个，b_this_page = 倒数第一个
+	 * 这样玩的
+	 */
 	while ((offset -= size) >= 0) {
 		bh = alloc_buffer_head(GFP_NOFS);
 		if (!bh)
 			goto no_grow;
-
+		/* 指向所属缓冲页面的缓冲头链表中下一个元素的指针
+		 * 最后一个指向的是NULL,
+		 * 然后倒数第二个指向最后一个
+		 */
 		bh->b_this_page = head;
+		/* 在块设备上的逻辑块编号先初始化为 -1 */
 		bh->b_blocknr = -1;
 		head = bh;
-
+		/* 设置bh的逻辑块缓冲区的长度 */
 		bh->b_size = size;
 
 		/* Link the buffer to its page */
@@ -888,8 +922,11 @@ try_again:
 	return head;
 /*
  * In case anything failed, we just free everything we got.
+ *
+ * 万一有什么事情失败了，我们就把所有的东西都解放出来.
  */
 no_grow:
+	/* 释放掉我们刚刚分配的所有的buffer_head内存 */
 	if (head) {
 		do {
 			bh = head;
@@ -903,6 +940,9 @@ no_grow:
 	 * are not allowed to fail, so we have to wait until buffer heads
 	 * become available.  But we don't want tasks sleeping with 
 	 * partially complete buffers, so all were released above.
+	 *
+	 * 非异步IO请求返回失败. 异步IO请求不允许失败，所以我们必须等待缓冲区头可用.
+	 * 但我们不希望任务在缓冲区部分完成的情况下睡眠
 	 */
 	if (!retry)
 		return NULL;
@@ -912,6 +952,10 @@ no_grow:
 	 * finishing IO.  Since this is an async request and
 	 * the reserve list is empty, we're sure there are 
 	 * async buffer heads in use.
+	 */
+	/* 我们的内存真的很低了
+	 * 现在我们只需要等待旧的缓冲头由于完成IO而释放.
+	 * 由于这是一个异步请求，并且保留列表为空，我们确信有异步缓冲头在使用.
 	 */
 	free_more_memory();
 	goto try_again;
@@ -1464,11 +1508,18 @@ EXPORT_SYMBOL_GPL(invalidate_bh_lrus);
 void set_bh_page(struct buffer_head *bh,
 		struct page *page, unsigned long offset)
 {
+	/* b_page 指向存放这个逻辑块的缓冲页面的指针 */
 	bh->b_page = page;
+	/* 如果offset >= PAGE_SIZE,说明出大问题了 */
 	BUG_ON(offset >= PAGE_SIZE);
+	/* 如果是高端内存 */
 	if (PageHighMem(page))
 		/*
 		 * This catches illegal uses and preserves the offset:
+		 * 这会捕获非法使用并保留偏移
+		 */
+		/* bh->b_data应该是这个bh在内存中的位置，如果是高端页面就记录偏移
+		 * 如果是NORMAL，即可获得其虚拟地址
 		 */
 		bh->b_data = (char *)(0 + offset);
 	else
@@ -1580,16 +1631,28 @@ void create_empty_buffers(struct page *page,
 	struct buffer_head *bh, *head, *tail;
 
 	head = alloc_page_buffers(page, blocksize, 1);
+	/* 返回出来就是这个buffer_head的头了 */
 	bh = head;
+	/* 循环设置bh->b_state */
 	do {
 		bh->b_state |= b_state;
 		tail = bh;
 		bh = bh->b_this_page;
 	} while (bh);
+	/* 所以这是个双向循环链表? */
 	tail->b_this_page = head;
 
 	spin_lock(&page->mapping->private_lock);
+	/* 如果page是最新的或者page是drity的 */
 	if (PageUptodate(page) || PageDirty(page)) {
+		/* 循环设置buffer_head的state
+		 *
+		 * static inline void set_buffer_##name(struct buffer_head *bh)
+		 * {
+		 *	set_bit(BH_##bit, &(bh)->b_state);
+		 * }
+		 *
+		 */
 		bh = head;
 		do {
 			if (PageDirty(page))
@@ -1599,6 +1662,16 @@ void create_empty_buffers(struct page *page,
 			bh = bh->b_this_page;
 		} while (bh != head);
 	}
+	/*
+	 * 这里就是attached到page的private域
+	 * static inline void attach_page_buffers(struct page *page,
+	 *	struct buffer_head *head)
+	 * {
+	 * 	get_page(page);
+	 * 	SetPagePrivate(page);
+	 * 	set_page_private(page, (unsigned long)head);
+	 * }
+	 */
 	attach_page_buffers(page, head);
 	spin_unlock(&page->mapping->private_lock);
 }
@@ -1644,6 +1717,12 @@ EXPORT_SYMBOL(unmap_underlying_metadata);
  * constraints in mind (relevant mostly if some
  * architecture has a slow bit-scan instruction)
  */
+
+/* size是512..PAGE_SIZE 范围内的二次方，我们最关心的情况是PAGE_SIZE
+ *
+ * 因此，这可能是在考虑到这些限制的情况下编写的（如果某些体系结构具有慢速位扫描指令，则主要相关)
+ *
+ */
 static inline int block_size_bits(unsigned int blocksize)
 {
 	return ilog2(blocksize);
@@ -1652,7 +1731,11 @@ static inline int block_size_bits(unsigned int blocksize)
 static struct buffer_head *create_page_buffers(struct page *page, struct inode *inode, unsigned int b_state)
 {
 	BUG_ON(!PageLocked(page));
-
+	/* 因为基于缓冲页面构造I/O请求，函数首先判断这个页面是否被划分成一个个的缓冲区,
+	 * 这通过检查页面描述符的标志(是否将PG_private置位)来定.
+	 * 如果没有，调用create_empty_buffer创建，注意缓冲区的长度为块长度，也就是每个缓冲区
+	 * 对应一个逻辑块，其内容从磁盘上的相应磁盘块获得
+	 */
 	if (!page_has_buffers(page))
 		create_empty_buffers(page, 1 << ACCESS_ONCE(inode->i_blkbits), b_state);
 	return page_buffers(page);
@@ -1710,18 +1793,35 @@ int __block_write_full_page(struct inode *inode, struct page *page,
 	 *
 	 * Buffers outside i_size may be dirtied by __set_page_dirty_buffers;
 	 * handle that here by just cleaning them.
+	 *
+	 * 要非常小心. 我们不排除__set_page_dirty_buffers,
+	 * 并且(可能未映射的)缓冲区随时可能变脏.
+	 * 如果缓冲区在我们检查后变脏，那么我们就忽略了这一事实，页面就会变脏.
+	 *
+	 * i_size之外的缓冲区可能会被__set_page_dirty_Buffers弄脏;
+	 *
 	 */
 
 	bh = head;
+	/* 获得blocksize,即块大小 */
 	blocksize = bh->b_size;
+	/* 获得块大小是2的多少次幂 */
 	bbits = block_size_bits(blocksize);
-
+	/* block是页面的第一个逻辑块的编号 */
 	block = (sector_t)page->index << (PAGE_SHIFT - bbits);
+	/* last_block是文件的最后一个逻辑块的编号 */
 	last_block = (i_size_read(inode) - 1) >> bbits;
 
 	/*
 	 * Get all the dirty buffers mapped to disk addresses and
 	 * handle any aliases from the underlying blockdev's mapping.
+	 *
+	 * 获取映射到磁盘地址的所有脏缓冲区，并处理底层blockdev映射中的任何aliases.
+	 */
+
+	/* 有了前面的准备，接下来就是对页面的每个缓冲区进行循环处理了
+	 * 循环是从页面描述符的private指向的第一个缓冲区开始,顺着每个缓冲区的b_this_page域,
+	 * 直到处理完页面最后一个缓冲区
 	 */
 	do {
 		if (block > last_block) {
@@ -1731,10 +1831,23 @@ int __block_write_full_page(struct inode *inode, struct page *page,
 			 * truncate in progress.
 			 */
 			/*
-			 * The buffer was zeroed by block_write_full_page()
+			 * 将出现i_size之外的映射缓冲区，因为进行截断时此页可能在i_size之外.
 			 */
+			/*
+			 * The buffer was zeroed by block_write_full_page()
+			 *
+			 * block_write_full_page（）将缓冲区归零
+			 */
+			/* 清除这个buffer_head的drity标志 */
 			clear_buffer_dirty(bh);
+			/* 设置这个buffer_head是最新的 */
 			set_buffer_uptodate(bh);
+			/* 如果缓存区没有映射.有两种可能,要么我们以前没有执行过映射的操作,
+			 * 要么这个位置正好是“文件空洞”.我们可以调用get_block尝试映射以进一步
+			 * 区分,当然前提是逻辑块的编号不能超出文件最后一个逻辑块的编号.
+			 * 如果是“空洞”,当前逻辑块已超出文件最大长度,那么将缓冲区的内容清0,
+			 * 将它标记为最新.
+			 */
 		} else if ((!buffer_mapped(bh) || buffer_delay(bh)) &&
 			   buffer_dirty(bh)) {
 			WARN_ON(bh->b_size != blocksize);
@@ -2233,34 +2346,64 @@ EXPORT_SYMBOL(block_is_partially_uptodate);
  * Reads the page asynchronously --- the unlock_buffer() and
  * set/clear_buffer_uptodate() functions propagate buffer state into the
  * page struct once IO has completed.
+ *
+ * 通常对于块设备的“read page”函数有正常的get_block功能.
+ * 这是大多数块设备文件系统.
+ * 异步读取页面——一旦IO完成，unlock_buffer() 和 set/clear_buffer_uptodate()函数将缓冲区状态传播到页面结构中.
+ */
+
+/* block_read_full_page 有两个参数:
+ * 第一个为指向页面描述符的指针，其索引值确定了页面在地址空间的逻辑位置，也就是要读取数据的文件逻辑块编号;
+ * 第二个为将文件逻辑块编号映射为磁盘块编号的回调函数，这特定于具体的文件系统类型.
  */
 int block_read_full_page(struct page *page, get_block_t *get_block)
 {
 	struct inode *inode = page->mapping->host;
+	/* iblock为当前正在处理的逻辑块编号;
+	 * lblock为文件最后一个逻辑块的编号;
+	 */
 	sector_t iblock, lblock;
 	struct buffer_head *bh, *head, *arr[MAX_BUF_PER_PAGE];
+	/* blocksize，字面意思为块长度，它即代表文件系统的磁盘块长度,同时又是文件系统的逻辑块长度 */
 	unsigned int blocksize, bbits;
 	int nr, i;
 	int fully_mapped = 1;
 
 	head = create_page_buffers(page, inode, 0);
+	/* 获得块大小 */
 	blocksize = head->b_size;
+	/* 算出blocksize是2的多少次幂 */
 	bbits = block_size_bits(blocksize);
-
+	/* iblock初始化为页面的第一个逻辑块的编号 */
 	iblock = (sector_t)page->index << (PAGE_SHIFT - bbits);
+	/* 计算文件的最后一个文件逻辑块编号 */
 	lblock = (i_size_read(inode)+blocksize-1) >> bbits;
 	bh = head;
 	nr = 0;
 	i = 0;
-
+	/* 有了前面的准备，接下来就是对页面的每个缓冲区进行循环处理.
+	 * 循环是从页面描述符的private指向的第一个缓冲区开始,顺着每个缓冲区的b_this_page域,
+	 * 直到处理完页面最后一个缓冲区,每处理完一个缓冲区，当前逻辑块编号+1
+	 */
 	do {
+		/* 如果缓冲区的状态已经为最新，则跳过之,实际上我们处理的目标就是让该页面的
+		 * 所有缓冲区的状态都为最新
+		 */
 		if (buffer_uptodate(bh))
 			continue;
-
+		/* 如果缓冲区没有映射.
+		 * 这又有两种可能，或者我们以前没有执行过映射的操作,或者这个位置正好是“文件空洞”.
+		 * 我们可以调用get_block尝试映射以进一步区分,当前前提是逻辑块的编号不能超出文件
+		 * 最后一个逻辑块的编号.
+		 * 如果是“空洞”,当逻辑块已经超出文件最大长度,那么将缓冲区的内容清零,将它标记为最新;
+		 * 如果缓冲区最终被映射到某个磁盘块,则将它的指针记录在arr数组中,表明需要根据
+		 * 磁盘块内容填充之
+		 */
 		if (!buffer_mapped(bh)) {
 			int err = 0;
 
 			fully_mapped = 0;
+			/* iblock 如果小于文件的最后一个文件逻辑块编号 */
 			if (iblock < lblock) {
 				WARN_ON(bh->b_size != blocksize);
 				err = get_block(inode, iblock, bh, 0);
@@ -2282,10 +2425,13 @@ int block_read_full_page(struct page *page, get_block_t *get_block)
 		}
 		arr[nr++] = bh;
 	} while (i++, iblock++, (bh = bh->b_this_page) != head);
-
+	/* 如果是full_mapped
+	 * 那么设置PG_mappedtodisk，表明示page中的数据在后备存储器中有对应的块 */
 	if (fully_mapped)
 		SetPageMappedToDisk(page);
-
+	/* 如果nr为0，且没有PageError,那么说明所有的buffer_head都是最新的
+	 * 设置PG_uptodate之后unlock_page之后返回
+	 */
 	if (!nr) {
 		/*
 		 * All buffers are uptodate - we can set the page uptodate
@@ -2298,6 +2444,10 @@ int block_read_full_page(struct page *page, get_block_t *get_block)
 	}
 
 	/* Stage two: lock the buffers */
+	/* 锁住buffers
+	 * 将每个要读取的缓冲区，调用lock_buffer和mark_buffer_async_read.
+	 * 后者会设置buffer_head描述符的b_end_io域,将它实例化为end_buffer_async_read函数
+	 */
 	for (i = 0; i < nr; i++) {
 		bh = arr[i];
 		lock_buffer(bh);
@@ -2308,6 +2458,15 @@ int block_read_full_page(struct page *page, get_block_t *get_block)
 	 * Stage 3: start the IO.  Check for uptodateness
 	 * inside the buffer lock in case another process reading
 	 * the underlying blockdev brought it uptodate (the sct fix).
+	 */
+	/* 实际启动I/O,对于要读取的每个缓冲区再次判断它的状态是否为最新,
+	 * 如果是，直接调用end_buffer_async_read进行完成处理
+	 * 否则调用submit_bh函数提交读请求
+	 *
+	 * “再次判断缓冲区的状态是否为最新”是必要的,因为我们可能在第二阶段对
+	 * 缓冲区调用lock_buffer获取锁的过程中,其他进程已经读出数据，修改了缓冲区
+	 * 的状态.
+	 * 如果是这种情况，我们就没有必要重复提交读请求了
 	 */
 	for (i = 0; i < nr; i++) {
 		bh = arr[i];
@@ -3054,7 +3213,7 @@ void guard_bio_eod(int op, struct bio *bio)
 static int submit_bh_wbc(int op, int op_flags, struct buffer_head *bh,
 			 unsigned long bio_flags, struct writeback_control *wbc)
 {
-//bio��ʲô��˼�� ��block input/output ���豸������� Ȼ���ύbio
+	/* bio是什么意思呢 是block input/output 块设备输入输出 然后提交bio */
 	struct bio *bio;
 
 	BUG_ON(!buffer_locked(bh));
@@ -3354,6 +3513,8 @@ static struct kmem_cache *bh_cachep __read_mostly;
 /*
  * Once the number of bh's in the machine exceeds this level, we start
  * stripping them in writeback.
+ *
+ * 一旦机器中的bh数量超过这个级别，我们就开始在写回中剥离它们。
  */
 static unsigned long max_buffer_heads;
 
@@ -3361,6 +3522,7 @@ int buffer_heads_over_limit;
 
 struct bh_accounting {
 	int nr;			/* Number of live bh's */
+				/* 限制cacheline的颠簸 */
 	int ratelimit;		/* Limit cacheline bouncing */
 };
 
@@ -3370,22 +3532,29 @@ static void recalc_bh_state(void)
 {
 	int i;
 	int tot = 0;
-
+	/* 如果bh_accounting.ratelimit = 4096，那么就直接退出 */
 	if (__this_cpu_inc_return(bh_accounting.ratelimit) - 1 < 4096)
 		return;
+	/* 如果大于等于4096，这里就把ratelimit 清0 */
 	__this_cpu_write(bh_accounting.ratelimit, 0);
+	/* 算出整个online CPU里面的bh_accounting计数 */
 	for_each_online_cpu(i)
 		tot += per_cpu(bh_accounting, i).nr;
+	/* 判断他有没有大于最大的bh的数量 */
 	buffer_heads_over_limit = (tot > max_buffer_heads);
 }
 
 struct buffer_head *alloc_buffer_head(gfp_t gfp_flags)
 {
+	/* 分配buffer_head的内存 */
 	struct buffer_head *ret = kmem_cache_zalloc(bh_cachep, gfp_flags);
 	if (ret) {
+		/* 初始化 链入到所关联地址空间的私有链表的连接件 */
 		INIT_LIST_HEAD(&ret->b_assoc_buffers);
 		preempt_disable();
+		/* 增加本CPU的bh_accounting.nr */
 		__this_cpu_inc(bh_accounting.nr);
+		/* 重新计算buffer_head的state */
 		recalc_bh_state();
 		preempt_enable();
 	}
