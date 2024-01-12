@@ -22,14 +22,20 @@ typedef void (bio_end_io_t) (struct bio *);
  * main unit of I/O for the block layer and lower layers (ie drivers and
  * stacking drivers)
  */
+/* bio结构为通用块层请求,代表来自上层的请求.每个bio表示不同的访问上下文,源于不同的应用,
+ * 或者发自不同的线程,这也就是我们不能直接修改bio来实现请求合并的原因.
+ */
 struct bio {
+	/* 指向属于同一个request的后一个bio */
 	struct bio		*bi_next;	/* request queue link */
+	/* 指向块设备描述符的指针 */
 	struct block_device	*bi_bdev;
 	int			bi_error;
 	unsigned int		bi_opf;		/* bottom bits req flags,
 						 * top bits REQ_OP. Use
 						 * accessors.
 						 */
+	/* bi_flags 状态、命令等 */
 	unsigned short		bi_flags;	/* status, command, etc */
 	unsigned short		bi_ioprio;
 
@@ -38,19 +44,29 @@ struct bio {
 	/* Number of segments in this BIO after
 	 * physical address coalescing is performed.
 	 */
+	/* 这个bio中segment的数目,在执行物理地址合并后 */
 	unsigned int		bi_phys_segments;
 
 	/*
 	 * To keep track of the max segment size, we account for the
 	 * sizes of the first and last mergeable segments in this bio.
 	 */
+	/* 缓存这个bio的第一个segment的长度,加前一个bio的最后一个segment的长度,
+	 * 根据是否超过最大段长度快速判断能否合并
+	 */
 	unsigned int		bi_seg_front_size;
+	/* 缓存这个bio的最后一个segment的长度,加后一个bio的第一个segment的长度,
+	 * 根据是否超过最大段长度快速判断能否合并
+	 */
 	unsigned int		bi_seg_back_size;
 
 	atomic_t		__bi_remaining;
-
+	/* 在bio的I/O 操作完成后调用的函数 */
 	bio_end_io_t		*bi_end_io;
-
+	/* 指向私有数据的指针,被通用块层和块设备驱动的I/O完成方法使用.
+	 * 例如需要将bio分裂处理时,细分后的bio都通过bi_private指向原始bio,
+	 * 以便都完成后结束之.
+	 */
 	void			*bi_private;
 #ifdef CONFIG_BLK_CGROUP
 	/*
@@ -62,10 +78,11 @@ struct bio {
 #endif
 	union {
 #if defined(CONFIG_BLK_DEV_INTEGRITY)
+		/* 指向这个bio的完整性载荷描述符的指针 */
 		struct bio_integrity_payload *bi_integrity; /* data integrity */
 #endif
 	};
-
+	/* 在这个bio的bio_vec数组中包含的segment的数目 */
 	unsigned short		bi_vcnt;	/* how many bio_vec's */
 
 	/*
@@ -73,9 +90,9 @@ struct bio {
 	 */
 
 	unsigned short		bi_max_vecs;	/* max bvl_vecs we can hold */
-
+	/* 这个bio的引用计数 */
 	atomic_t		__bi_cnt;	/* pin count */
-
+	/* 指向bio的bio_vec(segment)数组的指针 */
 	struct bio_vec		*bi_io_vec;	/* the actual vec list */
 
 	struct bio_set		*bi_pool;
@@ -85,6 +102,7 @@ struct bio {
 	 * double allocations for a small number of bio_vecs. This member
 	 * MUST obviously be kept at the very end of the bio.
 	 */
+	/* 少量的内嵌bio_vec,当数目超过时,需要另外分配 */
 	struct bio_vec		bi_inline_vecs[0];
 };
 

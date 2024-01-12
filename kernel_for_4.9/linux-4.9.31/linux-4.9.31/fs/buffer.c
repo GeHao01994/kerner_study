@@ -3215,22 +3215,37 @@ static int submit_bh_wbc(int op, int op_flags, struct buffer_head *bh,
 {
 	/* bio是什么意思呢 是block input/output 块设备输入输出 然后提交bio */
 	struct bio *bio;
-
+	/* 如果buffer_head没有锁 */
 	BUG_ON(!buffer_locked(bh));
+	/* 如果buffer_head没有映射 */
 	BUG_ON(!buffer_mapped(bh));
+	/* 得有b_end_io，这个是请求结束时的回调 */
 	BUG_ON(!bh->b_end_io);
+	/* 有BH_Delay标志,BH_Delay: buffer没有在磁盘上分配空间 */
 	BUG_ON(buffer_delay(bh));
+	/* 有BH_Unwritten标志，BH_Unwritten：在磁盘上已分配空闲，但是没有写入过 */
 	BUG_ON(buffer_unwritten(bh));
 
 	/*
 	 * Only clear out a write error when rewriting
 	 */
+	/* 设置BH_Req标志。如果之前req标志已设置 && 而且当前op是写
+	 * BH_Req是指初始化缓冲区而请求数据传输，也就是该缓冲区有I/O请求操作
+	 */
 	if (test_set_buffer_req(bh) && (op == REQ_OP_WRITE))
-		clear_buffer_write_io_error(bh);
+		clear_buffer_write_io_error(bh); /* 这里BH_Write_EIO 表示如果写块时出现I/O错误就置位，这里清除它 */
 
 	/*
 	 * from here on down, it's all bio -- do the initial mapping,
 	 * submit_bio -> generic_make_request may further map this bio around
+	 *
+	 * 从现在开始，一切都是bio -- 进行初始映射,
+	 * submit_bio -> generic_make_request 可能会进一步映射这个bio
+	 *
+	 */
+
+	/* 分配一个bio， GFP_NOIO 表示在分配内存的时候不能进行IO
+	 * 第2个参数表示需要几个vec数量
 	 */
 	bio = bio_alloc(GFP_NOIO, 1);
 
@@ -3238,26 +3253,39 @@ static int submit_bh_wbc(int op, int op_flags, struct buffer_head *bh,
 		wbc_init_bio(wbc, bio);
 		wbc_account_io(wbc, bh->b_page, bh->b_size);
 	}
-
+	/* 所请求扇区的起点
+	 *
+	 * bh->b_blocknr 在块设备上的逻辑块编号
+	 * bh->b_size是块大小,bh->b_size >> 9 = bh->b_size / 512 = 一个块里有多少个扇区
+	 */
 	bio->bi_iter.bi_sector = bh->b_blocknr * (bh->b_size >> 9);
 	bio->bi_bdev = bh->b_bdev;
 
+	/* 把page添加到bio里 */
 	bio_add_page(bio, bh->b_page, bh->b_size, bh_offset(bh));
+	/* b_size必须是一样的 */
 	BUG_ON(bio->bi_iter.bi_size != bh->b_size);
-
+	/* 设置完成io的回调函数 */
 	bio->bi_end_io = end_bio_bh_io_sync;
+	/* bio的私有数据是bh */
 	bio->bi_private = bh;
+
 	bio->bi_flags |= bio_flags;
 
 	/* Take care of bh's that straddle the end of the device */
+	/* 根据磁盘扇区的最大值来截断bio */
 	guard_bio_eod(op, bio);
 
+	/* 有元数据标志BH_Meta */
 	if (buffer_meta(bh))
 		op_flags |= REQ_META;
+	/* 有优先级标志BH_Prio */
 	if (buffer_prio(bh))
 		op_flags |= REQ_PRIO;
+	/* 设置bi_opf = op | op_flags */
 	bio_set_op_attrs(bio, op, op_flags);
 
+	/* 提交bio */
 	submit_bio(bio);
 	return 0;
 }
