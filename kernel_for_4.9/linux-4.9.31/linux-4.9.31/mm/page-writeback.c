@@ -357,6 +357,10 @@ static unsigned long highmem_dirtyable_memory(unsigned long total)
  *
  * Returns the global number of pages potentially available for dirty
  * page cache.  This is the base value for the global dirty limits.
+ *
+ * global_dirtyable_memory-全局可变脏页面的数量
+ * 返回可能用于脏页缓存的全局页数.
+ * 这是全局脏限制的基本值.
  */
 static unsigned long global_dirtyable_memory(void)
 {
@@ -367,12 +371,22 @@ static unsigned long global_dirtyable_memory(void)
 	 * Pages reserved for the kernel should not be considered
 	 * dirtyable, to prevent a situation where reclaim has to
 	 * clean pages in order to balance the zones.
+	 *
+	 * 为内核保留的页面不应被视为dirtyable,以防止出现回收时必须清理页面以平衡区域的情况.
 	 */
 	x -= min(x, totalreserve_pages);
 
 	x += global_node_page_state(NR_INACTIVE_FILE);
 	x += global_node_page_state(NR_ACTIVE_FILE);
 
+	/* highmem_is_dirtyable
+	 * 仅适用于启用了CONFIG_HIGHMEM的系统.
+	 * 此参数控制是否为脏写入器节流考虑高内存.
+	 * 默认情况下不是这种情况,这意味着只有内核直接可见/可用的内存量可以被弄脏.
+	 * 结果，在具有大量内存和低内存的系统上，基本上耗尽的写入器可能会过早地受到限制，并且流式写入可能会变得非常慢.
+	 * 将值更改为非零将允许更多内存被弄脏，从而允许写入者写入更多数据，这些数据可以更有效地刷新到存储中.
+	 * 请注意,这也带来了过早的 OOM 杀手的风险,因为一些写入器（例如直接块设备写入）只能使用低内存,并且可以在没有任何限制的情况下用脏数据填充它.
+	 */
 	if (!vm_highmem_is_dirtyable)
 		x -= highmem_dirtyable_memory(x);
 
@@ -388,14 +402,36 @@ static unsigned long global_dirtyable_memory(void)
  * must ensure that @dtc->avail is set before calling this function.  The
  * dirty limits will be lifted by 1/4 for PF_LESS_THROTTLE (ie. nfsd) and
  * real-time tasks.
+ *
+ * domain_dirty_limits-计算wb_domain的thresh和bg_thresh
+ * @dtc:dirty_throttle_control of interest
+ * 考虑vm_dirty_{bytes|ratio}和dirty_background_{bytes|ratio}计算@dtc->thresh和->bg_thresh.
+ * 调用方必须确保在调用此函数之前设置了@dtc->vail.
+ * PF_LESS_THROTTLE（如nfsd）和实时任务的脏限制将提高1/4.
  */
 static void domain_dirty_limits(struct dirty_throttle_control *dtc)
 {
 	const unsigned long available_memory = dtc->avail;
 	struct dirty_throttle_control *gdtc = mdtc_gdtc(dtc);
+	/* 当系统pagecache的脏页达到系统内存dirty_ratio(百分数)/dirty_bytes字节)阈值时,系统就会阻塞新的写请求,
+	 * 直到脏页被回写到磁盘,此值过低时,遇到写入突增时,会造成短时间内pagecache脏页快速上升，造成写请求耗时增加.
+	 * 但是此值也不能设置的太高,当该值太高时，会造成内核flush脏页时,超过内核限制的120s导致进程挂起或中断.
+	 * 注意：dirty_bytes 和 dirty_ratio 是相对的,只能指定其中一个.
+	 * 当其中一个参数文件被写入时，会立即开始计算脏页限制，并且会将另一个参数的值清零.
+	 */
+	/*
+	 * 当系统脏页的比例或者所占内存数量超过dirty_background_ratio(百分数)/dirty_background_bytes(字节)设定的
+	 * 阈值时,启动相关内核线程(pdflush/flush/kdmflush)开始将脏页写入磁盘.
+	 * 如果该值过大，同时又有进程大量写磁盘(未使用DIRECT_IO)时,会使pagecache占用对应比例的系统内存.
+	 * 注意：dirty_background_bytes参数和dirty_background_ratio参数是相对的，只能指定其中一个.
+	 * 当其中一个参数文件被写入时,会立即开始计算脏页限制,并且会将另一个参数的值清零.
+	 */
 	unsigned long bytes = vm_dirty_bytes;
 	unsigned long bg_bytes = dirty_background_bytes;
-	/* convert ratios to per-PAGE_SIZE for higher precision */
+	/* convert ratios to per-PAGE_SIZE for higher precision
+	 * 将比率转换为per-PAGE_SIZE以获得更高的精度
+	 */
+	/* 这里实际上就是每个PAGE_SIZE,用vm_drity_ratio算出来有多少内存 */
 	unsigned long ratio = (vm_dirty_ratio * PAGE_SIZE) / 100;
 	unsigned long bg_ratio = (dirty_background_ratio * PAGE_SIZE) / 100;
 	unsigned long thresh;
@@ -404,6 +440,9 @@ static void domain_dirty_limits(struct dirty_throttle_control *dtc)
 
 	/* gdtc is !NULL iff @dtc is for memcg domain */
 	if (gdtc) {
+		/* global_avail = gdtc->avail = global_page_state(NR_FREE_PAGES) +  global_node_page_state(NR_INACTIVE_FILE) + global_node_page_state(NR_ACTIVE_FILE)
+		 * 				- min(x, totalreserve_pages) + 1
+		 */
 		unsigned long global_avail = gdtc->avail;
 
 		/*
@@ -412,6 +451,15 @@ static void domain_dirty_limits(struct dirty_throttle_control *dtc)
 		 * globally available memory.  As the ratios are in
 		 * per-PAGE_SIZE, they can be obtained by dividing bytes by
 		 * number of pages.
+		 *
+		 * byte设置不能直接应用于memcg域.
+		 * 通过根据全局可用内存进行缩放,将它们转换为比率.由于比率在
+		 * per-PAGE_SIZE，它们可以通过将字节除以页数来获得。
+		 */
+		/* 如果定义了字节数或者dirty_background_bytes
+		 * 那么ratio = (bytes + global_avail - 1) / global_avail 和PAGE_SIZE中的最小值
+		 * 理论上我们算ratio应该是bytes / (global_avail * PAGE_SIZE)
+		 * 实际上这个除以PAGE_SIZE 放到了下面的thresh计算里面
 		 */
 		if (bytes)
 			ratio = min(DIV_ROUND_UP(bytes, global_avail),
@@ -421,20 +469,31 @@ static void domain_dirty_limits(struct dirty_throttle_control *dtc)
 				       PAGE_SIZE);
 		bytes = bg_bytes = 0;
 	}
-
+	/* 如果给了bytes,那么算出thresh
+	 * 否认就是(radio * available_memory) / PAGE_SIZE
+	 * thresh的单位是PAGE_SIZE
+	 */
 	if (bytes)
 		thresh = DIV_ROUND_UP(bytes, PAGE_SIZE);
 	else
 		thresh = (ratio * available_memory) / PAGE_SIZE;
-
+	/* 同理，这边是计算bg_thresh */
 	if (bg_bytes)
 		bg_thresh = DIV_ROUND_UP(bg_bytes, PAGE_SIZE);
 	else
 		bg_thresh = (bg_ratio * available_memory) / PAGE_SIZE;
 
+	/* 如果bg_thresh还比thresh大
+	 * 那么就bg_thresh = thresh / 2
+	 */
 	if (bg_thresh >= thresh)
 		bg_thresh = thresh / 2;
 	tsk = current;
+	/* PF_LESS_THROTTLE表示减少对该进程的限制,让它清理内存
+	 * 如果当前进程有这个flag或者说是rt进程
+	 *
+	 * 那么增大bg_thresh,可以加快触发回写的条件
+	 */
 	if (tsk->flags & PF_LESS_THROTTLE || rt_task(tsk)) {
 		bg_thresh += bg_thresh / 4 + global_wb_domain.dirty_limit / 32;
 		thresh += thresh / 4 + global_wb_domain.dirty_limit / 32;
@@ -1558,6 +1617,10 @@ static inline void wb_dirty_limits(struct dirty_throttle_control *dtc)
  * the caller to wait once crossing the (background_thresh + dirty_thresh) / 2.
  * If we're over `background_thresh' then the writeback threads are woken to
  * perform some writeout.
+ *
+ * balance_dirty_pages（）必须由生成脏数据的进程调用.
+ * 它会查看机器中脏页的数量，并在越过（background_thresh+dirty_thresh）/2后强制调用方等待.
+ * 如果超过了“background_thresh”，则会唤醒写回线程以执行一些写操作。
  */
 static void balance_dirty_pages(struct address_space *mapping,
 				struct bdi_writeback *wb,
@@ -1594,10 +1657,15 @@ static void balance_dirty_pages(struct address_space *mapping,
 		 * filesystems (i.e. NFS) in which data may have been
 		 * written to the server's write cache, but has not yet
 		 * been flushed to permanent storage.
+		 *
+		 * Unstable writes 是某些网络文件系统（如NFS）的一个特性,
+		 * 其中数据可能已写入服务器的写入缓存，但尚未写入
+		 * 已冲洗至永久存储。
 		 */
 		nr_reclaimable = global_node_page_state(NR_FILE_DIRTY) +
 					global_node_page_state(NR_UNSTABLE_NFS);
 		gdtc->avail = global_dirtyable_memory();
+		/* 设置drity为nr_reclaimable + 回写的页数 */
 		gdtc->dirty = nr_reclaimable + global_node_page_state(NR_WRITEBACK);
 
 		domain_dirty_limits(gdtc);
@@ -1652,6 +1720,7 @@ static void balance_dirty_pages(struct address_space *mapping,
 		 * If memcg domain is in effect, @dirty should be under
 		 * both global and memcg freerun ceilings.
 		 */
+		/* 如果脏页数量小于background和显式回写阈值的平均值，这次先不回写 */
 		if (dirty <= dirty_freerun_ceiling(thresh, bg_thresh) &&
 		    (!mdtc ||
 		     m_dirty <= dirty_freerun_ceiling(m_thresh, m_bg_thresh))) {
@@ -1662,10 +1731,11 @@ static void balance_dirty_pages(struct address_space *mapping,
 			current->nr_dirtied = 0;
 			if (mdtc)
 				m_intv = dirty_poll_interval(m_dirty, m_thresh);
+			/* 计算当前进程还能增加多少脏页而不超阈值，近似等于距离阈值的一半 */
 			current->nr_dirtied_pause = min(intv, m_intv);
 			break;
 		}
-
+		/* 超过阈值后，如果该BDI回写进程没有启动，则唤醒该BDI的回写进程执行background回写 */
 		if (unlikely(!writeback_in_progress(wb)))
 			wb_start_background_writeback(wb);
 
@@ -1859,6 +1929,17 @@ DEFINE_PER_CPU(int, dirty_throttle_leaks) = 0;
  * calling it too often (ratelimiting).  But once we're over the dirty memory
  * limit we decrease the ratelimiting by a lot, to prevent individual processes
  * from overshooting the limit by (ratelimit_pages) each.
+ *
+ * balance_dirty_pages_ratelimited-平衡脏内存状态
+ * @mapping：地址空间已被污染
+ *
+ * 一旦有新的脏页产生,带有脏的内存的进程应该调用这个
+ * 该函数将定期检查系统的脏状态,并将在需要时启动写回。
+ *
+ *
+ * 在真正大的机器上,get_writeback_state是昂贵的,所以尽量避免调用太频繁(ratelimiting).
+ * 但是一旦我们超过脏内存的限制,我们将大大减小限制,以防止各个进程各自超出限制(ratelimit_pages).
+ *
  */
 void balance_dirty_pages_ratelimited(struct address_space *mapping)
 {
@@ -1876,7 +1957,16 @@ void balance_dirty_pages_ratelimited(struct address_space *mapping)
 	if (!wb)
 		wb = &bdi->wb;
 
+	/* nr_dirtied_pause：当前task的脏页门限;
+	 * 进程脏页数超过nr_dirtied_pause就要阻塞休眠等待脏页回写
+	 * 进程task结构的nr_dirtied_pause，即进程达到多少脏页时，进程需要执行balance_dirty_pages()进行脏页平衡，测试时current->nr_dirtied_pause有64，32，256
+	 */
 	ratelimit = current->nr_dirtied_pause;
+	/* dirty_exceeded 如果该值设置了，则需要通过降低平衡触发的门限来加速脏页回收
+	 *
+	 * dirty_exceeded = (bdi_dirty > bdi_thresh) &&(nr_dirty > dirty_thresh)和 bdi->dirty_exceeded = 1，如果bdi脏页大于阀值,
+	 * 并且系统脏页数大于阀值则令bdi->dirty_exceeded = 1。
+	 */
 	if (wb->dirty_exceeded)
 		ratelimit = min(ratelimit, 32 >> (PAGE_SHIFT - 10));
 
@@ -1886,11 +1976,19 @@ void balance_dirty_pages_ratelimited(struct address_space *mapping)
 	 * calling into balance_dirty_pages(), which can happen when there are
 	 * 1000+ tasks, all of them start dirtying pages at exactly the same
 	 * time, hence all honoured too large initial task->nr_dirtied_pause.
+	 *
+	 * 这可以防止一个CPU在不调用balance_dirty_pages（）的情况下积累太多脏页,
+	 * 当有1000多个任务时,可能会发生这种情况,所有任务都在同一时间开始脏页,因此所有任务都接受了太大的初始任务->nr_dirtied_pause。
+	 */
+
+	/* bdp_ratelimits percpu变量，当前CPU的脏页数
+	 * 在标记page脏页时执行account_page_dirtied()令bdp_ratelimits加1，表示当前cpu的脏页数
 	 */
 	p =  this_cpu_ptr(&bdp_ratelimits);
+	/* 如果当前线程脏页数超过门限值，则肯定会触发下面的回收流程。同时重新计算当前CPU的脏页数 */
 	if (unlikely(current->nr_dirtied >= ratelimit))
-		*p = 0;
-	else if (unlikely(*p >= ratelimit_pages)) {
+		*p = 0; //对per cpu变量bdp_ratelimits变量清0，这表示脏页太多，下边就要执行balance_dirty_pages进行脏页平衡了
+	else if (unlikely(*p >= ratelimit_pages)) {  /* 默认值为32页 */ /* 当前线程的脏页数未超过门限值，但是当前CPU的脏页数超过CPU脏页门限值，则设置门限为0，肯定会触发回收。同时重新计算当前CPU的脏页数 */
 		*p = 0;
 		ratelimit = 0;
 	}
@@ -1898,16 +1996,24 @@ void balance_dirty_pages_ratelimited(struct address_space *mapping)
 	 * Pick up the dirtied pages by the exited tasks. This avoids lots of
 	 * short-lived tasks (eg. gcc invocations in a kernel build) escaping
 	 * the dirty throttling and livelock other long-run dirtiers.
+	 *
+	 * 拾取已退出任务的脏页。这避免了许多短期任务(例如，内核构建中的gcc调用)逃避肮脏的节流和活锁其他长期肮脏的任务.
 	 */
+
+	/* 进程退出时把进程残留的脏页数累加到dirty_throttle_leaks这个per cpu变量 */
 	p = this_cpu_ptr(&dirty_throttle_leaks);
 	if (*p > 0 && current->nr_dirtied < ratelimit) {
 		unsigned long nr_pages_dirtied;
+		/* 算出还可以有多少个脏页
+		 * 在p和ratelimit-当前进程的脏页取最小值
+		 */
 		nr_pages_dirtied = min(*p, ratelimit - current->nr_dirtied);
+		/* 然后让p减去，让current->nr_dirtied增加 */
 		*p -= nr_pages_dirtied;
 		current->nr_dirtied += nr_pages_dirtied;
 	}
 	preempt_enable();
-
+	/* 如果当前的脏页大于ratelimit，开始执行balance_dirty_pages()进行脏页平衡 */
 	if (unlikely(current->nr_dirtied >= ratelimit))
 		balance_dirty_pages(mapping, wb, current->nr_dirtied);
 

@@ -3154,8 +3154,10 @@ static inline bool execute_ok(struct inode *inode)
 
 static inline void file_start_write(struct file *file)
 {
+	/* 如果不是常规文件,那么就返回吧 */
 	if (!S_ISREG(file_inode(file)->i_mode))
 		return;
+	/* 如果是常规文件 */
 	__sb_start_write(file_inode(file)->i_sb, SB_FREEZE_WRITE, true);
 }
 

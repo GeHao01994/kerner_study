@@ -53,6 +53,8 @@
  *
  * Some architectures override this (for compatibility reasons):
  */
+
+/* 无限的,这意味着资源没有用户限制 */
 #ifndef RLIM_INFINITY
 # define RLIM_INFINITY		(~0UL)
 #endif

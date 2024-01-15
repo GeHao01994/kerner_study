@@ -2672,34 +2672,56 @@ EXPORT_SYMBOL(read_cache_page_gfp);
  * Can adjust writing position or amount of bytes to write.
  * Returns appropriate error code that caller should return or
  * zero in case that write should be allowed.
+ *
+ * 在做一次写入执行必要的检查
+ *
+ * 可以调整写入位置或要写入的字节数.
+ * 如果允许写入,返回0.
+ * 否则返回的适当错误代码给调用者
  */
 inline ssize_t generic_write_checks(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct file *file = iocb->ki_filp;
 	struct inode *inode = file->f_mapping->host;
+	/* RLIMIT_FSIZE 可以创建的文件的最大字节长度,
+	 * 当超过此软限制时,则向该进程发送SIGXFSZ信号
+	 */
 	unsigned long limit = rlimit(RLIMIT_FSIZE);
 	loff_t pos;
-
+	/* 如果iov里面的count为0(即数据大小为0),那么也直接退出了 */
 	if (!iov_iter_count(from))
 		return 0;
 
 	/* FIXME: this is for backwards compatibility with 2.4 */
+	/* 如果是已append的形势打开,那么kiocb的ki_ops(表示当前进行I/O操作的文件位置)
+	 * 等于文件的结尾
+	 * 毕竟是追加模式打开的嘛
+	 */
 	if (iocb->ki_flags & IOCB_APPEND)
 		iocb->ki_pos = i_size_read(inode);
-
+	/* 将iocb->ki_pos赋值给pos */
 	pos = iocb->ki_pos;
-
+	/* 如果limut != RLIM_INFINITY说明有人对当前线程做了limit */
 	if (limit != RLIM_INFINITY) {
+		/* RLIMIT_FSIZE 可以创建的文件的最大字节长度
+		 * 当超过此软限制时,则向该进程发送SIGXFSZ信号
+		 */
 		if (iocb->ki_pos >= limit) {
 			send_sig(SIGXFSZ, current, 0);
 			return -EFBIG;
 		}
+		/* 这边就怕数据的大小大于我们的limit
+		 * if (i->count > limit - (unsigned long)pos )
+		 *	i->count = limit - (unsigned long)pos
+		 */
 		iov_iter_truncate(from, limit - (unsigned long)pos);
 	}
 
 	/*
 	 * LFS rule
 	 */
+
+	/* 同理不要让它坏了LFS的规则 */
 	if (unlikely(pos + iov_iter_count(from) > MAX_NON_LFS &&
 				!(file->f_flags & O_LARGEFILE))) {
 		if (pos >= MAX_NON_LFS)
@@ -2713,6 +2735,12 @@ inline ssize_t generic_write_checks(struct kiocb *iocb, struct iov_iter *from)
 	 * If we have written data it becomes a short write.  If we have
 	 * exceeded without writing data we send a signal and return EFBIG.
 	 * Linus frestrict idea will clean these up nicely..
+	 *
+	 * 我们即将超过fs块限制吗？
+	 *
+	 * 如果我们已经写入了数据，那么它就变成了短写入.
+	 * 如果我们在没有写入数据的情况下超过了,我们会发送信号并返回EFBIG.
+	 *
 	 */
 	if (unlikely(pos >= inode->i_sb->s_maxbytes))
 		return -EFBIG;
@@ -2840,23 +2868,32 @@ ssize_t generic_perform_write(struct file *file,
 	struct address_space *mapping = file->f_mapping;
 	const struct address_space_operations *a_ops = mapping->a_ops;
 	long status = 0;
+	/* written用来记录已写的字节数 */
 	ssize_t written = 0;
 	unsigned int flags = 0;
 
 	/*
 	 * Copies from kernel address space cannot fail (NFSD is a big user).
 	 */
+
+	/* 若当前I/O操作是属于在内核中进行,显然是不能被中断的(用户态的I/O操作可以被中断),
+	 * 就要设置AOP_FLAG_UNINTERRUPTIBLE
+	 */
 	if (!iter_is_iovec(i))
 		flags |= AOP_FLAG_UNINTERRUPTIBLE;
 
 	do {
 		struct page *page;
+		/* offset为在页面中的偏移 */
 		unsigned long offset;	/* Offset into pagecache page */
+		/* bytes为要写到页面的字节数 */
 		unsigned long bytes;	/* Bytes to write to page */
+		/* copied为用户空间复制过来的字节数 */
 		size_t copied;		/* Bytes copied from user */
 		void *fsdata;
-
+		/* 拿到page的偏移量 */
 		offset = (pos & (PAGE_SIZE - 1));
+		/* 算出可写的数据量 */
 		bytes = min_t(unsigned long, PAGE_SIZE - offset,
 						iov_iter_count(i));
 
@@ -2875,23 +2912,25 @@ again:
 			status = -EFAULT;
 			break;
 		}
-
+		/* 致命信号要处理 */
 		if (fatal_signal_pending(current)) {
 			status = -EINTR;
 			break;
 		}
-
+		/* 为写做准备,主要是把需要写的页面准备好,如果内存里还没有,就要从磁盘上读 */
 		status = a_ops->write_begin(file, mapping, pos, bytes, flags,
 						&page, &fsdata);
 		if (unlikely(status < 0))
 			break;
-
+		/* 如果这个是共享的内存,那么就要flush_dcache_page,将dcache相应的page里的数据
+		 * 写到memory里面去，以保证dcache内的数据与memory内的数据的一致性
+		 */
 		if (mapping_writably_mapped(mapping))
 			flush_dcache_page(page);
-
+		/* 从用户空间向页里写数据 */
 		copied = iov_iter_copy_from_user_atomic(page, i, offset, bytes);
 		flush_dcache_page(page);
-
+		/* 写结束 */
 		status = a_ops->write_end(file, mapping, pos, bytes, copied,
 						page, fsdata);
 		if (unlikely(status < 0))
@@ -2899,7 +2938,7 @@ again:
 		copied = status;
 
 		cond_resched();
-
+		/* 从count里减去已经复制的数据 */
 		iov_iter_advance(i, copied);
 		if (unlikely(copied == 0)) {
 			/*
@@ -2916,7 +2955,7 @@ again:
 		}
 		pos += copied;
 		written += copied;
-
+		/* 刷新脏页,如果脏页太多,就会写磁盘 */
 		balance_dirty_pages_ratelimited(mapping);
 	} while (iov_iter_count(i));
 
@@ -2940,6 +2979,19 @@ EXPORT_SYMBOL(generic_perform_write);
  * This function does *not* take care of syncing data in case of O_SYNC write.
  * A caller has to handle it. This is mainly due to the fact that we want to
  * avoid syncing under i_mutex.
+ *
+ * __generic_file_write_iter-将数据写入文件
+ * @iocb:IO state structure(文件、偏移量等)
+ * @from：iov_iter 其中包含要写入的数据
+ *
+ *
+ * 此函数完成将数据实际写入文件所需的所有工作.
+ * 它执行所有基本检查，从文件中删除SUID,更新修改时间,并调用适当的子例程这取决于我们是执行直接IO还是标准缓冲写入.
+ * 它期望i_mutex被抓取,除非我们在一个根本不需要锁定的块设备或类似对象上工作.
+ *
+ * 在O_SYNC写入的情况下，此函数不负责同步数据。
+ * 调用方必须处理它。这主要是因为我们希望避免在i_mutex下同步。
+ *
  */
 ssize_t __generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
@@ -2950,16 +3002,31 @@ ssize_t __generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	ssize_t		err;
 	ssize_t		status;
 
-	/* We can write back this queue in page reclaim */
+	/* We can write back this queue in page reclaim
+	 * 我们能写回这个队列当页面回收的时候
+	 */
 	current->backing_dev_info = inode_to_bdi(inode);
+	/* Remove special file priviledges (suid, capabilities) when file is written
+	 * to or truncated.
+	 */
 	err = file_remove_privs(file);
 	if (err)
 		goto out;
-
+	/* update mtime and ctime time
+	 * i_mtime 文件的最后修改时间
+	 * i_ctime inode的最后修改时间
+	 */
 	err = file_update_time(file);
 	if (err)
 		goto out;
-
+	/* 处理直接I/O,首先调用generic_file_direct_write,尽管需要绕开页面缓存,它还是调用地址空间操作表中的direct_IO来完成操作.
+	 * 最终它可能写完了所有的字节,或者出现错误,
+	 * 这两种情况下,都返回结果给调用者.
+	 * 另一种情况是只写了部分数据,这通常出现在文件中有空洞的情况下,它转而使用缓存I/O,
+	 * 也就是调用generic_file_buffered_write来完成剩余字节的I/O,并调用
+	 * filemap_write_and_wait_range将通过这些字节冲刷到磁盘,同时让相应的页面缓存失效,
+	 * 之所以这么做,是为了达到直接I/O所希望的语义
+	 */
 	if (iocb->ki_flags & IOCB_DIRECT) {
 		loff_t pos, endbyte;
 
@@ -3006,6 +3073,7 @@ ssize_t __generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 			 */
 		}
 	} else {
+		/* 处理缓存I/O */
 		written = generic_perform_write(file, from, iocb->ki_pos);
 		if (likely(written > 0))
 			iocb->ki_pos += written;
@@ -3024,6 +3092,14 @@ EXPORT_SYMBOL(__generic_file_write_iter);
  * This is a wrapper around __generic_file_write_iter() to be used by most
  * filesystems. It takes care of syncing the file in case of O_SYNC file
  * and acquires i_mutex as needed.
+ *
+ * generic_file_write_iter-将数据写入文件
+ * @iocb:IO状态结构
+ * @from：iov_iter，其中包含要写入的数据
+ *
+ *
+ * 这是大多数文件系统使用的__generic_file_write_iter()的包装.
+ * 它负责在O_SYNC文件的情况下同步文件，并根据需要获取i_mutex。
  */
 ssize_t generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
@@ -3032,6 +3108,9 @@ ssize_t generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	ssize_t ret;
 
 	inode_lock(inode);
+	/* 做一些基本的检查
+	 * 主要是检查你写入的文件大小超过一些限制
+	 */
 	ret = generic_write_checks(iocb, from);
 	if (ret > 0)
 		ret = __generic_file_write_iter(iocb, from);

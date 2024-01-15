@@ -385,7 +385,7 @@ ssize_t vfs_iter_write(struct file *file, struct iov_iter *iter, loff_t *ppos)
 
 	if (!file->f_op->write_iter)
 		return -EINVAL;
-
+	/* 初始化内核I/O控制块 */
 	init_sync_kiocb(&kiocb, file);
 	kiocb.ki_pos = *ppos;
 
@@ -532,9 +532,10 @@ static ssize_t new_sync_write(struct file *filp, const char __user *buf, size_t 
 ssize_t __vfs_write(struct file *file, const char __user *p, size_t count,
 		    loff_t *pos)
 {
+	/* 同步写 */
 	if (file->f_op->write)
 		return file->f_op->write(file, p, count, pos);
-	else if (file->f_op->write_iter)
+	else if (file->f_op->write_iter) /*异步写 */
 		return new_sync_write(file, p, count, pos);
 	else
 		return -EINVAL;
@@ -570,16 +571,26 @@ EXPORT_SYMBOL(__kernel_write);
 ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
-
+	/* 检查它是否可写的? */
 	if (!(file->f_mode & FMODE_WRITE))
 		return -EBADF;
+	/* if ((f->f_mode & FMODE_WRITE) && likely(f->f_op->write || f->f_op->write_iter))
+	 *			f->f_mode |= FMODE_CAN_WRITE;
+	 */
 	if (!(file->f_mode & FMODE_CAN_WRITE))
 		return -EINVAL;
+	/* 因为该操作需要将数据从用户控件缓冲区复制，验证这段缓冲区可以进行读访问 */
 	if (unlikely(!access_ok(VERIFY_READ, buf, count)))
 		return -EFAULT;
-
+	/* 检查要访问的文件部分是否有冲突的强制锁，通过inode结构lock当前要操作的区域.
+	 * 文件系统是否允许使用强制锁，可以在mount是指定，如果mount时指定了MS_MANDLOCK，则允许使用强制锁
+	 */
 	ret = rw_verify_area(WRITE, file, pos, count);
 	if (!ret) {
+		/* 如果count大于最大的读写COUNT
+		 * MAX_RW_COUNT是一个宏：INT_MAX & PAGE_MASK，INT_MAX是2^31，
+		 * 理论上每次write可写的buff大小是2^31-2^12=2147479552
+		 */
 		if (count > MAX_RW_COUNT)
 			count =  MAX_RW_COUNT;
 		file_start_write(file);
@@ -630,17 +641,22 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
 		size_t, count)
 {
+	/* 获得文件句柄 */
 	struct fd f = fdget_pos(fd);
 	ssize_t ret = -EBADF;
 
 	if (f.file) {
+		/* 获得当前的读/写位置 */
 		loff_t pos = file_pos_read(f.file);
+		/* 执行文件写操作 */
 		ret = vfs_write(f.file, buf, count, &pos);
+		/* 修改当前读/写位置 */
 		if (ret >= 0)
 			file_pos_write(f.file, pos);
+		/* 更新文件的引用计数 */
 		fdput_pos(f);
 	}
-
+	/* 最后返回写入数据的字节数 */
 	return ret;
 }
 
