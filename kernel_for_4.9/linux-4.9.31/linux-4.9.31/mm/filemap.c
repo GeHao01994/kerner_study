@@ -1204,6 +1204,24 @@ EXPORT_SYMBOL(find_lock_entry);
  * if the GFP flags specified for FGP_CREAT are atomic.
  *
  * If there is a page cache page, it is returned with an increased refcount.
+ *
+ * pagecache_get_page-查找并获取页面引用
+ * @映射：要搜索的地址空间
+ * @偏移量：页面索引
+ * @fgp_flags:PCG标志
+ * @gfp_mask：用于页面缓存数据页面分配的gfp掩码
+ *
+ * 在@mapping和@offset 处查找页面缓存槽.
+ *
+ * PCG标志修改页面的返回方式.
+ *
+ * FGP_ACCESSED：页面将被标记为已访问
+ * FGP_LOCK：页面返回locked
+ * FGP_CREAT：如果页面不存在,则使用@gfp_mask分配一个新页面,并将其添加到页面缓存和VM的LRU列表中.
+ * 页面返回时处于锁定状态，引用次数增加。否则，返回%NULL.
+ *
+ * 如果指定了FGP_LOCK或FGP_CREAT,则即使为FGP_CREAP指定的GFP标志是原子标志,该函数也可以休眠。
+ * 如果存在页面缓存页面，则带着refcount增加而返回
  */
 struct page *pagecache_get_page(struct address_space *mapping, pgoff_t offset,
 	int fgp_flags, gfp_t gfp_mask)
@@ -1211,12 +1229,20 @@ struct page *pagecache_get_page(struct address_space *mapping, pgoff_t offset,
 	struct page *page;
 
 repeat:
+	/* 通过offset,找到page */
 	page = find_get_entry(mapping, offset);
+	/* 如果page为空或者异常,跳转到no_page去分配一个 */
 	if (radix_tree_exceptional_entry(page))
 		page = NULL;
 	if (!page)
 		goto no_page;
-
+	/* 如果fgp_flags带有lock,那么就想获得锁
+	 * 但是如果被锁了,你又是FGP_NOWAIT
+	 * 也就是说又不想等待,那么就直接page的引用计数-1之后 返回NULL吧
+	 * 因为find_get_entry -> page_cache_get_speculative -> page_ref_inc
+	 * (get_page_unless_zero)也会去+1
+	 * 所以这里要-1
+	 */
 	if (fgp_flags & FGP_LOCK) {
 		if (fgp_flags & FGP_NOWAIT) {
 			if (!trylock_page(page)) {
@@ -1228,6 +1254,9 @@ repeat:
 		}
 
 		/* Has the page been truncated? */
+		/* 这里可能发生的情况就是这个page被人解除了该文件的映射
+		 * 然后unlock page, put_page之后重来一遍
+		 */
 		if (unlikely(page->mapping != mapping)) {
 			unlock_page(page);
 			put_page(page);
@@ -1235,22 +1264,24 @@ repeat:
 		}
 		VM_BUG_ON_PAGE(page->index != offset, page);
 	}
-
+	/* 设置page的访问位 */
 	if (page && (fgp_flags & FGP_ACCESSED))
 		mark_page_accessed(page);
 
 no_page:
+	/* 如果没有page,且flag带了FGP_CREAT,那么就想去创建一个 */
 	if (!page && (fgp_flags & FGP_CREAT)) {
 		int err;
+		/* 如果fgp_flags带了FGP_WRITE,并且!bdi->capabilities & BDI_CAP_NO_ACCT_DIRTY(Dirty pages shouldn't contribute to accounting) */
 		if ((fgp_flags & FGP_WRITE) && mapping_cap_account_dirty(mapping))
 			gfp_mask |= __GFP_WRITE;
 		if (fgp_flags & FGP_NOFS)
 			gfp_mask &= ~__GFP_FS;
-
+		/* 分配一个page */
 		page = __page_cache_alloc(gfp_mask);
 		if (!page)
 			return NULL;
-
+		/* 如果fgp_flags没有带FGP_LOCK,我们给它带上 */
 		if (WARN_ON_ONCE(!(fgp_flags & FGP_LOCK)))
 			fgp_flags |= FGP_LOCK;
 
@@ -2843,6 +2874,9 @@ EXPORT_SYMBOL(generic_file_direct_write);
 /*
  * Find or create a page at the given pagecache position. Return the locked
  * page. This function is specifically for buffered writes.
+ *
+ * 在给定的页面缓存位置查找或创建页面.返回锁定的页面.
+ * 此函数专门用于缓冲写入.
  */
 struct page *grab_cache_page_write_begin(struct address_space *mapping,
 					pgoff_t index, unsigned flags)
@@ -2855,7 +2889,7 @@ struct page *grab_cache_page_write_begin(struct address_space *mapping,
 
 	page = pagecache_get_page(mapping, index, fgp_flags,
 			mapping_gfp_mask(mapping));
-	if (page)
+	if (page) /* wait for writeback to finish, if necessary. */
 		wait_for_stable_page(page);
 
 	return page;

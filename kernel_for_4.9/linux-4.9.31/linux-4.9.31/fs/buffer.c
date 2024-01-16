@@ -2062,41 +2062,59 @@ iomap_to_bh(struct inode *inode, sector_t block, struct buffer_head *bh,
 int __block_write_begin_int(struct page *page, loff_t pos, unsigned len,
 		get_block_t *get_block, struct iomap *iomap)
 {
+	/* 算出pos的业内偏移 */
 	unsigned from = pos & (PAGE_SIZE - 1);
+	/* to就是最后的位置 */
 	unsigned to = from + len;
+	/* 获得inode */
 	struct inode *inode = page->mapping->host;
 	unsigned block_start, block_end;
 	sector_t block;
 	int err = 0;
 	unsigned blocksize, bbits;
 	struct buffer_head *bh, *head, *wait[2], **wait_bh=wait;
-
+	/* 进来的时候page肯定是lock的 */
 	BUG_ON(!PageLocked(page));
+	/* 确保from、to有效,它们都不应该超过一个页面的长度,
+	 * 并且from不要超过to,是基于缓冲页面的
+	 */
 	BUG_ON(from > PAGE_SIZE);
 	BUG_ON(to > PAGE_SIZE);
 	BUG_ON(from > to);
-
+	/* 将其转换成缓存页面 */
 	head = create_page_buffers(page, inode, 0);
 	blocksize = head->b_size;
 	bbits = block_size_bits(blocksize);
 
 	block = (sector_t)page->index << (PAGE_SHIFT - bbits);
-
+	/* 逐个处理页面的缓冲头,并同步推进文件逻辑块编号block.
+	 * block_start和block_end记录当前正处理的缓冲区在页面中的范围.
+	 */
 	for(bh = head, block_start = 0; bh != head || !block_start;
 	    block++, block_start=block_end, bh = bh->b_this_page) {
 		block_end = block_start + blocksize;
+		/* 这说明在缓冲区落在要写的数据范围之外 */
 		if (block_end <= from || block_start >= to) {
+			/* 如果页面是最新的,而缓存头未设置更新标志,则设置它,然后继续处理下一个缓冲区 */
 			if (PageUptodate(page)) {
 				if (!buffer_uptodate(bh))
 					set_buffer_uptodate(bh);
 			}
 			continue;
 		}
+		/* 运行到这里说明这个缓存区块是需要写入的,无论是非覆写(表示本次写只会修改当前缓冲区块的部分内容)或者是覆写(覆写整个缓冲区块). */
+		/* 如果设置了BH_New标志,则清除它
+		 * BH_New标志表明这个缓冲区块的磁盘映射是刚刚建好的
+		 */
 		if (buffer_new(bh))
 			clear_buffer_new(bh);
+		/* 如果还没有为缓冲区建立好磁盘映像 */
 		if (!buffer_mapped(bh)) {
 			WARN_ON(bh->b_size != blocksize);
 			if (get_block) {
+				/* 调用get_block回调函数建立从文件逻辑块编号到磁盘逻辑块编号的映射,这个过程中又可能设置BH_New标志
+				 * 某些文件系统还会在映射时复制数据到页面中,这是要相应处理
+				 */
 				err = get_block(inode, block, bh, 1);
 				if (err)
 					break;
@@ -2113,6 +2131,7 @@ int __block_write_begin_int(struct page *page, loff_t pos, unsigned len,
 					mark_buffer_dirty(bh);
 					continue;
 				}
+				/* 对于非覆写,调用zero_user_segment函数将非覆写的部分清0 */
 				if (block_end > to || block_start < from)
 					zero_user_segments(page,
 						to, block_end,
@@ -2120,11 +2139,21 @@ int __block_write_begin_int(struct page *page, loff_t pos, unsigned len,
 				continue;
 			}
 		}
+		/* 如果页面是最新的,而缓冲区未设置更新标志,设置之,跳过它
+		 * 继续处理下一个缓冲区
+		 */
 		if (PageUptodate(page)) {
 			if (!buffer_uptodate(bh))
 				set_buffer_uptodate(bh);
 			continue; 
 		}
+		/* 如果不是对这块缓存区进行覆写,那么需要调用ll_rw_block预先
+		 * 读入块的内容.
+		 * 这些缓冲区必须被等待其数据已被同步读入.为此将缓冲头放到等待链表中.
+		 * 注意我们为什么最多有两个缓冲区,这是因为考虑到写入范围和各个页面缓冲区的关系,
+		 * 我们最多可能非覆写两个缓冲区,一个在写范围的开始部分,另外一个在写范围的结束部分.
+		 * 所有中间部分都会被完全覆写
+		 */
 		if (!buffer_uptodate(bh) && !buffer_delay(bh) &&
 		    !buffer_unwritten(bh) &&
 		     (block_start < from || block_end > to)) {
@@ -2135,11 +2164,15 @@ int __block_write_begin_int(struct page *page, loff_t pos, unsigned len,
 	/*
 	 * If we issued read requests - let them complete.
 	 */
+	/* 如果我们发起了读请求,则同步等待其结束.
+	 * 当然,读操作可能失败,如果这样,则返回负的错误码
+	 */
 	while(wait_bh > wait) {
 		wait_on_buffer(*--wait_bh);
 		if (!buffer_uptodate(*wait_bh))
 			err = -EIO;
 	}
+	/* 在返回前,将页面从from到to范围内的数据清0 */
 	if (unlikely(err))
 		page_zero_new_buffers(page, from, to);
 	return err;
@@ -2155,24 +2188,35 @@ EXPORT_SYMBOL(__block_write_begin);
 static int __block_commit_write(struct inode *inode, struct page *page,
 		unsigned from, unsigned to)
 {
+	/* block_start和block_end记录当前正处理的缓冲区在页面中的范围.
+	 * from和to分别表示要写的数据在页面中的起始位置和结束位置.
+	 */
 	unsigned block_start, block_end;
 	int partial = 0;
 	unsigned blocksize;
 	struct buffer_head *bh, *head;
 
 	bh = head = page_buffers(page);
+	/* 计算缓冲区的大小 */
 	blocksize = bh->b_size;
 
 	block_start = 0;
+	/* 逐个处理页面的缓冲头,并同步推进文件逻辑块编号 */
 	do {
 		block_end = block_start + blocksize;
+		/* 这个缓冲区块不是要写的块,这是如果缓冲区
+		 * 未被更新,设置局部变量partial为1,表示有某些缓冲区
+		 * 没有更新.
+		 */
 		if (block_end <= from || block_start >= to) {
 			if (!buffer_uptodate(bh))
 				partial = 1;
 		} else {
+			/* 否则这个缓冲区一定已更新,且有用户空间数据复制进去,设置已更新标志,将它标志为“脏”. */
 			set_buffer_uptodate(bh);
 			mark_buffer_dirty(bh);
 		}
+		/* 不管哪种情况,都清除缓冲头的BH_New标志,因为这时候缓冲区块的磁盘映射已经不能说是刚刚建立好的 */
 		clear_buffer_new(bh);
 
 		block_start = block_end;
@@ -2185,8 +2229,12 @@ static int __block_commit_write(struct inode *inode, struct page *page,
 	 * the next read(). Here we 'discover' whether the page went
 	 * uptodate as a result of this (potentially partial) write.
 	 */
+	/* 如果partial仍然保持初始值0,说明页面的所有缓冲区都已经更新,也就是整个页面的内容都为最新,
+	 * 在第一时间设置页面描述符的“已更新”标志.这是整个函数的关键操作.
+	 */
 	if (!partial)
 		SetPageUptodate(page);
+	/* 这个函数成功换回后,写入的数据已经保存在页面缓存中,它在将来某个时间会被冲刷到磁盘上. */
 	return 0;
 }
 
@@ -2195,14 +2243,26 @@ static int __block_commit_write(struct inode *inode, struct page *page,
  * bringing partial write blocks uptodate first.
  *
  * The filesystem needs to handle block truncation upon failure.
+ *
+ * block_writebegin负责块分配的基本任务，并首先使部分写入块更新.
+ * 文件系统需要在出现故障时处理块截断.
+ */
+
+/* 第一个指向地址空间描述符的指针
+ * 第二个参数为要写数据在文件中的位置
+ * 第三个参数为要写数据的字节数
+ * 第四个参数为标志
+ * 第五个参数为指向页面描述符的双重指针
+ * 第六个参数文件逻辑块编号映射到磁盘逻辑块编号的函数指针
  */
 int block_write_begin(struct address_space *mapping, loff_t pos, unsigned len,
 		unsigned flags, struct page **pagep, get_block_t *get_block)
 {
+	/* 计算在页面缓存中的索引值index */
 	pgoff_t index = pos >> PAGE_SHIFT;
 	struct page *page;
 	int status;
-
+	/*  查获取一个缓存页或者创建一个缓存页 */
 	page = grab_cache_page_write_begin(mapping, index, flags);
 	if (!page)
 		return -ENOMEM;
@@ -2240,6 +2300,39 @@ int block_write_end(struct file *file, struct address_space *mapping,
 		 * Do the simplest thing, and just treat any short write to a
 		 * non uptodate page as a zero-length write, and force the
 		 * caller to redo the whole thing.
+		 *
+		 * 写入的缓冲区现在将是最新的，所以我们不必担心readpage 读取它们并覆盖部分写入.
+		 * 然而,如果我们遇到了一个短写入,并且只部分写入到缓冲区中,它将不会被标记为uptodate,
+		 * 因此readpage可能会进入并破坏我们的部分写入.
+		 *
+		 * 做最简单的事情,将对非最新页面的任何短写入都视为零长度写入,并强制调用方重做整个过程.
+		 */
+
+		/*
+		 * 记住,我们曾经被通知说要写长度为len个字节的数据,并为此做了准备,
+		 * 结果现在又被告知说只复制了cpoied个字节的数据到页面中.为此,专门定义了个术语:短些(Short Write).
+		 * 具体文件系统必须处理短写,但短写是一件很难办的事情,为什么这么说呢?
+		 *
+		 *                                 len
+		 *           	      ————————————————————————————
+		 *                   ↓                           |
+		 *                    ———————————————————————    |
+		 *                   ↓     copied            ↓   ↓
+		 *   ___________________ ____________________ ____________________
+		 *  |                   |		     |                    |
+		 *  |___________________|____________________|____________________|
+		 *
+		 * 上面画了三个缓冲区,每个对应一个逻辑块.如前所述,前后两个逻辑块可能需要部分覆写,
+		 * 而所有中间的逻辑块都完全覆写.部分覆写的逻辑块,会从磁盘上读取数据到缓冲区,这就是我们在write_begin中所做的准备工作,
+		 * 然后接着将用户空间的数据复制到缓冲区.
+		 * 如果copied小于len,就有可能出现我们上图的情况,len和copied中间的那块可能是停留在缓冲区中的垃圾数据,
+		 * 即没有从磁盘上读出,又没有从用户空间更新,如果将中间的逻辑块冒然冲刷到磁盘,势必覆盖原来的有效数据,
+		 * 这显然不是我们所希望看到的.
+		 * 已写到缓冲区为最新,因此我们不需要担心readpage读取它们,并且覆写部分写.
+		 * 可是如果我们遇到短写,并且只有部分写入到缓冲区,它将被标记为已更新,因此readpage会进入并破坏我们的部分写.
+		 * 做最简单的事,将短写当做是对已更新页面的零长度写,然后让调用者重新做整个事情.
+		 * 遇到短些的情况,我们又不能简单地临时从磁盘上读入整个缓冲区,这样做又会覆盖掉已经从用户空间复制过来的数据,因此简单的做法是将copied设置为0，
+		 * 即将对非“已更新”页面的短写当做0长度的写来对待,并强制调用者重新来过.
 		 */
 		if (!PageUptodate(page))
 			copied = 0;
@@ -2254,7 +2347,17 @@ int block_write_end(struct file *file, struct address_space *mapping,
 	return copied;
 }
 EXPORT_SYMBOL(block_write_end);
-
+/* 第一个是指向文件描述符的指针;
+ * 第二个是指向地址空间描述符的指针;
+ * 第三个是在页面中的偏移
+ * 第四个是要写的字节数
+ * 第五个是已经复制的字节数
+ * 第六个是指向页面描述符的指针
+ * 第七个是一个void *的指针
+ */
+/* 地址空间操作表中的write_end回调函数是在缓冲写的情况下,在数据从用户缓冲区
+ * 复制到页面缓存中的页面之后,被具体文件系统用来做相关善后.
+ */
 int generic_write_end(struct file *file, struct address_space *mapping,
 			loff_t pos, unsigned len, unsigned copied,
 			struct page *page, void *fsdata)

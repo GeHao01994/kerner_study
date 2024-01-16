@@ -513,6 +513,13 @@ static void domain_dirty_limits(struct dirty_throttle_control *dtc)
  *
  * Calculate bg_thresh and thresh for global_wb_domain.  See
  * domain_dirty_limits() for details.
+ *
+ * global_dirty_limits - background-writeback 和 dirty-throttling 阈值
+ * @pbackground: bg_thresh输出参数
+ * @pdirty: thresh的输出参数
+ * 
+ * 计算global_wb_domain的bg_thresh和thresh.
+ * 有关详细信息，请参阅domain_dirty_limits().
  */
 void global_dirty_limits(unsigned long *pbackground, unsigned long *pdirty)
 {
@@ -889,12 +896,20 @@ static long long pos_ratio_polynom(unsigned long setpoint,
 /*
  * Dirty position control.
  *
+ * 脏的位置控制
+ *
  * (o) global/bdi setpoints
+ *
+ * (o) 全局/bdi设定点
  *
  * We want the dirty pages be balanced around the global/wb setpoints.
  * When the number of dirty pages is higher/lower than the setpoint, the
  * dirty position control ratio (and hence task dirty ratelimit) will be
  * decreased/increased to bring the dirty pages back to the setpoint.
+ *
+ * 我们希望脏页面在全局/wb setpoints 周围保持平衡.
+ * 脏页面的数量高于/低于设定点时，脏位置控制比率(以及因此的任务 dirty ratelimit)将减小/增加,
+ * 以使脏页面回到设定点.
  *
  *     pos_ratio = 1 << RATELIMIT_CALC_SHIFT
  *
@@ -960,12 +975,24 @@ static long long pos_ratio_polynom(unsigned long setpoint,
  * - start writing to a slow SD card and a fast disk at the same time. The SD
  *   card's wb_dirty may rush to many times higher than wb_setpoint.
  * - the wb dirty thresh drops quickly due to change of JBOD workload
+ *
+ * wb控制线不会下降到pos_ratio=1/4以下,因此,wb_derty在以下情况下启动得很高,则可以将其平滑地降低到正常值:
+ * - 同时开始向慢速SD卡和快速磁盘写入. SD卡的wb_dirty可能会飙升到比wb_setpoint高很多倍.
+ * -由于JBOD工作负载的变化，wb脏阈值迅速下降
  */
 static void wb_position_ratio(struct dirty_throttle_control *dtc)
 {
 	struct bdi_writeback *wb = dtc->wb;
 	unsigned long write_bw = wb->avg_write_bandwidth;
+	/*
+	 * static unsigned long dirty_freerun_ceiling(unsigned long thresh,
+	 *						unsigned long bg_thresh)
+	 * {
+	 *		return (thresh + bg_thresh) / 2;
+	 * }
+	 */
 	unsigned long freerun = dirty_freerun_ceiling(dtc->thresh, dtc->bg_thresh);
+	/* 取global_wb_domain -> dirty_limit 和 dtc->bg_thresh的最小值 */
 	unsigned long limit = hard_dirty_limit(dtc_dom(dtc), dtc->thresh);
 	unsigned long wb_thresh = dtc->wb_thresh;
 	unsigned long x_intercept;
@@ -1466,10 +1493,16 @@ void wb_update_bandwidth(struct bdi_writeback *wb, unsigned long start_time)
  * If dirty_poll_interval is too low, big NUMA machines will call the expensive
  * global_page_state() too often. So scale it near-sqrt to the safety margin
  * (the number of pages we may dirty without exceeding the dirty limits).
+ *
+ * 在一个task有很多脏页之后,balance_dirty_pages_ratelimited()将查看是否需要启动脏节流.
+ *
+ * 如果dirty_poll_interval太低，大型NUMA机器将过于频繁地调用昂贵的global_page_state().
+ * 因此，将其缩放到接近sqrt的安全幅度(在不超过脏限制的情况下，我们可能会脏掉的页数).
  */
 static unsigned long dirty_poll_interval(unsigned long dirty,
 					 unsigned long thresh)
 {
+	/* ilog2(x)是x对2取对数并下取整 */
 	if (thresh > dirty)
 		return 1UL << (ilog2(thresh - dirty) >> 1);
 
@@ -1587,6 +1620,13 @@ static inline void wb_dirty_limits(struct dirty_throttle_control *dtc)
 	 *   wb_thresh. Instead the auxiliary wb control line in
 	 *   wb_position_ratio() will let the dirtier task progress
 	 *   at some rate <= (write_bw / 2) for bringing down wb_dirty.
+	 *
+	 * wb_thresh没有像dirty_thresh那样被视为某种限制因素，原因如下
+	 * -在JBOD设置中，wb_thresh可能波动很大
+	 * -在具有HDD和USB密钥的系统中,USB密钥可能会以某种方式进入状态(wb_dirty >> wb_thresh),这可能是因为wb_dirty起点高,
+	 *  也可能是因为wb_thresh下降得很低.
+	 *  在这种情况下,我们不想在wb_dirty低于wb_thresh之前对USB密钥脏器进行100秒的硬节流.
+	 *  相反，wb_position_ratio（）中的辅助wb控制行将使较脏的任务以某种速率<=（write_bw/2）进行，以降低wb_dirty。
 	 */
 	dtc->wb_thresh = __wb_calc_thresh(dtc);
 	dtc->wb_bg_thresh = dtc->thresh ?
@@ -1642,6 +1682,7 @@ static void balance_dirty_pages(struct address_space *mapping,
 	unsigned long task_ratelimit;
 	unsigned long dirty_ratelimit;
 	struct backing_dev_info *bdi = wb->bdi;
+	/* BDI_CAP_STRICTLIMIT: Keep number of dirty pages below bdi threshold. */
 	bool strictlimit = bdi->capabilities & BDI_CAP_STRICTLIMIT;
 	unsigned long start_time = jiffies;
 
@@ -1658,9 +1699,8 @@ static void balance_dirty_pages(struct address_space *mapping,
 		 * written to the server's write cache, but has not yet
 		 * been flushed to permanent storage.
 		 *
-		 * Unstable writes 是某些网络文件系统（如NFS）的一个特性,
-		 * 其中数据可能已写入服务器的写入缓存，但尚未写入
-		 * 已冲洗至永久存储。
+		 * Unstable writes 是某些网络文件系统(如NFS)的一个特性,
+		 * 其中数据可能已写入服务器的写入缓存,但是还没有被冲洗到永久存储.
 		 */
 		nr_reclaimable = global_node_page_state(NR_FILE_DIRTY) +
 					global_node_page_state(NR_UNSTABLE_NFS);
@@ -1726,8 +1766,9 @@ static void balance_dirty_pages(struct address_space *mapping,
 		     m_dirty <= dirty_freerun_ceiling(m_thresh, m_bg_thresh))) {
 			unsigned long intv = dirty_poll_interval(dirty, thresh);
 			unsigned long m_intv = ULONG_MAX;
-
+			/* 更新进程的dirty_paused_when */
 			current->dirty_paused_when = now;
+			/* 每次执行balance_dirty_pages()函数都对current->nr_dirtied清0，这表示进行了脏页平衡所以对清0??????? */
 			current->nr_dirtied = 0;
 			if (mdtc)
 				m_intv = dirty_poll_interval(m_dirty, m_thresh);
@@ -2141,8 +2182,13 @@ void laptop_sync_completion(void)
  * Here we set ratelimit_pages to a level which ensures that when all CPUs are
  * dirtying in parallel, we cannot go more than 3% (1/32) over the dirty memory
  * thresholds.
+ *
+ * 如果ratelimit_pages过高,那么如果大量进程同时执行写入,则可能会导致脏数据过载.
+ * 如果它太低,SMP机器将过于频繁地调用(昂贵的)get_writeback_state.
+ *
+ * 在这里,我们将ratelimit_pages设置为确保当所有CPU并行地进行脏操作,我们不能超过脏内存的3%(1/32)阈值。
+ *
  */
-
 void writeback_set_ratelimit(void)
 {
 	struct wb_domain *dom = &global_wb_domain;
@@ -2150,8 +2196,11 @@ void writeback_set_ratelimit(void)
 	unsigned long dirty_thresh;
 
 	global_dirty_limits(&background_thresh, &dirty_thresh);
+	/* 设置dom的drity_limit为dirty_thresh */
 	dom->dirty_limit = dirty_thresh;
+	/* ratelimit_pages = dirty_thresh / (num_online_cpus() * 32) */
 	ratelimit_pages = dirty_thresh / (num_online_cpus() * 32);
+	/* 如果小于16，就给16给它 */
 	if (ratelimit_pages < 16)
 		ratelimit_pages = 16;
 }
