@@ -369,7 +369,10 @@ struct zone {
 	 */
 	/* zone watermarks, access with *_wmark_pages(zone) macros */
 	unsigned long watermark[NR_WMARK];
-
+	/* 高阶原子分配：阶数大于0，并且调用者设置了分配标志位__GFP_ATOMIC，要求不能睡眠。
+	 * 页分配器对高阶原子分配做了优化处理,增加了高阶原子类型（MIGRATE_HIGHATOMIC）,在内存区域的结构体中增加1个成员“nr_reserved_highatomic”,用来记录高阶原子类型的总页数,
+	 * 并且限制其数量: zone->nr_reserved_highatomic < (zone->managed_pages / 100) + pageblock_nr_pages,即必须小于(伙伴分配器管理的总页数 / 100 + 分组阶数对应的页数).
+	 */
 	unsigned long nr_reserved_highatomic;
 
 	/*
@@ -380,8 +383,24 @@ struct zone {
 	 * there being tons of freeable ram on the higher zones).  This array is
 	 * recalculated at runtime if the sysctl_lowmem_reserve_ratio sysctl
 	 * changes.
+	 *
+	 * 我们不知道我们将要分配的内存是否是freeable,或者/并且它最终会被释放,
+	 * 所以为了避免完全浪费几个GB的内存,我们必须保留一些较低区域的内存(否则,尽管较高区域上有大量可自由用的内存,但我们仍有在较低区域上运行OOM的风险)
+	 * 如果sysctl_lowmem_reserve_ratio sysctl发生更改，则会在运行时重新计算此数组.
 	 */
 	/* zone预留的内存 */
+	/* 每个内存管理区(zone)都有一个lowmem_reserve字段,它代表本管理区预留的物理内存大小.
+	 * 所谓预留,那就是说肯定还是有用的,只是用的时机不同.
+	 * 系统中已经为每个管理区(zone)内存大小设定了三个水位值了,分别时WMARK_HIGH/WMARK_LOW/WMARK_MIN.怎么这里又多出来一个lowmem_reserve?
+	 * 在内存分配时,分配器会根据不同的水位执行不同的动作,首先内存分配器会扫描所有zonelist中的管理区,按照zonelist中的分配顺序依次检查管理区中能否分配对应的内存.
+	 * 这几个值都是用来确定最终要从哪个管理区来分配内存这个问题的.
+	 * 内存申请时有一个fallback的过程，通过gfp flag得到zone并不一定是最终申请内存所在的zone，fallback的顺序如下:
+	 * fallback list: MOVABLE=>HIGHMEM=>NORMAL=>DMA32=>DMA
+	 * 通过fallback顺序依次检测具备合适空闲内存的zone用于本次申请,那么对于高位的zone过量申请可能导致低位的zone被用尽,从而影响低位的申请,比如DMA内存的申请失败可能引起系统异常,
+	 * 那么lowmem_reserve就是为了防止高位zone在fallback时过度使用自己的内存.
+	 * 低位zone会优先保证自己的内存分配,确实有一定的富余的情况下,才可以提供给更高位的zones.
+	 * 通过系统文件/proc/zoneinfo中的"protection"可以看到各个zone的lowmem_reserve配置.
+	 */
 	long lowmem_reserve[MAX_NR_ZONES];
 
 #ifdef CONFIG_NUMA
@@ -409,20 +428,32 @@ struct zone {
 	 * holes, which is calculated as:
 	 * 	spanned_pages = zone_end_pfn - zone_start_pfn;
 	 *
+	 * spanned_pages是zone 跨越的总页数,包括黑洞,计算如下:
+	 * 	spanned_pages=zone_end_pfn-zone_start_pfn;
+	 *
 	 * present_pages is physical pages existing within the zone, which
 	 * is calculated as:
 	 *	present_pages = spanned_pages - absent_pages(pages in holes);
+	 *
+	 * present_pages是zone存在的物理页面，计算如下：
+	 *	present_pages = spanned_pages- absent_pages(黑洞的页面);
 	 *
 	 * managed_pages is present pages managed by the buddy system, which
 	 * is calculated as (reserved_pages includes pages allocated by the
 	 * bootmem allocator):
 	 *	managed_pages = present_pages - reserved_pages;
 	 *
+	 * managed_pages是由伙伴系统管理的当前页面,其计算为(reserved_pages包括由bootmem分配器分配的页面)
+	 *	managed_pages=present_pages-reserved_pages;
+	 *
 	 * So present_pages may be used by memory hotplug or memory power
 	 * management logic to figure out unmanaged pages by checking
 	 * (present_pages - managed_pages). And managed_pages should be used
 	 * by page allocator and vm scanner to calculate all kinds of watermarks
 	 * and thresholds.
+	 *
+	 * 因此，内存热插拔或内存电源管理logic可以使用present_pages来通过检查(present_paages-managed_pages)找出未管理的页面.
+	 * managed_pagesb被页面分配器使用和vm扫描器来计算各种水位和阈值。
 	 *
 	 * Locking rules:
 	 *
@@ -431,19 +462,33 @@ struct zone {
 	 * and it is done in the main allocator path.  But, it is written
 	 * quite infrequently.
 	 *
+	 * zone_start_pfn和spanned_pages受span_seqlock保护,
+	 * 它是一个seqlock,因为它必须在zone->lock之外读取,并且是在主分配器路径中完成的.但是,它很少被写.
+	 *
 	 * The span_seq lock is declared along with zone->lock because it is
 	 * frequently read in proximity to zone->lock.  It's good to
 	 * give them a chance of being in the same cacheline.
 	 *
+	 * span_seq lock 与zone->lock 一起声明,因为它经常在zone->lock 附近读取.
+	 * 很高兴能给他们一个机会,让他们有相同的cacheline.
+	 *
 	 * Write access to present_pages at runtime should be protected by
 	 * mem_hotplug_begin/end(). Any reader who can't tolerant drift of
 	 * present_pages should get_online_mems() to get a stable value.
+	 *
+	 * 运行时对present_pages的写访问应该受到mem_hotplug_begin/end()的保护.
+	 * 任何不能容忍present_pages变动的读者都应该通过get_online_mems()以获得一个稳定的值.
 	 *
 	 * Read access to managed_pages should be safe because it's unsigned
 	 * long. Write access to zone->managed_pages and totalram_pages are
 	 * protected by managed_page_count_lock at runtime. Idealy only
 	 * adjust_managed_page_count() should be used instead of directly
 	 * touching zone->managed_pages and totalram_pages.
+	 *
+	 * 对managed_pages的读取访问应该是安全的,因为它是unsigned long的.
+	 * 在运行时,对zone->managed_pages和totalam_pages的写访问受managed_page_count_lock保护.
+	 * 理想情况下,adjust_managed_page_count()应该取代直接接触zone->managed_pages和totalram_pages而被使用
+	 *
 	 */
 	/* zone被伙伴系统管理的数量 */
 	unsigned long		managed_pages;
@@ -489,12 +534,16 @@ struct zone {
 	 * When free pages are below this point, additional steps are taken
 	 * when reading the number of free pages to avoid per-cpu counter
 	 * drift allowing watermarks to be breached
+	 *
+	 * 当free pages 低于这一点时,在读取free pages的数量时采取额外步骤,以避免per-cpu 计数滑动导致水位被破坏
 	 */
 	unsigned long percpu_drift_mark;
 
 #if defined CONFIG_COMPACTION || defined CONFIG_CMA
 	/* pfn where compaction free scanner should start */
+	/* 用于记录从尾部开始扫描的空闲page的位置 */
 	unsigned long		compact_cached_free_pfn;
+	/* 该数组用于控制异步和同步两种memory compact场景所从头部开始扫描的页迁移位置 */
 	/* pfn where async and sync compaction migration scanner should start */
 	unsigned long		compact_cached_migrate_pfn[2];
 #endif
@@ -705,6 +754,9 @@ typedef struct pglist_data {
 #endif /* CONFIG_DEFERRED_STRUCT_PAGE_INIT */
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+	/* 这里实际上就是把THP切割成小page的队列
+	 * 具体可以看一下deferred_split_huge_page函数
+	 */
 	spinlock_t split_queue_lock;
 	struct list_head split_queue;
 	unsigned long split_queue_len;

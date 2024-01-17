@@ -146,18 +146,23 @@ struct bdi_writeback {
 };
 
 struct backing_dev_info {
+	/* 链入活动BDI或者待处理BDI链表的连接件 */
 	struct list_head bdi_list;
 	/* ra_pages字段表示当前的最大页数，即对该文件允许的最大预读量
 	 * 和/sys/block/<devname>/queue/read_ahead_kb的值对应
 	 */
 	unsigned long ra_pages;	/* max readahead in PAGE_SIZE units */
+	/* 设备能力 */
 	unsigned int capabilities; /* Device capabilities */
+	/* 用于判断这个BDI是否是拥塞的回调方法 */
 	congested_fn *congested_fn; /* Function pointer if device is md/dm */
+	/* 传递给congested_fn的辅助参数 */
 	void *congested_data;	/* Pointer to aux data for congested func */
-
+	/* 这个BDI的名字 */
 	char *name;
-
+	/* 分配给这个BDI的全局“脏门槛”的最小百分比 */
 	unsigned int min_ratio;
+	/* 分配给这个BDI的全局“脏门槛”的最大百分比 */
 	unsigned int max_ratio, max_prop_frac;
 
 	/*
@@ -168,6 +173,7 @@ struct backing_dev_info {
 	atomic_long_t tot_write_bandwidth;
 
 	struct bdi_writeback wb;  /* the root writeback info for this bdi */
+	/* 这个BDI的回写线程链表的表头 */
 	struct list_head wb_list; /* list of all wbs */
 #ifdef CONFIG_CGROUP_WRITEBACK
 	struct radix_tree_root cgwb_tree; /* radix tree of active cgroup wbs */
@@ -177,7 +183,7 @@ struct backing_dev_info {
 	struct bdi_writeback_congested *wb_congested;
 #endif
 	wait_queue_head_t wb_waitq;
-
+	/* 指向对应的device描述符的指针 */
 	struct device *dev;
 	struct device *owner;
 

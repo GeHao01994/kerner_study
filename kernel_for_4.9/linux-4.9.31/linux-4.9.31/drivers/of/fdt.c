@@ -140,14 +140,14 @@ int of_fdt_match(const void *blob, unsigned long node,
 
 	if (!compat)
 		return 0;
-	//±éÀúcompatible×Ö·û´®Êı×é
+	/* éå†compatibleå­—ç¬¦ä¸²æ•°ç»„ */
 	while (*compat) {
-		//·µ»ØcompatibleµÄÆ¥ÅäÖµ 
+		/* è¿”å›compatibleçš„åŒ¹é…å€¼ */
 		tmp = of_fdt_is_compatible(blob, node, *compat);
 		if (tmp && (score == 0 || (tmp < score)))
-			//·µ»Ø×î´óµÄÆ¥ÅäÖµ 
+			/* è¿”å›æœ€å¤§çš„åŒ¹é…å€¼ */
 			score = tmp;
-		//ÏÂÒ»¸ö×Ö·û´®  
+		/* ä¸‹ä¸€ä¸ªå­—ç¬¦ä¸² */
 		compat++;
 	}
 
@@ -492,32 +492,32 @@ static void *__unflatten_device_tree(const void *blob,
 	pr_debug("magic: %08x\n", fdt_magic(blob));
 	pr_debug("size: %08x\n", fdt_totalsize(blob));
 	pr_debug("version: %08x\n", fdt_version(blob));
-	//¼ì²éÉè±¸Ê÷magic
+	/* æ£€æŸ¥è®¾å¤‡æ ‘magic */
 	if (fdt_check_header(blob)) {
 		pr_err("Invalid device tree blob header\n");
 		return NULL;
 	}
 	/* First pass, scan for size */
-	//µÚÒ»´Îµ÷ÓÃmem´«0£¬allnextpp´«NULL£¬Êµ¼ÊÉÏÊÇÎªÁË¼ÆËãÕû¸öÉè±¸Ê÷ËùÒªµÄ¿Õ¼ä  
+	/* ç¬¬ä¸€æ¬¡è°ƒç”¨memä¼ 0ï¼Œallnextppä¼ NULLï¼Œå®é™…ä¸Šæ˜¯ä¸ºäº†è®¡ç®—æ•´ä¸ªè®¾å¤‡æ ‘æ‰€è¦çš„ç©ºé—´ */
 	size = unflatten_dt_nodes(blob, NULL, dad, NULL);
 	if (size < 0)
 		return NULL;
-	//4×Ö½Ú¶ÔÆë
+	/* 4å­—èŠ‚å¯¹é½ */
 	size = ALIGN(size, 4);
 	pr_debug("  size is %d, allocating...\n", size);
 
-	//µ÷ÓÃearly_init_dt_alloc_memory_archº¯Êı£¬ÎªÉè±¸Ê÷·ÖÅäÄÚ´æ¿Õ¼ä  
+	/* è°ƒç”¨early_init_dt_alloc_memory_archå‡½æ•°ï¼Œä¸ºè®¾å¤‡æ ‘åˆ†é…å†…å­˜ç©ºé—´ */
 	/* Allocate memory for the expanded device tree */
 	mem = dt_alloc(size + 4, __alignof__(struct device_node));
 	if (!mem)
 		return NULL;
 
 	memset(mem, 0, size);
-	//Éè±¸Ê÷½áÊø´¦¸³Öµ0xdeadbeef£¬ÎªÁËºó±ß¼ì²éÊÇ·ñÓĞÊı¾İÒç³ö 
+	/* è®¾å¤‡æ ‘ç»“æŸå¤„èµ‹å€¼0xdeadbeefï¼Œä¸ºäº†åè¾¹æ£€æŸ¥æ˜¯å¦æœ‰æ•°æ®æº¢å‡º */
 	*(__be32 *)(mem + size) = cpu_to_be32(0xdeadbeef);
 
 	pr_debug("  unflattening %p...\n", mem);
- //memÎªÉè±¸Ê÷·ÖÅäµÄÄÚ´æ¿Õ¼ä£¬allnextpÖ¸ÏòÈ«¾Ö±äÁ¿of_allnodes£¬Éú³ÉÕû¸öÉè±¸Ê÷ 
+	/* memä¸ºè®¾å¤‡æ ‘åˆ†é…çš„å†…å­˜ç©ºé—´ï¼ŒallnextpæŒ‡å‘å…¨å±€å˜é‡of_allnodesï¼Œç”Ÿæˆæ•´ä¸ªè®¾å¤‡æ ‘ */
 	/* Second pass, do actual unflattening */
 	unflatten_dt_nodes(blob, mem, dad, mynodes);
 	if (be32_to_cpup(mem + size) != 0xdeadbeef)
@@ -741,7 +741,7 @@ int __init of_scan_flat_dt(int (*it)(unsigned long node,
 				     void *data),
 			   void *data)
 {
-	//Õâ¸öinitial_boot_paramsÊÇÖ¸µÄÉè±¸Ê÷µÄÆğÊ¼µØÖ·,ºóÃæ»á×öÆ«ÒÆ
+	/* è¿™ä¸ªinitial_boot_paramsæ˜¯æŒ‡çš„è®¾å¤‡æ ‘çš„èµ·å§‹åœ°å€,åé¢ä¼šåšåç§» */
 	const void *blob = initial_boot_params;
 	const char *pathp;
 	int offset, rc = 0, depth = -1;
@@ -751,10 +751,10 @@ int __init of_scan_flat_dt(int (*it)(unsigned long node,
              offset = fdt_next_node(blob, offset, &depth)) {
 
 		pathp = fdt_get_name(blob, offset, NULL);
-//Èç¹ûÊÇ½ÚµãÂ·¾¶£¬Ôò·µ»ØÂ·¾¶ÃûµÄ×îºóÒ»¶Î£¬¼ÙÈçÎª/root/my_root,Ôò·µ»Ømy_root£¬¼´»ñµÃ½ÚµãÃû
+		/* å¦‚æœæ˜¯èŠ‚ç‚¹è·¯å¾„ï¼Œåˆ™è¿”å›è·¯å¾„åçš„æœ€åä¸€æ®µï¼Œå‡å¦‚ä¸º/root/my_root,åˆ™è¿”å›my_rootï¼Œå³è·å¾—èŠ‚ç‚¹å */
 		if (*pathp == '/')
 			pathp = kbasename(pathp);
-   //µ÷ÓÃÏàÓ¦µÄ½Úµã´¦Àíº¯Êı£¬offsetÖ¸Ïò½ÚµãÊôĞÔµØÖ·
+		/* è°ƒç”¨ç›¸åº”çš„èŠ‚ç‚¹å¤„ç†å‡½æ•°ï¼ŒoffsetæŒ‡å‘èŠ‚ç‚¹å±æ€§åœ°å€ */
 		rc = it(offset, pathp, depth, data);
 	}
 	return rc;
@@ -816,9 +816,10 @@ int __init of_flat_dt_is_compatible(unsigned long node, const char *compat)
  */
 int __init of_flat_dt_match(unsigned long node, const char *const *compat)
 {
-	 //initial_boot_paramsÖ¸ÏòÉè±¸Ê÷ÆğÊ¼µØÖ·
-	 //nodeÖ¸Ïò¸ù½ÚµãµÄÊôĞÔµØÖ·
-	  //compatÎªÏµÍ³ÖĞmachine_desc½á¹¹µÄcompatible×Ö·û´®  
+	/* initial_boot_paramsæŒ‡å‘è®¾å¤‡æ ‘èµ·å§‹åœ°å€
+	 * nodeæŒ‡å‘æ ¹èŠ‚ç‚¹çš„å±æ€§åœ°å€
+	 * compatä¸ºç³»ç»Ÿä¸­machine_descç»“æ„çš„compatibleå­—ç¬¦ä¸²
+	 */
 	return of_fdt_match(initial_boot_params, node, compat);
 }
 
@@ -859,14 +860,15 @@ const void * __init of_flat_dt_match_machine(const void *default_match,
 	const char *const *compat;
 	unsigned long dt_root;
 	unsigned int best_score = ~1, score = 0;
-	//¶Á³öÉè±¸Ê÷µÄ¸ù½Úµã£¬dt_rootÖ¸Ïò¸ù½ÚµãµÄÊôĞÔµØÖ·´¦
+	/* è¯»å‡ºè®¾å¤‡æ ‘çš„æ ¹èŠ‚ç‚¹ï¼Œdt_rootæŒ‡å‘æ ¹èŠ‚ç‚¹çš„å±æ€§åœ°å€å¤„ */
 	dt_root = of_get_flat_dt_root();
- 	//µ÷ÓÃget_next_compat£¬±éÀú¸ÃÏµÍ³ÖĞµÄËùÓĞmachine_desc½á¹¹£¬·µ»Ø¸ødata£¬
-	 //²¢ÇÒ·µ»Ø¸Ã½á¹¹µÄcompatible  
+	/* è°ƒç”¨get_next_compatï¼Œéå†è¯¥ç³»ç»Ÿä¸­çš„æ‰€æœ‰machine_descç»“æ„ï¼Œè¿”å›ç»™data,
+	 * å¹¶ä¸”è¿”å›è¯¥ç»“æ„çš„compatible
+	 */
 	while ((data = get_next_compat(&compat))) {
- //½«ÏµÍ³ÖĞµÄËùÓĞmachine_desc½á¹¹µÄcompatible×Ö·û´®ÓëÉè±¸Ê÷¸ù½ÚµãµÄcompatibleÊôĞÔ½øĞĞmatch 
+		/* å°†ç³»ç»Ÿä¸­çš„æ‰€æœ‰machine_descç»“æ„çš„compatibleå­—ç¬¦ä¸²ä¸è®¾å¤‡æ ‘æ ¹èŠ‚ç‚¹çš„compatibleå±æ€§è¿›è¡Œmatch */
 		score = of_flat_dt_match(dt_root, compat);
-  //·µ»ØÓë¸ù½ÚµãÊôĞÔcompatibleÊôĞÔÖµ×îÆ¥ÅäµÄmachine_desc½á¹¹  
+		/* è¿”å›ä¸æ ¹èŠ‚ç‚¹å±æ€§compatibleå±æ€§å€¼æœ€åŒ¹é…çš„machine_descç»“æ„ */
 		if (score > 0 && score < best_score) {
 			best_data = data;
 			best_score = score;
@@ -917,19 +919,19 @@ static void __init early_init_dt_check_for_initrd(unsigned long node)
 	const __be32 *prop;
 
 	pr_debug("Looking for initrd properties... ");
-	//·µ»Ø¸Ãchosen½ÚµãÖĞÊôĞÔÃûÎª"linux,initrd-start"µÄµØÖ·  
+	/* è¿”å›è¯¥chosenèŠ‚ç‚¹ä¸­å±æ€§åä¸º"linux,initrd-start"çš„åœ°å€ */
 	prop = of_get_flat_dt_prop(node, "linux,initrd-start", &len);
 	if (!prop)
 		return;
-	 //´Ó¸ÃµØÖ·¶Á³öinitrd-startµÄµØÖ·  
+	/* ä»è¯¥åœ°å€è¯»å‡ºinitrd-startçš„åœ°å€ */
 	start = of_read_number(prop, len/4);
-	//·µ»Ø¸Ãchosen½ÚµãÖĞÊôĞÔÃûÎª"linux,initrd-end"µÄµØÖ·
+	/* /è¿”å›è¯¥chosenèŠ‚ç‚¹ä¸­å±æ€§åä¸º"linux,initrd-end"çš„åœ°å€ */
 	prop = of_get_flat_dt_prop(node, "linux,initrd-end", &len);
 	if (!prop)
 		return;
-	//´Ó¸ÃµØÖ·¶Á³öinitrd-endµÄµØÖ·  
+	/* ä»è¯¥åœ°å€è¯»å‡ºinitrd-endçš„åœ°å€ */
 	end = of_read_number(prop, len/4);
-	//½«¶Á³öµÄµØÖ·¸³Öµ¸øÈ«¾Ö±äÁ¿initrd_startºÍinitrd_end£¬ÓÃÓÚ¸úÎÄ¼şÏµÍ³µÄ¹ÒÔØ  
+	/* å°†è¯»å‡ºçš„åœ°å€èµ‹å€¼ç»™å…¨å±€å˜é‡initrd_startå’Œinitrd_endï¼Œç”¨äºè·Ÿæ–‡ä»¶ç³»ç»Ÿçš„æŒ‚è½½ */
 	__early_init_dt_declare_initrd(start, end);
 
 	pr_debug("initrd_start=0x%llx  initrd_end=0x%llx\n",
@@ -1002,16 +1004,17 @@ int __init early_init_dt_scan_root(unsigned long node, const char *uname,
 
 	dt_root_size_cells = OF_ROOT_NODE_SIZE_CELLS_DEFAULT;
 	dt_root_addr_cells = OF_ROOT_NODE_ADDR_CELLS_DEFAULT;
-	//¸ù½ÚµãµÄÌ½Ë÷Éî¶ÈdepthÒ»¶¨Îª0£¬·ñÔò²»ÊÇ¸ù½Úµã"/",nodeÎª¸ù½ÚµãµÄÊôĞÔµØÖ
-	//·µ»Ø¸ù½Úµã½ÚµãÊôĞÔÃûÎª"#size-cells"µÄµØÖ·   
+	/* æ ¹èŠ‚ç‚¹çš„æ¢ç´¢æ·±åº¦depthä¸€å®šä¸º0ï¼Œå¦åˆ™ä¸æ˜¯æ ¹èŠ‚ç‚¹"/",nodeä¸ºæ ¹èŠ‚ç‚¹çš„å±æ€§åœ°å€
+	 * è¿”å›æ ¹èŠ‚ç‚¹èŠ‚ç‚¹å±æ€§åä¸º"#size-cells"çš„åœ°å€
+	 */
 	prop = of_get_flat_dt_prop(node, "#size-cells", NULL);
-	//´Ó¸ÃÊôĞÔ»ñµÃroot size
+	/* ä»è¯¥å±æ€§è·å¾—root size */
 	if (prop)
 		dt_root_size_cells = be32_to_cpup(prop);
 	pr_debug("dt_root_size_cells = %x\n", dt_root_size_cells);
-	 //·µ»Ø¸ù½Úµã½ÚµãÊôĞÔÃûÎª"#address-cells"µÄµØÖ·  
+	/* è¿”å›æ ¹èŠ‚ç‚¹èŠ‚ç‚¹å±æ€§åä¸º"#address-cells"çš„åœ°å€ */
 	prop = of_get_flat_dt_prop(node, "#address-cells", NULL);
-	 //´Ó¸ÃÊôĞÔ»ñµÃroot address
+	/* ä»è¯¥å±æ€§è·å¾—root address */
 	if (prop)
 		dt_root_addr_cells = be32_to_cpup(prop);
 	pr_debug("dt_root_addr_cells = %x\n", dt_root_addr_cells);
@@ -1034,11 +1037,11 @@ u64 __init dt_mem_next_cell(int s, const __be32 **cellp)
 int __init early_init_dt_scan_memory(unsigned long node, const char *uname,
 				     int depth, void *data)
 {
-	 //»ñÈ¡¸Ã½ÚµãÖĞÊôĞÔ"device_type"µÄÊôĞÔÖµ
+	/* è·å–è¯¥èŠ‚ç‚¹ä¸­å±æ€§"device_type"çš„å±æ€§å€¼ */
 	const char *type = of_get_flat_dt_prop(node, "device_type", NULL);
 	const __be32 *reg, *endp;
 	int l;
-	 //¼ì²é"device_type"µÄÊôĞÔÖµ£¬È·¶¨¸Ã½ÚµãÊÇ·ñÎªmemory½Úµã  
+	/* æ£€æŸ¥"device_type"çš„å±æ€§å€¼ï¼Œç¡®å®šè¯¥èŠ‚ç‚¹æ˜¯å¦ä¸ºmemoryèŠ‚ç‚¹ */
 	/* We are scanning "memory" nodes only */
 	if (type == NULL) {
 		/*
@@ -1049,20 +1052,20 @@ int __init early_init_dt_scan_memory(unsigned long node, const char *uname,
 			return 0;
 	} else if (strcmp(type, "memory") != 0)
 		return 0;
-	//´Ó¸Ãmemory½ÚµãÖĞ»ñÈ¡ÊôĞÔ"linux,usable-memory"µÄÊôĞÔÖµ£¬¼°ÊôĞÔÖµ´óĞ¡l 
+	/* ä»è¯¥memoryèŠ‚ç‚¹ä¸­è·å–å±æ€§"linux,usable-memory"çš„å±æ€§å€¼ï¼ŒåŠå±æ€§å€¼å¤§å°l */
 	reg = of_get_flat_dt_prop(node, "linux,usable-memory", &l);
 	if (reg == NULL)
 		reg = of_get_flat_dt_prop(node, "reg", &l);
 	if (reg == NULL)
 		return 0;
-	 //regÎªÊôĞÔÖµµÄÆğÊ¼µØÖ·£¬endpÎª½áÊøµØÖ·
+	/* regä¸ºå±æ€§å€¼çš„èµ·å§‹åœ°å€ï¼Œendpä¸ºç»“æŸåœ°å€ */
 	endp = reg + (l / sizeof(__be32));
 
 	pr_debug("memory scan node %s, reg size %d,\n", uname, l);
 
 	while ((endp - reg) >= (dt_root_addr_cells + dt_root_size_cells)) {
 		u64 base, size;
-		  //¶Á³öÎïÀíÄÚ´æµÄÆğÊ¼µØÖ·ÒÔ¼°size  
+		/* è¯»å‡ºç‰©ç†å†…å­˜çš„èµ·å§‹åœ°å€ä»¥åŠsize */
 		base = dt_mem_next_cell(dt_root_addr_cells, &reg);
 		size = dt_mem_next_cell(dt_root_size_cells, &reg);
 
@@ -1070,7 +1073,7 @@ int __init early_init_dt_scan_memory(unsigned long node, const char *uname,
 			continue;
 		pr_debug(" - %llx ,  %llx\n", (unsigned long long)base,
 		    (unsigned long long)size);
-		  //Ìí¼ÓÎïÀíÄÚ´æµ½memblockÖĞ½øĞĞ¹ÜÀí
+		/* æ·»åŠ ç‰©ç†å†…å­˜åˆ°memblockä¸­è¿›è¡Œç®¡ç† */
 		early_init_dt_add_memory_arch(base, size);
 	}
 
@@ -1084,15 +1087,16 @@ int __init early_init_dt_scan_chosen(unsigned long node, const char *uname,
 	const char *p;
 
 	pr_debug("search \"chosen\", depth: %d, uname: %s\n", depth, uname);
-	//depthÉî¶ÈÒªÎª1£¬±íÊ¾ÔÚ¸ù½ÚµãÏÂ(Ò»°ã¸ù½Úµã/µÄdepthÎª0)
-	//data±íÊ¾ÏµÍ³Æô¶¯ÃüÁîĞĞboot_command_lineÒª·ÖÅä¿Õ¼ä 
-	//¼ì²é½ÚµãÃûÊÇ·ñÎªchosen½Úµã 
+	/* depthæ·±åº¦è¦ä¸º1ï¼Œè¡¨ç¤ºåœ¨æ ¹èŠ‚ç‚¹ä¸‹(ä¸€èˆ¬æ ¹èŠ‚ç‚¹/çš„depthä¸º0)
+	 * dataè¡¨ç¤ºç³»ç»Ÿå¯åŠ¨å‘½ä»¤è¡Œboot_command_lineè¦åˆ†é…ç©ºé—´
+	 * æ£€æŸ¥èŠ‚ç‚¹åæ˜¯å¦ä¸ºchosenèŠ‚ç‚¹
+	 */
 	if (depth != 1 || !data ||
 	    (strcmp(uname, "chosen") != 0 && strcmp(uname, "chosen@0") != 0))
 		return 0;
-      //´ÓÉè±¸Ê÷µÄchosen½ÚµãÖĞ¶Á³öinitrdµÄÆğÊ¼¡¢½áÊøµØÖ·
+	/* ä»è®¾å¤‡æ ‘çš„chosenèŠ‚ç‚¹ä¸­è¯»å‡ºinitrdçš„èµ·å§‹ã€ç»“æŸåœ°å€ */
 	early_init_dt_check_for_initrd(node);
-	//Éè±¸Ê÷µÄchosen½ÚµãÖĞ¶ÁÈ¡bootargsÊôĞÔµÄÊôĞÔÖµ£¬²¢¿½±´¸øboot_command_line
+	/* /è®¾å¤‡æ ‘çš„chosenèŠ‚ç‚¹ä¸­è¯»å–bootargså±æ€§çš„å±æ€§å€¼ï¼Œå¹¶æ‹·è´ç»™boot_command_line */
 	/* Retrieve command line */
 	p = of_get_flat_dt_prop(node, "bootargs", &l);
 	if (p != NULL && l > 0)
@@ -1132,42 +1136,61 @@ int __init early_init_dt_scan_chosen(unsigned long node, const char *uname,
 
 void __init __weak early_init_dt_add_memory_arch(u64 base, u64 size)
 {
+	/*
+	 * #define MIN_MEMBLOCK_ADDR       __pa(PAGE_OFFSET)
+	 * PHYS_OFFSET: å†…æ ¸é•œåƒåœ¨DDRä¸Šçš„èµ·å§‹ç‰©ç†åœ°å€
+	 * TEXT_OFFSET: å…¶å®å†…æ ¸é•œåƒçœŸå®è¢«åŠ è½½åˆ°çš„åœ°å€ä¸º(PHYS_OFFSET+TEXT_OFFSET),
+	 *              TEXT_OFFSETå¤§å°è¿™å—åŒºåŸŸä¸ºä¿ç•™åŒºåŸŸï¼Œä¸€èˆ¬ç”¨äºå­˜æ”¾é¡µè¡¨æˆ–è€…bootlaoder
+	 *		å’Œkernelé—´å‚æ•°çš„ä¼ é€’
+	 * PAGE_OFFSET: å†…æ ¸å¯åŠ¨è¿‡ç¨‹ä¸­ï¼Œç‰©ç†åœ°å€PHYS_OFFSETä¼šçº¿æ€§æ˜ å°„åˆ°è™šæ‹Ÿåœ°å€PAGE_OFFSET
+	 * æ‰€ä»¥è¿™é‡Œçš„MIN_MEMBLOCK_ADDRå³æ˜¯PHYS_OFFSET.
+	 */
 	const u64 phys_offset = MIN_MEMBLOCK_ADDR;
-
+	/* å¦‚æœbaseæ²¡æœ‰é¡µå¯¹é½ï¼Œåˆ™è¿›è¡Œå¯¹é½æ“ä½œ */
 	if (!PAGE_ALIGNED(base)) {
+		/* å¦‚æœsizeæ¯”PAGE_SIZE - baseçš„ä¸è¶³ä¸€é¡µè¿˜è¦å°
+		 * warnä¹‹åé€€å‡º
+		 */
 		if (size < PAGE_SIZE - (base & ~PAGE_MASK)) {
 			pr_warn("Ignoring memory block 0x%llx - 0x%llx\n",
 				base, base + size);
 			return;
 		}
+		/* é‚£å°±æŠŠè¿™ä¸€éƒ¨åˆ†ç»™ä¸¢æ‰ */
 		size -= PAGE_SIZE - (base & ~PAGE_MASK);
 		base = PAGE_ALIGN(base);
 	}
+	/* sizeä¹Ÿè¿›è¡Œå¯¹é½ */
 	size &= PAGE_MASK;
 
+	/*  base å¦‚æœè¶…è¿‡äº†ç‰©ç†å†…å­˜æœ€å¤§åœ°å€ */
 	if (base > MAX_MEMBLOCK_ADDR) {
 		pr_warning("Ignoring memory block 0x%llx - 0x%llx\n",
 				base, base + size);
 		return;
 	}
-
+	/* memoryåŒºåŸŸè¶…è¿‡ç‰©ç†å†…å­˜æœ€å¤§åœ°å€ï¼Œåˆ™ä¿®æ­£sizeå€¼ */
 	if (base + size - 1 > MAX_MEMBLOCK_ADDR) {
 		pr_warning("Ignoring memory range 0x%llx - 0x%llx\n",
 				((u64)MAX_MEMBLOCK_ADDR) + 1, base + size);
 		size = MAX_MEMBLOCK_ADDR - base + 1;
 	}
-
+	/* memoryåŒºåŸŸåœ¨å†…æ ¸é•œåƒç‰©ç†åœ°å€ä¹‹å‰ï¼Œåˆ™å¿½ç•¥è¯¥memoryåŒºåŸŸ */
 	if (base + size < phys_offset) {
 		pr_warning("Ignoring memory block 0x%llx - 0x%llx\n",
 			   base, base + size);
 		return;
 	}
+	/* baseåœ¨å†…æ ¸é•œåƒç‰©ç†åœ°å€ä¹‹å‰ï¼Œåˆ™ä¿®æ­£baseå’Œsize */
 	if (base < phys_offset) {
 		pr_warning("Ignoring memory range 0x%llx - 0x%llx\n",
 			   base, phys_offset);
 		size -= phys_offset - base;
 		base = phys_offset;
 	}
+	/* è°ƒç”¨MEMBLOCKå†…å­˜åˆ†é…å™¨æ¥å£ï¼Œå¢åŠ ä¸€ä¸ªæ–°çš„memblock region,
+	 * å°†è¯¥memoryåŠ å…¥å†…å­˜ç®¡ç†ç³»ç»Ÿ
+	 */
 	memblock_add(base, size);
 }
 
@@ -1227,13 +1250,13 @@ bool __init early_init_dt_verify(void *params)
 
 void __init early_init_dt_scan_nodes(void)
 {
-       //´ÓÉè±¸Ê÷ÖĞ¶ÁÈ¡chosen½ÚµãµÄĞÅÏ¢,°üÀ¨ÃüÁîĞĞboot_command_line,initrd location¼°size  
+	/* ä»è®¾å¤‡æ ‘ä¸­è¯»å–chosenèŠ‚ç‚¹çš„ä¿¡æ¯,åŒ…æ‹¬å‘½ä»¤è¡Œboot_command_line,initrd locationåŠsize */
 	/* Retrieve various information from the /chosen node */
 	of_scan_flat_dt(early_init_dt_scan_chosen, boot_command_line);
-	//µÃµ½¸ù½ÚµãµÄ{size,address}-cellsĞÅÏ¢
+	/* å¾—åˆ°æ ¹èŠ‚ç‚¹çš„{size,address}-cellsä¿¡æ¯ */
 	/* Initialize {size,address}-cells info */
 	of_scan_flat_dt(early_init_dt_scan_root, NULL);
-      //¶Á³öÉè±¸Ê÷µÄÏµÍ³ÄÚ´æÉèÖÃ 
+	/* è¯»å‡ºè®¾å¤‡æ ‘çš„ç³»ç»Ÿå†…å­˜è®¾ç½® */
 	/* Setup memory, calling early_init_dt_add_memory_arch */
 	of_scan_flat_dt(early_init_dt_scan_memory, NULL);
 }
@@ -1260,11 +1283,11 @@ bool __init early_init_dt_scan(void *params)
  */
 void __init unflatten_device_tree(void)
 {
-	 //½âÎöÉè±¸Ê÷£¬½«ËùÓĞµÄÉè±¸½ÚµãÁ´ÈëÈ«¾ÖÁ´±í    of_allnodesÖĞ  
+	/* è§£æè®¾å¤‡æ ‘,å°†æ‰€æœ‰çš„è®¾å¤‡èŠ‚ç‚¹é“¾å…¥å…¨å±€é“¾è¡¨of_allnodesä¸­ */
 	__unflatten_device_tree(initial_boot_params, NULL, &of_root,
 				early_init_dt_alloc_memory_arch, false);
 
- //ÉèÖÃÄÚºËÊä³öÖÕ¶Ë£¬ÒÔ¼°±éÀú¡°/aliases¡±½ÚµãÏÂµÄËùÓĞµÄÊôĞÔ£¬¹ÒÈëÏàÓ¦Á´±í 
+	/* è®¾ç½®å†…æ ¸è¾“å‡ºç»ˆç«¯ï¼Œä»¥åŠéå†â€œ/aliasesâ€èŠ‚ç‚¹ä¸‹çš„æ‰€æœ‰çš„å±æ€§ï¼ŒæŒ‚å…¥ç›¸åº”é“¾è¡¨ */
 	/* Get pointer to "/chosen" and "/aliases" nodes for use everywhere */
 	of_alias_scan(early_init_dt_alloc_memory_arch);
 }

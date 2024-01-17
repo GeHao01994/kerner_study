@@ -18,7 +18,9 @@
  */
 #define PMD_TYPE_MASK		(_AT(pmdval_t, 3) << 0)
 #define PMD_TYPE_FAULT		(_AT(pmdval_t, 0) << 0)
+/* 这表示页面映射 */
 #define PMD_TYPE_TABLE		(_AT(pmdval_t, 1) << 0)
+/* 这表示段映射 */
 #define PMD_TYPE_SECT		(_AT(pmdval_t, 2) << 0)
 #define PMD_PXNTABLE		(_AT(pmdval_t, 1) << 2)     /* v7 */
 #define PMD_BIT4		(_AT(pmdval_t, 1) << 4)

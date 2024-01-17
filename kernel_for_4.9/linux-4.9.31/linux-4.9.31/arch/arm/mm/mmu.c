@@ -810,6 +810,8 @@ static void __init alloc_init_pmd(pud_t *pud, unsigned long addr,
 		/*
 		 * Try a section mapping - addr, next and phys must all be
 		 * aligned to a section boundary.
+		 *
+		 * 尝试段映射-addr、next和phys都必须与段边界对齐.
 		 */
 		if (type->prot_sect &&
 				((addr | next | phys) & ~SECTION_MASK) == 0) {
@@ -909,7 +911,15 @@ static void __init __create_mapping(struct mm_struct *mm, struct map_desc *md,
 	phys_addr_t phys;
 	const struct mem_type *type;
 	pgd_t *pgd;
-
+	/* 根据md->type在上面的全局数组mem_types中获得我们的mem->type
+	 * 里面包含了一些属性,截取MT_MEMORY_RWX来看
+	 * [MT_MEMORY_RWX] = {
+	 * .prot_pte  = L_PTE_PRESENT | L_PTE_YOUNG | L_PTE_DIRTY,
+	 * .prot_l1   = PMD_TYPE_TABLE,
+	 * .prot_sect = PMD_TYPE_SECT | PMD_SECT_AP_WRITE,
+	 * .domain    = DOMAIN_KERNEL,
+	 * },
+	 */
 	type = &mem_types[md->type];
 
 #ifndef CONFIG_ARM_LPAE
@@ -921,9 +931,11 @@ static void __init __create_mapping(struct mm_struct *mm, struct map_desc *md,
 		return;
 	}
 #endif
-
+	/* 将虚拟地址页对齐 */
 	addr = md->virtual & PAGE_MASK;
+	/* 获得物理地址 */
 	phys = __pfn_to_phys(md->pfn);
+	/* 将长度也页对齐 */
 	length = PAGE_ALIGN(md->length + (md->virtual & ~PAGE_MASK));
 
 	if (type->prot_l1 == 0 && ((addr | phys | length) & ~SECTION_MASK)) {
@@ -931,10 +943,15 @@ static void __init __create_mapping(struct mm_struct *mm, struct map_desc *md,
 			(long long)__pfn_to_phys(md->pfn), addr);
 		return;
 	}
-
+	/* 获得这块地址对应的pgd */
 	pgd = pgd_offset(mm, addr);
+	/* 获得结束地址 */
 	end = addr + length;
 	do {
+		/* #define pgd_addr_end(addr, end)
+		 * ({unsigned long __boundary = ((addr) + PGDIR_SIZE) & PGDIR_MASK;
+		 * (__boundary - 1 < (end) - 1)? __boundary: (end);})
+		 */
 		unsigned long next = pgd_addr_end(addr, end);
 
 		alloc_init_pud(pgd, addr, next, phys, type, alloc, ng);
@@ -953,12 +970,21 @@ static void __init __create_mapping(struct mm_struct *mm, struct map_desc *md,
  */
 static void __init create_mapping(struct map_desc *md)
 {
+	/* vectors_base是一个宏，它的作用是获取ARM异常向量的地址 */
+	/* 这边就是防止映射到用户空间的区域 */
 	if (md->virtual != vectors_base() && md->virtual < TASK_SIZE) {
 		pr_warn("BUG: not creating mapping for 0x%08llx at 0x%08lx in user region\n",
 			(long long)__pfn_to_phys((u64)md->pfn), md->virtual);
 		return;
 	}
-
+	/* 如果是device的内存或者是说ROM 并且PAGE_OFFSET <= md->virtual < FIXADDR_START
+	 * 并且md->virtual < VMALLOC_START || md->virtual >= VMALLOC_END
+	 * 那么警告
+	 */
+	/* FIXADDR_START 临时映射和永久映射差别不是很大,只是说临时映射顾名思义,比较临时,和永久相反,永久映射若需要修改映射关系需要先释放映射再创建新的映射关系,
+	 * 而临时映射就是直接再映射一次把前面的映射关系覆盖掉就行了,确实是比较临时;
+	 * 所以临时映射不会睡眠,它不会像永久映射,可能产生条目满需要等待其他条目被释放的情况,如果条目满了它只需覆盖掉一个就行了;
+	 */
 	if ((md->type == MT_DEVICE || md->type == MT_ROM) &&
 	    md->virtual >= PAGE_OFFSET && md->virtual < FIXADDR_START &&
 	    (md->virtual < VMALLOC_START || md->virtual >= VMALLOC_END)) {
@@ -1250,7 +1276,14 @@ void __init sanity_check_meminfo(void)
 
 	memblock_set_current_limit(memblock_limit);
 }
-
+/* 在内核使用内存前,需要初始化内核的页表,初始化页表主要在map_lowmem函数中.
+ * 在映射页表之前,需要把页表的页表项清零,主要在prepape_page_table函数中实现
+ */
+/* 这里对如下3段地址调用pmd_clear函数来消除一级页表项的内容
+ * 0x0 ~ MODULES_VADDR
+ * MODULES_VADDR ~ PAGE_OFFSET
+ * arm_lowmem_limit ~ VMALLOC_START
+ */
 static inline void prepare_page_table(void)
 {
 	unsigned long addr;
@@ -1440,8 +1473,13 @@ static void __init map_lowmem(void)
 #ifdef CONFIG_XIP_KERNEL
 	phys_addr_t kernel_x_start = round_down(__pa(_sdata), SECTION_SIZE);
 #else
+	/* 代码段 */
+	/* 向下取整宏 ROUND_DOWN(12, 5) 将返回 10, 因为 (12 / 5) 整数除法是 2 */
 	phys_addr_t kernel_x_start = round_down(__pa(_stext), SECTION_SIZE);
 #endif
+	/* 向上取整宏ROUND_UP(n, d)宏依靠整数除法来完成,它只有在两个参数都是整数时才有效.
+	 * 例如：ROUND_UP(12, 5) 会返回 15,因为 15 是第一个以 5 为间隔且大于 12 的数值.
+	 */
 	phys_addr_t kernel_x_end = round_up(__pa(__init_end), SECTION_SIZE);
 
 	/* Map all the lowmem memory banks. */
@@ -1458,10 +1496,15 @@ static void __init map_lowmem(void)
 		if (start >= end)
 			break;
 
+		/* 如果说end < kernel_x_start */
 		if (end < kernel_x_start) {
+			/* ((unsigned long)((start) >> PAGE_SHIFT)) */
+			/* 获得物理页帧号 */
 			map.pfn = __phys_to_pfn(start);
+			/* 获得物理地址对应的虚拟地址 */
 			map.virtual = __phys_to_virt(start);
 			map.length = end - start;
+			/* MT_MEMORY_RWX和MT_MEMORY_RW的区别在于ARM页表项有一个XN比特位,XN比特位置为1,表示这段内存区域不允许执行 */
 			map.type = MT_MEMORY_RWX;
 
 			create_mapping(&map);

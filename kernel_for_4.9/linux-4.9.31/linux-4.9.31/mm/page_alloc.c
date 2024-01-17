@@ -5156,7 +5156,14 @@ static int zone_batchsize(struct zone *zone)
 	 * size of the zone.  But no more than 1/2 of a meg.
 	 *
 	 * OK, so we don't know how big the cache is.  So guess.
+	 *
+	 * 每个per-cpu-pages 池设置为zone大小的1000分之一左右.
+	 * 但不超过meg的1/2.
+	 *
+	 * 好吧，所以我们不知道cache有多大. 所以猜猜看.
 	 */
+
+	/* batch先赋值为zone中被伙伴系统管理的页面数量 / 1024 */
 	batch = zone->managed_pages / 1024;
 	if (batch * PAGE_SIZE > 512 * 1024)
 		batch = (512 * 1024) / PAGE_SIZE;
@@ -5173,7 +5180,15 @@ static int zone_batchsize(struct zone *zone)
 	 * batches of pages, one task can end up with a lot
 	 * of pages of one half of the possible page colors
 	 * and the other with pages of the other colors.
+	 *
+	 * 将batch 制为2^n-1的值.
+	 * 在某些情况下，2的次幂的值被发现更有可能次优的cache aliasing的属性
+	 *
+	 * 例如，如果两个tasks交叉分配batches个页面,一个任务带着大量的page 一般可能是page colors
+	 * 另外一个是其他colors的page
 	 */
+
+	/* rounddown_pow_of_two 该函数是取数的最高二进制阶数,即将给定值四舍五入到最接近的二次方 */
 	batch = rounddown_pow_of_two(batch + batch/2) - 1;
 
 	return batch;
@@ -5312,9 +5327,12 @@ static __meminit void zone_pcp_init(struct zone *zone)
 	 * per cpu subsystem is not up at this point. The following code
 	 * relies on the ability of the linker to provide the
 	 * offset of a (static) per cpu variable into the per cpu area.
+	 *
+	 * per cpu 子系统目前还没有启动.
+	 * 以下代码依赖于链接器提供(静态)每cpu变量到每cpu区域的偏移量的能力.
 	 */
 	zone->pageset = &boot_pageset;
-
+	/* zone_batchsize 用来计算pcp->batch */
 	if (populated_zone(zone))
 		printk(KERN_DEBUG "  %s zone: %lu pages, LIFO batch:%u\n",
 			zone->name, zone->present_pages,
@@ -5326,7 +5344,8 @@ int __meminit init_currently_empty_zone(struct zone *zone,
 					unsigned long size)
 {
 	struct pglist_data *pgdat = zone->zone_pgdat;
-
+	/* zone_idx() returns 0 for the ZONE_DMA zone, 1 for the ZONE_NORMAL zone, etc. */
+	/* #define zone_idx(zone)		((zone) - (zone)->zone_pgdat->node_zones) */
 	pgdat->nr_zones = zone_idx(zone) + 1;
 
 	zone->zone_start_pfn = zone_start_pfn;
@@ -5336,8 +5355,9 @@ int __meminit init_currently_empty_zone(struct zone *zone,
 			pgdat->node_id,
 			(unsigned long)zone_idx(zone),
 			zone_start_pfn, (zone_start_pfn + size));
-
+	/* 初始化zone的freelist */
 	zone_init_free_lists(zone);
+	/* 最后设置zone的initialized为1,代表zone已经初始化了 */
 	zone->initialized = 1;
 
 	return 0;
@@ -5702,13 +5722,20 @@ static void __meminit calculate_node_totalpages(struct pglist_data *pgdat,
 static unsigned long __init usemap_size(unsigned long zone_start_pfn, unsigned long zonesize)
 {
 	unsigned long usemapsize;
-
+	/* zonesize 加上 zone_start_pfn和pageblock_nr_pages未对齐的部分 */
 	zonesize += zone_start_pfn & (pageblock_nr_pages-1);
+	/* roundup类似于一个数学函数，它总是尝试找到大于x并接近x的可以整除y的那个数，也即向上圆整
+	 * 比如：roundup(16,8) = 16
+	 * roundup(32,8) = 32
+	 */
 	usemapsize = roundup(zonesize, pageblock_nr_pages);
+	/* 算出有多少个pageblock */
 	usemapsize = usemapsize >> pageblock_order;
+	/* 每个pageblock都用4个bits存储它的NR_PAGEBLOCK_BITS */
 	usemapsize *= NR_PAGEBLOCK_BITS;
+	/* 算出多少个字节,但是这里需要用8 * sizeof(unsigned long) */
 	usemapsize = roundup(usemapsize, 8 * sizeof(unsigned long));
-
+	/* 其实这里就是返回的unsigned long大小的内存空间 */
 	return usemapsize / 8;
 }
 
@@ -5717,6 +5744,7 @@ static void __init setup_usemap(struct pglist_data *pgdat,
 				unsigned long zone_start_pfn,
 				unsigned long zonesize)
 {
+	/* 每个pageblock用4个bits来表示pageblock_flags，所以usemap_size其实就是计算所有的pageblock_flags所占用的字节空间 */
 	unsigned long usemapsize = usemap_size(zone_start_pfn, zonesize);
 	zone->pageblock_flags = NULL;
 	if (usemapsize)
@@ -5731,15 +5759,22 @@ static inline void setup_usemap(struct pglist_data *pgdat, struct zone *zone,
 
 #ifdef CONFIG_HUGETLB_PAGE_SIZE_VARIABLE
 
-/* Initialise the number of pages represented by NR_PAGEBLOCK_BITS */
+/* Initialise the number of pages represented by NR_PAGEBLOCK_BITS
+ * 初始化由NR_PAGEBLOCK_BITS表示的页数
+ */
 void __paginginit set_pageblock_order(void)
 {
 	unsigned int order;
 
 	/* Check that pageblock_nr_pages has not already been setup */
+
+	/* 如果pageblock_order被设置了,直接返回了 */
 	if (pageblock_order)
 		return;
-
+	/* 定义了超巨页的话pageblock_order = HPAGE_SHIFT - PAGE_SHIFT = 21 - 12 = 9
+	 * 没有定义超巨页pageblock_order = MAX_ORDER - 1 = 11 - 1 = 10
+	 * 这里可能的想法是把一个pageblock划分为一个HUGETLB
+	 */
 	if (HPAGE_SHIFT > PAGE_SHIFT)
 		order = HUGETLB_PAGE_ORDER;
 	else
@@ -5749,6 +5784,9 @@ void __paginginit set_pageblock_order(void)
 	 * Assume the largest contiguous order of interest is a huge page.
 	 * This value may be variable depending on boot parameters on IA64 and
 	 * powerpc.
+	 *
+	 * 假设感兴趣的最大连续order是一个巨大的页面.
+	 * 此值可能是可变的,具体取决于IA64和powerpc上的引导参数。
 	 */
 	pageblock_order = order;
 }
@@ -5778,11 +5816,16 @@ static unsigned long __paginginit calc_memmap_size(unsigned long spanned_pages,
 	 * memmap pages due to alignment because memmap pages for each
 	 * populated regions may not naturally algined on page boundary.
 	 * So the (present_pages >> 4) heuristic is a tradeoff for that.
+	 *
+	 * 如果zone内有黑洞且正在使用SPARSEEM,则提供更准确的估计.
+	 * 如果区域内有黑洞,由于对齐,每个populated的内存区域可能会花费我们一到两个额外的memmap页面,
+	 * 因为每个populated的区域的memmap页面可能不会自然地在页面边界上对齐.
+	 * 因此,(present_pages>>4)对于这个是一种启发式的权衡
 	 */
 	if (spanned_pages > present_pages + (present_pages >> 4) &&
 	    IS_ENABLED(CONFIG_SPARSEMEM))
 		pages = present_pages;
-
+	/* 这里应该就是返回用于管理struct page暂用了多少页 */
 	return PAGE_ALIGN(pages * sizeof(struct page)) >> PAGE_SHIFT;
 }
 
@@ -5800,6 +5843,10 @@ static void __paginginit free_area_init_core(struct pglist_data *pgdat)
 	int nid = pgdat->node_id;
 	int ret;
 
+	/* 初始化spin_lock_init(&pgdat->node_size_lock);
+	 * 这里应该是针对于热插拔吧
+	 * 可能在改变node_size的时候锁上
+	 */
 	pgdat_resize_init(pgdat);
 #ifdef CONFIG_NUMA_BALANCING
 	spin_lock_init(&pgdat->numabalancing_migrate_lock);
@@ -5818,13 +5865,27 @@ static void __paginginit free_area_init_core(struct pglist_data *pgdat)
 #endif
 	pgdat_page_ext_init(pgdat);
 	spin_lock_init(&pgdat->lru_lock);
+	/* 初始化lruvec */
 	lruvec_init(node_lruvec(pgdat));
 
 	for (j = 0; j < MAX_NR_ZONES; j++) {
 		struct zone *zone = pgdat->node_zones + j;
 		unsigned long size, realsize, freesize, memmap_pages;
+		/* 获得本zone的起始页帧号 */
 		unsigned long zone_start_pfn = zone->zone_start_pfn;
-
+		/* spanned_pages is the total pages spanned by the zone, including
+		 * holes, which is calculated as:
+		 * spanned_pages = zone_end_pfn - zone_start_pfn;
+		 *
+		 * present_pages is physical pages existing within the zone, which
+		 * is calculated as:
+		 * present_pages = spanned_pages - absent_pages(pages in holes);
+		 *
+		 * managed_pages is present pages managed by the buddy system, which
+		 * is calculated as (reserved_pages includes pages allocated by the
+		 * bootmem allocator):
+		 *      managed_pages = present_pages - reserved_pages;
+		 */
 		size = zone->spanned_pages;
 		realsize = freesize = zone->present_pages;
 
@@ -5832,10 +5893,17 @@ static void __paginginit free_area_init_core(struct pglist_data *pgdat)
 		 * Adjust freesize so that it accounts for how much memory
 		 * is used by this zone for memmap. This affects the watermark
 		 * and per-cpu initialisations
+		 *
+		 * 调整freesize，使其考虑此zone用于memmap的内存量.
+		 * 这会影响水位和per-cpu的初始化
 		 */
+		/* 实际上这里就是要算出这个zone里面的struct page所占用的内存 */
 		memmap_pages = calc_memmap_size(size, realsize);
+		/* 如果不是ZONE_HIGHMEM */
 		if (!is_highmem_idx(j)) {
+			/* freesize 大于等于所需管理struct page所占用的内存的话 */
 			if (freesize >= memmap_pages) {
+				/* 那么就要freesize就要减去它 */
 				freesize -= memmap_pages;
 				if (memmap_pages)
 					printk(KERN_DEBUG
@@ -5847,23 +5915,31 @@ static void __paginginit free_area_init_core(struct pglist_data *pgdat)
 		}
 
 		/* Account for reserved pages */
+		/* node的第一个zone需要减去dma_reserve */
 		if (j == 0 && freesize > dma_reserve) {
 			freesize -= dma_reserve;
 			printk(KERN_DEBUG "  %s zone: %lu pages reserved\n",
 					zone_names[0], dma_reserve);
 		}
-
+		/* 如果不是ZONE_HIGHMEM的话,那么这些个内存都是给kernel用的
+		 * 所以 这里nr_kernel_pages就要加上freesize
+		 */
 		if (!is_highmem_idx(j))
 			nr_kernel_pages += freesize;
 		/* Charge for highmem memmap if there are enough kernel pages */
+		/* 如果是ZONE_HIGHMEM的话,那么kernel还需要用一些page来记录highmen的memmap_pages */
 		else if (nr_kernel_pages > memmap_pages * 2)
 			nr_kernel_pages -= memmap_pages;
+		/* nr_all_pages 把所有的freesize都到一起 */
 		nr_all_pages += freesize;
 
 		/*
 		 * Set an approximate value for lowmem here, it will be adjusted
 		 * when the bootmem allocator frees pages into the buddy system.
 		 * And all highmem pages will be managed by the buddy system.
+		 *
+		 * 在这里为lowmem设置一个近似值,当bootmem分配器把空闲页面加入到伙伴系统时,它将进行调整.
+		 * 所有highmem页面都将由伙伴系统管理.
 		 */
 		zone->managed_pages = is_highmem_idx(j) ? realsize : freesize;
 #ifdef CONFIG_NUMA
@@ -5877,8 +5953,12 @@ static void __paginginit free_area_init_core(struct pglist_data *pgdat)
 
 		if (!size)
 			continue;
-
+		/* 算出一个pageblock有多少个order */
 		set_pageblock_order();
+		/* 每个pageblock用4个bits来表示pageblock_flags，所以usemap_size其实就是计算所有的pageblock_flags所占用的字节空间
+		 * 然后分配空间,然后让zone->pageblock_flags指向它,
+		 * 但是在define CONFIG_SPARSEMEM情况下,这是个空函数
+		 */
 		setup_usemap(pgdat, zone, zone_start_pfn, size);
 		ret = init_currently_empty_zone(zone, zone_start_pfn, size);
 		BUG_ON(ret);
@@ -6594,6 +6674,9 @@ void __init page_alloc_init(void)
 /*
  * calculate_totalreserve_pages - called when sysctl_lowmem_reserve_ratio
  *	or min_free_kbytes changes.
+ *
+ * calculate_totalreserve_pages - 当sysctl_lowmem_reserve_ratio或者min_free_kbytes改变时调用
+ *
  */
 static void calculate_totalreserve_pages(void)
 {
@@ -6602,7 +6685,7 @@ static void calculate_totalreserve_pages(void)
 	enum zone_type i, j;
 
 	for_each_online_pgdat(pgdat) {
-
+		/* 把pgdat的totalreserve_pages 赋值为0 */
 		pgdat->totalreserve_pages = 0;
 
 		for (i = 0; i < MAX_NR_ZONES; i++) {
@@ -6610,22 +6693,27 @@ static void calculate_totalreserve_pages(void)
 			long max = 0;
 
 			/* Find valid and maximum lowmem_reserve in the zone */
+			/* 在zone中找到有效的和最大的lowmem_reserve */
 			for (j = i; j < MAX_NR_ZONES; j++) {
 				if (zone->lowmem_reserve[j] > max)
 					max = zone->lowmem_reserve[j];
 			}
 
 			/* we treat the high watermark as reserved pages. */
+			/* 最大的加上高水位 watermark[WMARK_HIGH] */
 			max += high_wmark_pages(zone);
-
+			/* 如果都大于zone中被伙伴系统管理的页面数量了
+			 * 那么就把zone->managed_pages赋值给max
+			 */
 			if (max > zone->managed_pages)
 				max = zone->managed_pages;
-
+			/* 然后把pgdat->totalreserve_pages + max */
 			pgdat->totalreserve_pages += max;
-
+			/* 把reserve_pages + max */
 			reserve_pages += max;
 		}
 	}
+	/* 这是系统中所有node的reserve_pages相加 */
 	totalreserve_pages = reserve_pages;
 }
 
@@ -6634,6 +6722,19 @@ static void calculate_totalreserve_pages(void)
  *	sysctl_lowmem_reserve_ratio changes.  Ensures that each zone
  *	has a correct pages reserved value, so an adequate number of
  *	pages are left in the zone after a successful __alloc_pages().
+ *
+ * setup_per_zone_lowmem_reserve - 每当sysctl_lowmem_reserve_ratio更改时调用.
+ * 确保每个zone 都有一个正确的 pages reserved value,
+ * 以便在成功执行__alloc_page()后,在区域中保留足够数量的页面.
+ */
+/*
+ * 内核在分配内存页时会调用__zone_watermark_ok()函数去检查zone中是否有足够的内存，其中的一个判定条件就是：
+ * if (free_pages <= min + z->lowmem_reserve[highest_zoneidx])
+ * 其中,free_pages就是对应zone中的剩余可用内存;
+ * 而min就是经过计算后的水线;
+ * z->lowmem_reserve[highest_zoneidx]就是该zone对于highest_zoneidx的预留内存.
+ * 如果上述条件不满足,本次扫描会跳过这个zone，表示这个zone内存不足.
+ * 从这个代码逻辑来看,lowmem_reserve对于内存页的分配确实起着至关重要的作用,决定着内存分配成败.
  */
 static void setup_per_zone_lowmem_reserve(void)
 {
@@ -6642,11 +6743,17 @@ static void setup_per_zone_lowmem_reserve(void)
 
 	for_each_online_pgdat(pgdat) {
 		for (j = 0; j < MAX_NR_ZONES; j++) {
+			/* 从最低的zone开始往上算ZONE_DMA -> ZONE_DMA32 -> ZONE_NORMAL -> ZONE_HIGHMEM .....*/
 			struct zone *zone = pgdat->node_zones + j;
+			/* 获得本zone的被伙伴系统管理的页面 */
 			unsigned long managed_pages = zone->managed_pages;
 
 			zone->lowmem_reserve[j] = 0;
-
+			/* ZONE_DMA : i = 0,zone->lowmem_reserve[ZONE_DMA] = 0;
+			 * ZOME_DMA32 : i = 1,zone->lowmem_reserve[ZONE_DMA32] = 0;pgdat->zone[ZONE_DMA]->lowmem_reserve[ZONE_DMA32] = managed_pages(zone[DMA32]) / ratio[DMA]
+			 * ZONE_NORMAL : i = 2,zone->lowmen_reservel[ZONE_NORMAL] = 0; pgdat->zone[ZONE_DMA32]->lowmem_reserve[ZONE_NORMAL] = managed_pages(zone[ZONE_NORMAL])/ratio[DMA_32]
+			 *							       pgdat->zone[ZONE_DMA]->lowmem_reserve[ZONE_NORMAL] = ( managed_pages(zone[ZONE_DMA]) + managed_pages(zone[ZONE_NORMAL]))/ratio[DMA]
+			 */
 			idx = j;
 			while (idx) {
 				struct zone *lower_zone;

@@ -65,6 +65,10 @@
  * as wide as the result!), and we want to evaluate the macro
  * arguments just once each.
  */
+/* 向上取整宏ROUND_UP(n, d)宏依靠整数除法来完成,它只有在两个参数都是整数时才有效.
+ * 例如:ROUND_UP(12, 5)会返回15,因为15是第一个以5为间隔且大于12的数值.
+ * 向下取整宏ROUND_DOWN(12, 5)将返回 10,因为 (12 / 5)整数除法是2.
+ */
 #define __round_mask(x, y) ((__typeof__(x))((y)-1))
 #define round_up(x, y) ((((x)-1) | __round_mask(x, y))+1)
 #define round_down(x, y) ((x) & ~__round_mask(x, y))

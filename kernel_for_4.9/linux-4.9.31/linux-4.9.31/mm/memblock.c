@@ -492,11 +492,14 @@ static void __init_memblock memblock_insert_region(struct memblock_type *type,
 	struct memblock_region *rgn = &type->regions[idx];
 
 	BUG_ON(type->cnt >= type->max);
+	/* 先将插入位置到数组结束的type->cnt - idx个数组元素向后移动一格 */
 	memmove(rgn + 1, rgn, (type->cnt - idx) * sizeof(*rgn));
+	/* 在idx指示的插入位置填写region的属性 */
 	rgn->base = base;
 	rgn->size = size;
 	rgn->flags = flags;
 	memblock_set_region_node(rgn, nid);
+	/* 更新memblock_type机结构，其中cnt是数组的真正元素个数，total_size是数组中各区域size的总和 */
 	type->cnt++;
 	type->total_size += size;
 }
@@ -516,6 +519,35 @@ static void __init_memblock memblock_insert_region(struct memblock_type *type,
  *
  * RETURNS:
  * 0 on success, -errno on failure.
+ *
+ * memblock_add_range-添加新的memblock区域
+ * @type：  要向其中添加新区域的memblock类型
+ * @base：  新区域的基本地址
+ * @size：  新区域的大小
+ * @nid:    新区域的numanode
+ * @fliags: 新区域的标志
+ *
+ * 将新的memblock区域[@base，@base+@size）添加到@type中.
+ * 允许新区域与现有区域重叠-重叠不会影响现有区域.
+ * 添加后，@type保证最小（所有相邻的兼容区域都会合并）。
+ * 返回：0表示成功，-errno表示失败.
+ */
+
+/* 本函数将[base, base+size)插入到type->region[]数组中.
+ * 插入需要实现物理地址从小到大排列;
+ * 插入地址如果与现有的物理地址区域重叠,在区域特性一致的情况下,要实现region合并。
+ * memblock_memory_init_regions[128]和memblock_reserve_init_regions[128]两个静态数组作为memblock.memory和memblock.reserved缺省的regions[]数组存储区.
+ * 当memory或reserved类型的regions数目过多,数组不足以容纳它们时,就要另外分配数组空间来替代memblock_memory_init_regions[]和memblock_reserve_init_regions[]数组,
+ * 这个过程是函数memblock_double_array实现的.
+ *
+ * 插入[base, base+size)区间时,[base, base+size)可能跨越多个已经存在的region,那么原先相邻region之间的每个gap都将成为一个新region插入到regions[]数组中,
+ * 所以新增的region个数就可能是多个而不是1个.究竟会新增多少个regions，是无法预判的，这也就导致无法预判断memblock_memory_init_regions[]数组或
+ * memblock_reserve_init_regions[]数组的剩余空间是否足够.
+ * 基于此，本函数的实现进行了两次循环:
+ * 第1次循环是insert变量为false,所以本次循环,只统计新增加的region个数,保存在nr_new变量里面.
+ * 循环结束,根据type->cnt + nr_new > type->max来判断是否需要扩展现有的数组空间.
+ * 如果需要，则调用memblock_double_array函数把数组空间扩大一倍.
+ * 第2次循环是insert变量为true，所以这次循环才会真正插入新增的区域
  */
 int __init_memblock memblock_add_range(struct memblock_type *type,
 				phys_addr_t base, phys_addr_t size,
@@ -523,19 +555,32 @@ int __init_memblock memblock_add_range(struct memblock_type *type,
 {
 	bool insert = false;
 	phys_addr_t obase = base;
+	/*
+	 * adjust *@size so that (@base + *@size) doesn't overflow, return new size
+	 * static inline phys_addr_t memblock_cap_size(phys_addr_t base, phys_addr_t *size)
+	 * {
+	 *	return *size = min(*size, (phys_addr_t)ULLONG_MAX - base);
+	 * }
+	 */
+	/* 算出结束的物理地址 */
 	phys_addr_t end = base + memblock_cap_size(base, &size);
 	int idx, nr_new;
 	struct memblock_region *rgn;
-
+	/* 检查size */
 	if (!size)
 		return 0;
 
 	/* special case for empty array */
+	/* memblock_region数组为空数组,将[base, base + size)区间直接插入type->regions[0]的位置 */
 	if (type->regions[0].size == 0) {
+		/* 如果type->cnt != 1 或者type->total_size 有东西
+		 * 直接报个WARN吧
+		 */
 		WARN_ON(type->cnt != 1 || type->total_size);
 		type->regions[0].base = base;
 		type->regions[0].size = size;
 		type->regions[0].flags = flags;
+		/* 这里就是设置region的numa id */
 		memblock_set_region_node(&type->regions[0], nid);
 		type->total_size = size;
 		return 0;
@@ -550,33 +595,117 @@ repeat:
 	nr_new = 0;
 
 	for_each_memblock_type(type, rgn) {
+		/* rgn 为当前区域，即当前索引i对应的区域，当前区域的区间为{rbase,rend)
+		 * [base, end)为待插入区域
+		 */
 		phys_addr_t rbase = rgn->base;
 		phys_addr_t rend = rbase + rgn->size;
-
+		/* 编号1, 情形1 待插入区域与现有区域不重叠 */
 		if (rbase >= end)
 			break;
+		/* 编号2,数组中的区域要按照从小到大排列，既然待插入区域的起始地址比当前区域
+		 * 的结束位置还大, 说明不适合插入在当前位置
+		 */
 		if (rend <= base)
 			continue;
 		/*
 		 * @rgn overlaps.  If it separates the lower part of new
 		 * area, insert that portion.
 		 */
+		/* 待插入区域高地址与现有区域部分重叠
+		 * 程序走到这里表示,base < rbase < end,两个区间重叠了
+		 */
+		/* 编号3 */
 		if (rbase > base) {
 #ifdef CONFIG_HAVE_MEMBLOCK_NODE_MAP
 			WARN_ON(nid != memblock_get_region_node(rgn));
 #endif
+			/* 如果flag不一样,报个警告 */
 			WARN_ON(flags != rgn->flags);
 			nr_new++;
+			/* 插入[base, rbase)区间,插入位置是type->regions[i]
+			 * "i++"的含义是,表示[base, rbase)已经插入到type->regions[i]位置
+			 * [rbase, rend)必然移动到了type->regions[i+1]的位置,那么下次循环
+			 * regions[i],regions[i+1]两个位置都要跨过
+			 */
 			if (insert)
 				memblock_insert_region(type, idx++, base,
 						       rbase - base, nid,
 						       flags);
 		}
 		/* area below @rend is dealt with, forget about it */
+		/* 情形1走不到这里
+		 *  __________                ______________
+		 * |          |              |              |
+		 * |__________|              |______________|
+		 *               __________  rbase          rend
+		 *              |          |
+		 *		|__________|
+		 *             base        end
+		 *		情形1: 待插入区域与现有区域不重叠
+		 *
+		 *  __________                 ______________
+		 * |          |               |              |
+		 * |__________|               |______________|
+		 *                            rbase	    rend
+		 *                    ____________
+		 *                   |            |
+		 *                   |____________|
+		 *                 base          end
+		 *		情形2: 待插入区域高地址与现有区域部分重叠
+		 *
+		 *  __________                   __________________
+		 * |          |			|		   |
+		 * |__________|			|__________________|
+		 *			       rbase	          rend
+		 *
+		 *					__________________
+		 *				       |		  |
+		 *				       |__________________|
+		 *				      base               end
+		 *		情形3: 待插入区域低地址与现有区域部分重叠
+		 *
+		 *  ____________       _______________
+		 * |		|     |		      |
+		 * |____________|     |_______________|
+		 *		     rbase	      rend
+		 *
+		 *		   ___________________________
+		 *		  |			      |
+		 *		  |___________________________|
+		 *                base			      end
+		 *		情形四：待插入区域完全覆盖了现有区域
+		 *  ____________       ________________________      ______________
+		 * |            |     |			       |    |              |
+		 * |____________|     |________________________|    |______________|
+		 *                   rbase                    rend
+		 *		 _____________________________________
+		 * 		|				      |
+		 *	        |_____________________________________|
+		 *             base				      end
+		 *		情形五：待插入区域完全覆盖了现有区域，并且覆盖了下一个region的部分区域
+		 */
+		/* area below @rend is dealt with, forget about it */
+		/* 情形2,base=min(rend, end)=end,该情形下,
+		 * 下一次for循环,编号1处,由于end一定小于下一个region的rbase,循环结束
+		 * 情形3,base=min(rend, end)=rend
+		 * 下一次for循环,编号1处,由于end一定小于下一个region的rbase,循环结束
+		 * 情形4:base=min(rend, end)=rend
+		 * 下一次for循环,编号1处,由于end一定小于下一个region的rbase,循环结束
+		 * 情形5:base=min(rend, end)=rend
+		 * 下一次for循环,编号1处,end大于下一个region的rbase,会判断编号2
+		 * 编号2处,base小于下一个region的rend,会判断编号3
+		 * 编号3处，base小于下一个region的rbase,会再增加一个区域
+		 */
 		base = min(rend, end);
 	}
 
 	/* insert the remaining portion */
+	/* 情形1，base < end, 满足条件，会增加一个region
+	 * 情形2，base=min(rend, end)=end, 不满足条件
+	 * 情形3，base=min(rend, end)=rend < end，满足条件，增加一个region
+	 * 情形4：base=min(rend, end)=rend < end，满足条件，增加一个region
+	 */
 	if (base < end) {
 		nr_new++;
 		if (insert)
@@ -591,6 +720,7 @@ repeat:
 	 * If this was the first round, resize array and repeat for actual
 	 * insertions; otherwise, merge and return.
 	 */
+	/* 第1遍循环只计算插入区域后数组总的元素个数,数组空间不足时，会增加数组空间 */
 	if (!insert) {
 		while (type->cnt + nr_new > type->max)
 			if (memblock_double_array(type, obase, size) < 0)
@@ -598,6 +728,7 @@ repeat:
 		insert = true;
 		goto repeat;
 	} else {
+		/* 第2遍循环时，会尝试合并regions */
 		memblock_merge_regions(type);
 		return 0;
 	}
@@ -611,11 +742,19 @@ int __init_memblock memblock_add_node(phys_addr_t base, phys_addr_t size,
 
 int __init_memblock memblock_add(phys_addr_t base, phys_addr_t size)
 {
+	/* _RET_IP_: 该宏调用了内建函数__builtin_return_address(0)
+	 *           0: 返回当前函数的返回地址
+	 *           1: 返回当前函数调用者的返回地址
+	 * 此处即是返回当前函数的返回地址
+	 */
 	memblock_dbg("memblock_add: [%#016llx-%#016llx] flags %#02lx %pF\n",
 		     (unsigned long long)base,
 		     (unsigned long long)base + size - 1,
 		     0UL, (void *)_RET_IP_);
-
+	/* MEMBLOCK内存分配器使用struct memblock维护了两种内存，memblock.memory维护
+	 * 着可用物理内存，memblock.reserved维护着预留内存;
+         */
+	/* memblock.memory是个全局变量,你可以在这个文件的前面看到定义 */
 	return memblock_add_range(&memblock.memory, base, size, MAX_NUMNODES, 0);
 }
 

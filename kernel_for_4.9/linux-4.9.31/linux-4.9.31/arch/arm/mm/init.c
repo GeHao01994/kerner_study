@@ -87,6 +87,11 @@ static int __init parse_tag_initrd2(const struct tag *tag)
 
 __tagtable(ATAG_INITRD2, parse_tag_initrd2);
 
+/* find_limits函数会计算出min_low_pfn、max_low_pfn和max_pfn这三个值,
+ * 其中min_low_pfn是内存块的开始地址的页帧号
+ * max_low_pfn表示normal区域的结束页帧号,它由arm_lowmem_limit这个变量得来
+ * max_pfn 是内存块的结束地址的页帧号
+ */
 static void __init find_limits(unsigned long *min, unsigned long *max_low,
 			       unsigned long *max_high)
 {
@@ -285,9 +290,11 @@ void __init bootmem_init(void)
 
 	memblock_allow_resize();
 	max_low = max_high = 0;
-	//min���ڴ�鿪ʼ��ַ��ҳ֡��
-	//max_low��ʾnoarmal ����Ľ���ҳ֡��
-	//max_high�ڴ�������ַ��ҳ֡��
+
+	/* min是内存块开始地址的页帧号
+	 * max_low表示noarmal 区域的结束页帧号
+	 * max_high内存块结束地址的页帧号
+	 */
 	find_limits(&min, &max_low, &max_high);
 
 	early_memtest((phys_addr_t)min << PAGE_SHIFT,
