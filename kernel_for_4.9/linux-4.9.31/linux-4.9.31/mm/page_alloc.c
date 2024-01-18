@@ -438,10 +438,13 @@ void set_pfnblock_flags_mask(struct page *page, unsigned long flags,
 	unsigned long old_word, word;
 
 	BUILD_BUG_ON(NR_PAGEBLOCK_BITS != 4);
-
+	/* 获得zone的pageblock_flag */
 	bitmap = get_pageblock_bitmap(page, pfn);
+	/* 获得page对应的pageblock_flag的idx */
 	bitidx = pfn_to_bitidx(page, pfn);
+	/* 算出page在bitmap的哪个unsigned long */
 	word_bitidx = bitidx / BITS_PER_LONG;
+	/* 拿到此bit的unsigned long */
 	bitidx &= (BITS_PER_LONG-1);
 
 	VM_BUG_ON_PAGE(!zone_spans_pfn(page_zone(page), pfn), page);
@@ -452,6 +455,10 @@ void set_pfnblock_flags_mask(struct page *page, unsigned long flags,
 
 	word = READ_ONCE(bitmap[word_bitidx]);
 	for (;;) {
+		/* cmpxchg(*ptr,old,new)
+		 * 如果*ptr==old,则把new赋值给*ptr,并返回old
+		 * 如果*ptr!=old,则返回*ptr
+		 */
 		old_word = cmpxchg(&bitmap[word_bitidx], word, (word & ~mask) | flags);
 		if (word == old_word)
 			break;
@@ -464,7 +471,9 @@ void set_pageblock_migratetype(struct page *page, int migratetype)
 	if (unlikely(page_group_by_mobility_disabled &&
 		     migratetype < MIGRATE_PCPTYPES))
 		migratetype = MIGRATE_UNMOVABLE;
-
+	/* PB_migrate = 0
+	 * PB_migrate_end = PB_migrate + 3 - 1 = 2
+	 */
 	set_pageblock_flags_group(page, (unsigned long)migratetype,
 					PB_migrate, PB_migrate_end);
 }
@@ -1175,11 +1184,18 @@ static void free_one_page(struct zone *zone,
 static void __meminit __init_single_page(struct page *page, unsigned long pfn,
 				unsigned long zone, int nid)
 {
+	/* 这里主要是设置page flag中的zone、nid位 */
 	set_page_links(page, zone, nid, pfn);
+	/* atomic_set(&page->_refcount, 1); */
+	/* 初始化_refcount 为1 */
 	init_page_count(page);
+	/* atomic_set(&(page)->_mapcount, -1);
+	 * 初始化_mapcount为 -1 */
 	page_mapcount_reset(page);
+	/* _last_cpupid:如果定义了LAST_CPUPID_NOT_IN_PAGE_FLAGS宏,则该属性是最后一个使用页面的CPU ID */
+	/* 设置page->_last_cpupid = -1 */
 	page_cpupid_reset_last(page);
-
+	/* 初始化lru */
 	INIT_LIST_HEAD(&page->lru);
 #ifdef WANT_PAGE_VIRTUAL
 	/* The shift won't overflow because ZONE_NORMAL is below 4G. */
@@ -5048,12 +5064,17 @@ void __ref build_all_zonelists(pg_data_t *pgdat, struct zone *zone)
  * Initially all pages are reserved - free ones are freed
  * up by free_all_bootmem() once the early boot process is
  * done. Non-atomic initialization, single-pass.
+ *
+ * 最初，所有页面都是reserved — 一旦早期启动过程完成,free_all_bootmem()就会释放空闲页面.
+ * Non-atomic 初始化,单次传递.
  */
 void __meminit memmap_init_zone(unsigned long size, int nid, unsigned long zone,
 		unsigned long start_pfn, enum memmap_context context)
 {
 	struct vmem_altmap *altmap = to_vmem_altmap(__pfn_to_phys(start_pfn));
+	/* 得到end_pfn */
 	unsigned long end_pfn = start_pfn + size;
+	/* 得到pgdat */
 	pg_data_t *pgdat = NODE_DATA(nid);
 	unsigned long pfn;
 	unsigned long nr_initialised = 0;
@@ -5067,6 +5088,7 @@ void __meminit memmap_init_zone(unsigned long size, int nid, unsigned long zone,
 	/*
 	 * Honor reservation requested by the driver for this ZONE_DEVICE
 	 * memory
+	 * 接受驱动程序为此ZONE_DEVICE内存请求的预订
 	 */
 	if (altmap && start_pfn == altmap->base_pfn)
 		start_pfn += altmap->reserve;
@@ -5075,10 +5097,13 @@ void __meminit memmap_init_zone(unsigned long size, int nid, unsigned long zone,
 		/*
 		 * There can be holes in boot-time mem_map[]s handed to this
 		 * function.  They do not exist on hotplugged memory.
+		 *
+		 * 在boot-time被这个函数处理的mem_map[]s有空洞
+		 * 在内存热插拔里面不存在
 		 */
 		if (context != MEMMAP_EARLY)
 			goto not_early;
-
+		/* 这里看一下arch/arm64/mm/init.c里面的pfn_valid */
 		if (!early_pfn_valid(pfn))
 			continue;
 		if (!early_pfn_in_nid(pfn, nid))
@@ -5091,16 +5116,25 @@ void __meminit memmap_init_zone(unsigned long size, int nid, unsigned long zone,
 		 * Check given memblock attribute by firmware which can affect
 		 * kernel memory layout.  If zone==ZONE_MOVABLE but memory is
 		 * mirrored, it's an overlapped memmap init. skip it.
+		 *
+		 * 检查firmware给定的内存块属性,这可能会影响内核内存布局.
+		 * 如果zone==ZONE_MOVABLE,但内存是镜像的区域,则它是一个重叠的memmap init.跳过它.
 		 */
 		if (mirrored_kernelcore && zone == ZONE_MOVABLE) {
+			/* 如果r是空的,或者说pfn要大于r的结束地址 */
 			if (!r || pfn >= memblock_region_memory_end_pfn(r)) {
+				/* 找到pfn小于的第一个memblock_region_memory_end_pfn的memblock(有可能就是pfn所在的memblock) */
 				for_each_memblock(memory, tmp)
 					if (pfn < memblock_region_memory_end_pfn(tmp))
 						break;
+				/* 把r赋值给他 */
 				r = tmp;
 			}
+			/* 如果pfn在这个memblock里面 并且memblock是MEMBLOCK_MIRROR
+			 * MEMBLOCK_MIRROR表示镜像的区域,将内存数据做两个复制,分配放在在内存和镜像内存中 */
 			if (pfn >= memblock_region_memory_base_pfn(r) &&
 			    memblock_is_mirror(r)) {
+				/* 跳过这块区域 */
 				/* already initialized as NORMAL */
 				pfn = memblock_region_memory_end_pfn(r);
 				continue;
@@ -5120,11 +5154,20 @@ not_early:
 		 * can be created for invalid pages (for alignment)
 		 * check here not to call set_pageblock_migratetype() against
 		 * pfn out of zone.
+		 *
+		 * 将block标记为movable,以便在启动时将blocks预留为movable.
+		 * 当进行大量长期内核分配时,这将迫使内核分配保留其块,而不是在引导期间在整个地址空间中泄漏.
+		 *
+		 * 位图是为zone的有效pfn range创建的.但是可以为无效页面创建memmap(用于对齐)
+		 * 请检查此处,不要针对区域外的pfn调用set_pageblock_migratetype().
 		 */
+
+		/* 如果是这个pageblock的第一页 */
 		if (!(pfn & (pageblock_nr_pages - 1))) {
 			struct page *page = pfn_to_page(pfn);
 
 			__init_single_page(page, pfn, zone, nid);
+			/* 设置page_block对应位图中的pageblock_flags为MIGRATE_MOVABLE */
 			set_pageblock_migratetype(page, MIGRATE_MOVABLE);
 		} else {
 			__init_single_pfn(pfn, zone, nid);

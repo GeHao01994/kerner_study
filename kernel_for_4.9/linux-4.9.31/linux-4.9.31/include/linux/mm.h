@@ -976,7 +976,9 @@ static inline void set_page_node(struct page *page, unsigned long node)
 static inline void set_page_links(struct page *page, enum zone_type zone,
 	unsigned long node, unsigned long pfn)
 {
+	/* 设置page的flag的zone bit */
 	set_page_zone(page, zone);
+	/*  设置page的flag的node bit */
 	set_page_node(page, node);
 #ifdef SECTION_IN_PAGE_FLAGS
 	set_page_section(page, pfn_to_section_nr(pfn));

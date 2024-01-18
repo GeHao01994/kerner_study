@@ -22,34 +22,52 @@
 
 /* Definition of memblock flags. */
 enum {
+	/* 表示没有特殊要求的区域 */
 	MEMBLOCK_NONE		= 0x0,	/* No special request */
+	/* 表示可以热插拔的区域，即在系统运行过程中可以拔出或者插入物理内存 */
 	MEMBLOCK_HOTPLUG	= 0x1,	/* hotpluggable region */
+	/* 表示镜像的区域，将内存数据做两个复制，分配放在在内存和镜像内存中 */
 	MEMBLOCK_MIRROR		= 0x2,	/* mirrored region */
+	/* 表示不添加到内存直接映射区域，即线性映射区域 */
 	MEMBLOCK_NOMAP		= 0x4,	/* don't add to kernel direct mapping */
 };
 
+/* 内存块区域的数据结构 */
 struct memblock_region {
+	/* 起始物理地址 */
 	phys_addr_t base;
+	/* 长度 */
 	phys_addr_t size;
+	/* flags 标志 */
 	unsigned long flags;
 #ifdef CONFIG_HAVE_MEMBLOCK_NODE_MAP
+	/* 节点编号 */
 	int nid;
 #endif
 };
 
 struct memblock_type {
+	/* 当前管理集合中记录的内存区域的个数 */
 	unsigned long cnt;	/* number of regions */
+	/* 当前管理集合中记录的内存区域的最大个数,最大值是INIT_PHYSMEM_REGIONS */
 	unsigned long max;	/* size of the allocated array */
+	/* 所有内存块区域的总长度 */
 	phys_addr_t total_size;	/* size of all regions */
+	/* 指向内存区域结构的指针 */
 	struct memblock_region *regions;
 };
 
 struct memblock {
+	/* 表示分配内存的方式,值为真表示从低地址向上分配,值未假表示从高地址向下分配 */
 	bool bottom_up;  /* is bottom up direction? */
+	/* 可分配内存的最大物理地址 */
 	phys_addr_t current_limit;
+	/* 内存类型(包括已分配的内存和未分配的内存) */
 	struct memblock_type memory;
+	/* 预留类型(已分配的内存) */
 	struct memblock_type reserved;
 #ifdef CONFIG_HAVE_MEMBLOCK_PHYS_MAP
+	/* 物理内存类型 */
 	struct memblock_type physmem;
 #endif
 };

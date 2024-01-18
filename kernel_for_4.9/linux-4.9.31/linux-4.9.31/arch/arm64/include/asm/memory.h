@@ -45,12 +45,34 @@
  * We don't use sizeof(struct page) directly since taking its size here
  * requires its definition to be available at this point in the inclusion
  * chain, and it may not be a power of 2 in the first place.
+ *
+ * struct page空间大小的Log2向上边界.
+ * 仅用于调整vmemmap区域的大小,不影响实际的内存占用空间.
+ * 我们不直接使用sizeof(struct page),因为在这里取其大小需要其定义在inclusion chain中的这一点上可用,
+ * 而且它一开始可能不是2的幂。
+ */
+/* 这里是写死的,但是后续版本改了,改成#define STRUCT_PAGE_MAX_SHIFT   (order_base_2(sizeof(struct page)))
+ * STRUCT_PAGE_MAX_SHIFT  即 struct page 这个结构体 需要的 shift bit 位数
+ * sizeof struct page 为44个字节.2^5 = 32 < 44;
+ * 2^6 = 64 > 44;则STRUCT_PAGE_MAX_SHIFT为6.
+ * shift是移位,max是最大. 这么大的空间中,肯定可以存放的下一个struct page 对象.
  */
 #define STRUCT_PAGE_MAX_SHIFT	6
 
 /*
  * VMEMMAP_SIZE - allows the whole linear region to be covered by
  *                a struct page array
+ *
+ * VMEMMAP_SIZE - 允许struct page array数组所覆盖的整个线性区域
+ */
+/* 后面这里改成了如下
+ * #define VMEMMAP_SIZE ((_PAGE_END(VA_BITS_MIN) - PAGE_OFFSET) \
+ *                        >> (PAGE_SHIFT - STRUCT_PAGE_MAX_SHIFT))
+ * _PAGE_END(VA_BITS_MIN)  这个计算 线性映射 区域 的 结尾地址.
+ * PAGE_OFFSET 这个是 线性映射区域 的起始地址。
+ *_PAGE_END(VA_BITS_MIN)-PAGE_OFFSET是线性映射区域的size
+ * 一个struct page描述一个page(PAGE_SHIFT的信息.
+ * _PAGE_END(VA_BITS_MIN) - PAGE_OFFSET这么大的区域,是多少个page(即需要多少个 struct page 对象来描述)呢?
  */
 #define VMEMMAP_SIZE (UL(1) << (VA_BITS - PAGE_SHIFT - 1 + STRUCT_PAGE_MAX_SHIFT))
 
@@ -65,6 +87,9 @@
  */
 #define VA_BITS			(CONFIG_ARM64_VA_BITS)
 #define VA_START		(UL(0xffffffffffffffff) << VA_BITS)
+/* PAGE_OFFSET表示物理内存在内核空间里做线性映射（linear mapping）的起始地址，在ARM64的Linux内核中该值定义为0xFFFF_8000_0000_0000.
+ * Linux内核在初始化时会把物理内存全部做一次线性映射,映射到内核空间的虚拟地址上
+ */
 #define PAGE_OFFSET		(UL(0xffffffffffffffff) << (VA_BITS - 1))
 #define KIMAGE_VADDR		(MODULES_END)
 #define MODULES_END		(MODULES_VADDR + MODULES_VSIZE)

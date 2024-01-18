@@ -81,6 +81,9 @@ void set_pfnblock_flags_mask(struct page *page,
 	get_pfnblock_flags_mask(page, page_to_pfn(page),		\
 			end_bitidx,					\
 			(1 << (end_bitidx - start_bitidx + 1)) - 1)
+/* set_pfnblock_flags_mask(page, flags, page_to_pfn(page), 2, 1 << (2 - 0 + 1) - 1)
+ * set_pfnblock_flags_mask(page, flags, page_to_pfn(page), 2, 7)
+ */
 #define set_pageblock_flags_group(page, flags, start_bitidx, end_bitidx) \
 	set_pfnblock_flags_mask(page, flags, page_to_pfn(page),		\
 			end_bitidx,					\
