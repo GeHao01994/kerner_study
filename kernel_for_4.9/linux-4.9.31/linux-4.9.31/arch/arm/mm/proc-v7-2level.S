@@ -112,7 +112,26 @@ ENTRY(cpu_v7_set_pte_ext)
 
 	tst	r1, #L_PTE_XN
 	orrne	r3, r3, #PTE_EXT_XN		/* 设置PXN */
-
+	/* 如果没有设置L_PTE_YOUNG并且L_PTE_PRESENT置位,那就保持Linux版本的页表保持不变,
+	 * 把ARM32硬件版本的页面表项内容清零.
+	 * 代码中L_PTE_VALID和L_PTE_NONE这两个软件比特位是后来添加的,
+	 * 因此在Linux 3.7及以前的内核版本中更容易理解一些.
+	 *
+	 * 为什么这里要把ARM硬件版本的页面表项内容清零呢?我们观察ARM32硬件版本的页面表相关标志会发现,
+	 * 没有表示页面被访问和压面在内存中的硬件标志位.
+	 * Linux内核最早基于X86体系结构设计的,所以Linux内核关于页表的很多术语和设计都针对于x86架构,
+	 * 而ARM Linux只能从软件架构上去跟随了,因此设计了两套页表,在x86的页面表中有3个标志位是从ARM32硬件页面表没有提供的.
+	 *
+	 * PTE_DIRTY: CPU在写操作的时候会设置该标志位,表示对应页面被写过,为脏页.
+	 * PTE_YOUNG: CPU访问该页时会设置该标志位.在页面换出时,如果该标志位置位了,说明该页刚被访问过,页面是young的,不适合把该页换出,同时清除该标志位.
+	 * PTE_PRESENT:表示页在内存中.
+	 * 因此在ARM Linux实现中需要模拟上述3个比特位.
+	 *
+	 * 如何模拟PTE DIRTY呢,在ARM MMU硬件为一个干净页面建立映射时,设置硬件页表项是只读权限.
+	 * 当往一个干净的页面写入时,会触发写权限缺页中断(虽然Linux版本的页面的页表项标记了可写权限,
+	 * 但是ARM硬件页面表项还不具有写入权限),那么在缺页中断handle_pte_fault中会在该页的Linux版本PTE页面表项标记为drity“”,
+	 * 并且发现PTE页表项内容改变了,ptep_set_access_flags函数会把新的Linux版本的页表项内容写入硬件页表,从而完成模拟过程
+	 */
 	tst	r1, #L_PTE_YOUNG
 	tstne	r1, #L_PTE_VALID
 	eorne	r1, r1, #L_PTE_NONE
