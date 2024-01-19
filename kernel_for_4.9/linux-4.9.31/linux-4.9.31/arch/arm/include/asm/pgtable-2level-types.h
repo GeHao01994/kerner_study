@@ -32,6 +32,10 @@ typedef u32 pmdval_t;
  */
 typedef struct { pteval_t pte; } pte_t;
 typedef struct { pmdval_t pmd; } pmd_t;
+/* PGD的定义其实是pmdval_t pgd[2],长度是两倍,也就是pgd包括两份相邻的PTE页表.
+ * 所以pgd_offset在查找pgd表项时,是按照pgd[2]长度来进行计算的,因此查找相应的pgd表项时,
+ * 其中pgd[0]指向第一份PTE页表,pgd[1]指向第二份PTE页表.
+ */
 typedef struct { pmdval_t pgd[2]; } pgd_t;
 typedef struct { pteval_t pgprot; } pgprot_t;
 

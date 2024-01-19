@@ -98,13 +98,21 @@ void __init free_bootmem_late(unsigned long addr, unsigned long size)
 static void __init __free_pages_memory(unsigned long start, unsigned long end)
 {
 	int order;
-
+	/* 这里的start和end指的页帧号
+	 * while循环一直从起始页帧号start遍历到end,
+	 * 循环的步长和order有关.
+	 */
 	while (start < end) {
+		/* 首先计算order大小,取MAX_ORDER - 1和__ffs(start)的最小值 */
+		/* ffs(start)函数计算start中第一个bit为1的位置, __ffs(start)=ffs(start)-1.
+		 * 因为伙伴系统的链表都是2的n次幂,最大的链表是2的10次方,也就是1024,即400.
+		 * 所以,通过ffs()函数可以很方便地计算出地址的对齐边界.例如start = 0x63300,那么ffs(0x63300)等于8,那么这里order选用8
+		 */
 		order = min(MAX_ORDER - 1UL, __ffs(start));
 
 		while (start + (1UL << order) > end)
 			order--;
-
+		/* 得到order值后,我们就可以把这段内存通过__free_pages_bootmem函数添加到伙伴系统了 */
 		__free_pages_bootmem(pfn_to_page(start), start, order);
 
 		start += (1UL << order);

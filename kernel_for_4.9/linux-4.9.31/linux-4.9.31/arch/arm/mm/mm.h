@@ -39,10 +39,13 @@ static inline pmd_t *pmd_off_k(unsigned long virt)
 }
 
 struct mem_type {
+	/* prot_pte成员用于页表项的控制位和标志位,如 L_PTE_PRESENT */
 	pteval_t prot_pte;
 	pteval_t prot_pte_s2;
+	/* 用于一级页表项的控制位和标志位,如PMD_TYPE_MASK */
 	pmdval_t prot_l1;
 	pmdval_t prot_sect;
+	/* domain成员用于ARM中定义的不同的域,如DIMAIN_KERNEL */
 	unsigned int domain;
 };
 

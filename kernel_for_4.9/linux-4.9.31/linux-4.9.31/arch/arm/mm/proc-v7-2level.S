@@ -78,6 +78,19 @@ ENDPROC(cpu_ca8_switch_mm)
  *	- pte   - PTE value to store
  *	- ext	- value for extended PTE bits
  */
+/* cpu_v7_set_pte_ext函数参数r0表示PTE entry页面表项的指针,
+ * 注意ARM linux中实现了两份页表,硬件页表的地址r0 + 2048.
+ * 因此r0指Linux版本的页面表地址,r1表示要写入的linux版本PTE页面表项的内容,
+ * 这里指linux版本的页面表项的内容,而非硬件版本的页面表项的内容.
+ * 该函数的主要目的是根据Linux版本的页面表项内容来填充ARM硬件版本的页表项
+ *
+ * 首先把Linux版本的页面表项内容写入Linux版本的页表中,然后根据mem_type数据
+ * 结构prot_pte的标志位来设置ARMv7-A硬件相关的标志位.
+ * prot_pte的标志位是Linux内核中采用的,定义在arch/arm/include/asm/pgtable-2level.h头文件中,
+ * 而硬件相关的标志位定义在arch/arm/include/asm/pgteble-2level-hwdef.h头文件.
+ * 这两份标志位对应的偏移是不一样的,所以不同架构的处理器需要单独处理
+ *
+ */
 ENTRY(cpu_v7_set_pte_ext)
 #ifdef CONFIG_MMU
 	str	r1, [r0]			@ linux version
@@ -88,24 +101,24 @@ ENTRY(cpu_v7_set_pte_ext)
 	orr	r3, r3, #PTE_EXT_AP0 | 2
 
 	tst	r1, #1 << 4
-	orrne	r3, r3, #PTE_EXT_TEX(1)
+	orrne	r3, r3, #PTE_EXT_TEX(1)		/* 设置TEX */
 
 	eor	r1, r1, #L_PTE_DIRTY
 	tst	r1, #L_PTE_RDONLY | L_PTE_DIRTY
-	orrne	r3, r3, #PTE_EXT_APX
+	orrne	r3, r3, #PTE_EXT_APX		/* 设置AP[2] */
 
 	tst	r1, #L_PTE_USER
-	orrne	r3, r3, #PTE_EXT_AP1
+	orrne	r3, r3, #PTE_EXT_AP1		/* 设置AP[1 : 0 ] */
 
 	tst	r1, #L_PTE_XN
-	orrne	r3, r3, #PTE_EXT_XN
+	orrne	r3, r3, #PTE_EXT_XN		/* 设置PXN */
 
 	tst	r1, #L_PTE_YOUNG
 	tstne	r1, #L_PTE_VALID
 	eorne	r1, r1, #L_PTE_NONE
 	tstne	r1, #L_PTE_NONE
 	moveq	r3, #0
-
+	/* 写入硬件页表,硬件页表在软件页表+ 2048 Byte */
  ARM(	str	r3, [r0, #2048]! )
  THUMB(	add	r0, r0, #2048 )
  THUMB(	str	r3, [r0] )

@@ -131,11 +131,20 @@ static inline void pte_free(struct mm_struct *mm, pgtable_t pte)
 static inline void __pmd_populate(pmd_t *pmdp, phys_addr_t pte,
 				  pmdval_t prot)
 {
+	/* 注意这里是把刚分配的1024个PTE页表中的第512个页表项的地址作为基地址,
+	 * 再加上一些标志位信息prot作为页表项内容,写入上一级页表项PMD中
+	 * 相邻的两个二级页表的基地址分别写入PMD的页表项中的pmdp[0]和
+	 * pmdp[1]指针中
+	 */
 	pmdval_t pmdval = (pte + PTE_HWTABLE_OFF) | prot;
 	pmdp[0] = __pmd(pmdval);
+/* 注意这里是ifndef,没有定义CONFIG_ARM_LPAE这个情况下
+ * 定义了就用三级页表去了
+ */
 #ifndef CONFIG_ARM_LPAE
 	pmdp[1] = __pmd(pmdval + 256 * sizeof(pte_t));
 #endif
+	/* 将pmdp两个刷入到RAM中 */
 	flush_pmd_entry(pmdp);
 }
 

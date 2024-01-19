@@ -16,6 +16,7 @@
 
 struct mm_struct init_mm = {
 	.mm_rb		= RB_ROOT,
+	/* 内核的页表存放在swapper_pg_dir地址中,这个定义在arch/arm/kernel/head.S汇编中 */
 	.pgd		= swapper_pg_dir,
 	.mm_users	= ATOMIC_INIT(2),
 	.mm_count	= ATOMIC_INIT(1),

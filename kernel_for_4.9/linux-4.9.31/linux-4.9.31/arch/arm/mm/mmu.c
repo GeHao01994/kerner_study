@@ -732,7 +732,22 @@ static void *__init late_alloc(unsigned long sz)
 		BUG();
 	return ptr;
 }
-
+/* pmd_node检查这个参数对应的PMD表项的内容,如果为0,说明页表项PTE还没建立,
+ * 所以要先去建立页表项.
+ * 这里会去分配(PTE_HWTABLE_OFF + PTE_HWTABLE_SIZE)个PTE页面表项,
+ * 即会分配512 + 512个PTE页表项.
+ * 但是在ARM32架构中,二级页表也只有256个页表项,为何要分配这么多?
+ * 先回答刚才的问题: ARM结构中的一级页表PGD的偏移量应该是从20开始的,
+ * 为何这里的头文件定义从21为开始呢?
+ *
+ * 这里分配了两个PTRS_PER_PTE(512)个页表项,也就是分配了两份页面表项.
+ * 因为Linux内核默认的PGD是从21位开始的,也就是bit[31:21],一共2048个一级页表项.
+ * 而ARM32硬件结构中,PGD是从20位开始的,页表项数目是4096,比Linux内核的要多一倍
+ * 那么代码实现上就取巧了,一个PGD页表项,映射512个PTE表项,而在真实硬件中,一个PGD页表项,只有256个PTE.
+ * 也就是说,前512个PTE页面表项是给OS用的(也就是Linux内核用的页表),可以用于模拟L_PTE_DIRTY、L_PTE_YOUNG等标志位),
+ * 后512个页表表是给ARM硬件MMU使用的.
+ * 一个映射两个相邻的一级页表项,也就是对应的两个相邻的二级页表都存放在一个page中.
+ */
 static pte_t * __init arm_pte_alloc(pmd_t *pmd, unsigned long addr,
 				unsigned long prot,
 				void *(*alloc)(unsigned long sz))
@@ -757,6 +772,9 @@ static void __init alloc_init_pte(pmd_t *pmd, unsigned long addr,
 				  void *(*alloc)(unsigned long sz),
 				  bool ng)
 {
+	/* alloc_init_pte首先判断相应的PTE页表项是否已经存在,如果不存在,
+	 * 那就要新建PTE页表项.
+	 * 接下来的while循环是根据物理地址的pfn页帧号来生成新的PTE表项(PTE entry),最后设置到ARM硬件页表中 */
 	pte_t *pte = arm_pte_alloc(pmd, addr, type->prot_l1, alloc);
 	do {
 		set_pte_ext(pte, pfn_pte(pfn, __pgprot(type->prot_pte)),
@@ -911,6 +929,7 @@ static void __init __create_mapping(struct mm_struct *mm, struct map_desc *md,
 	phys_addr_t phys;
 	const struct mem_type *type;
 	pgd_t *pgd;
+	/* 通过md->type来获取描述内存区域属性的mem_type数据结构,这里只需要通过查表的方式获取mem_type数据结构里的具体内容 */
 	/* 根据md->type在上面的全局数组mem_types中获得我们的mem->type
 	 * 里面包含了一些属性,截取MT_MEMORY_RWX来看
 	 * [MT_MEMORY_RWX] = {
@@ -947,6 +966,7 @@ static void __init __create_mapping(struct mm_struct *mm, struct map_desc *md,
 	pgd = pgd_offset(mm, addr);
 	/* 获得结束地址 */
 	end = addr + length;
+	/* 以PGDIR_SIZE为单位,在内存区域[virtual,virtual+length]中调用alloc_init_pud来初始化PGD页表项内容和下一级页表PUD. */
 	do {
 		/* #define pgd_addr_end(addr, end)
 		 * ({unsigned long __boundary = ((addr) + PGDIR_SIZE) & PGDIR_MASK;

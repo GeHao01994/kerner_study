@@ -1282,17 +1282,26 @@ static void __init __free_pages_boot_core(struct page *page, unsigned int order)
 	unsigned int nr_pages = 1 << order;
 	struct page *p = page;
 	unsigned int loop;
-
+	/* prefetchw 用于写预取 */
 	prefetchw(p);
 	for (loop = 0; loop < (nr_pages - 1); loop++, p++) {
 		prefetchw(p + 1);
+		/* 清除PG_reserved
+		 * 设置该标志，防止该page被交换到swap
+		 */
 		__ClearPageReserved(p);
+		/* 设置page->_refcount为0 */
 		set_page_count(p, 0);
 	}
+	/* 这里很细节,那上面是loop < (nr_pages - 1),不是 <=,
+	 * 所以这里为了避免预取到nr_pages的page而浪费内存
+	 * 直接单独拎出来
+	 */
 	__ClearPageReserved(p);
 	set_page_count(p, 0);
-
+	/* 将zone的-> managed_pages加上我们的nr_pages */
 	page_zone(page)->managed_pages += nr_pages;
+	/* 又将设置page->_refcount为1 */
 	set_page_refcounted(page);
 	__free_pages(page, order);
 }
@@ -1352,6 +1361,7 @@ static inline bool __meminit meminit_pfn_in_nid(unsigned long pfn, int node,
 void __init __free_pages_bootmem(struct page *page, unsigned long pfn,
 							unsigned int order)
 {
+	/* 如果page还未初始化,那么直接返回 */
 	if (early_page_uninitialised(pfn))
 		return;
 	return __free_pages_boot_core(page, order);
@@ -3918,7 +3928,14 @@ EXPORT_SYMBOL(get_zeroed_page);
 
 void __free_pages(struct page *page, unsigned int order)
 {
+	/* 这边就是让page_refcount -1 然后判断它是不是等于0
+	 * 等于0就返回true
+	 */
 	if (put_page_testzero(page)) {
+		/* 如果order等于0的情况,作为特殊情况来处理,zone中有一个变量zone->pageset为
+		 * 每个CPU初始化一个percpu变量struct per_cpu_pageset.
+		 * 当释放order等于0的页面时,首先释放到per_cpu_page->list链表里面
+		 */
 		if (order == 0)
 			free_hot_cold_page(page, false);
 		else
@@ -4520,6 +4537,11 @@ static void zoneref_set_zone(struct zone *zone, struct zoneref *zoneref)
  * Builds allocation fallback zone lists.
  *
  * Add all populated zones of a node to the zonelist.
+ *
+ * 系统中会有一个zonelist的数据结构,伙伴系统分配器会从zonelist开始分配内存,
+ * zonelist有一个zoneref数组,数组里会有一个成员会指向zone数据结构.
+ * zoneref数组的第一个成员指向的zone是页面分配器的第一个候选者,其他成员则是第一个候选者分配失败之后才考虑,
+ * 优先级逐渐降低.
  */
 static int build_zonelists_node(pg_data_t *pgdat, struct zonelist *zonelist,
 				int nr_zones)
@@ -4529,8 +4551,26 @@ static int build_zonelists_node(pg_data_t *pgdat, struct zonelist *zonelist,
 
 	do {
 		zone_type--;
+		/* zone从上到下,先是ZONE_HIGHMEM,再是ZONE_NORMAL ... 依次类推 */
 		zone = pgdat->node_zones + zone_type;
+		/* static inline bool managed_zone(struct zone *zone)
+		 * {
+		 *	return zone->managed_pages;
+		 * }
+		 * 这里需要注意的是只有当你的pgdat里面有内存的时候才会有
+		 * zoneref
+		 */
 		if (managed_zone(zone)) {
+		/* static void zoneref_set_zone(struct zone *zone, struct zoneref *zoneref)
+		 * {
+		 *	zoneref->zone = zone;
+		 *	zoneref->zone_idx = zone_idx(zone);
+		 * }
+		 */
+		/* 所以这里会出现
+		 * HighMem	_zonerefs[0]->zone_index=1
+		 * Normal	_zonerefs[1]->zone_index=0
+		 */
 			zoneref_set_zone(zone,
 				&zonelist->_zonerefs[nr_zones++]);
 			check_highest_zone(zone_type);

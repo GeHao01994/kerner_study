@@ -12,16 +12,68 @@
 
 #define __PAGETABLE_PMD_FOLDED
 
+/* ARM32系统只用到了两层映射,因此在实际代码中就要在3层映射模型中合并1层.
+ * 在ARM32架构中,可以按段(section)来映射,这时采用单层映射模式.
+ * 使用页面映射需要两层映射结构,页面的选择可以是64KB的大页面或4KB的小页面.
+ * 如下图,linux内核通常默认使用4KB大小的小页面
+ *  ____________________ _______________ _______________
+ * |                    |               |               |
+ * |____________________|_______________|_______________|
+ * 31       |         20 19     |     12 11             0
+ *	    |                   |
+ *          |                   |
+ *          |                   |
+ *          |                   |
+ *          ↓                   ↓
+ *       ______             ________
+ *      |      |           |        |
+ *      |      |           |        |
+ *      |      |           |        |
+ *      |      |           |        |
+ *      |______|           |________|
+ *      |______|------     |________|----------
+ *      |      |     |     |        |         |
+ *      |______|     |----→|________|         |
+ *	 PGD页表            PTE页表项         |
+ *    4096个页表项          256个表项         |
+ *       ↑                                    |
+ *       |                                    ↓
+ *    ______	 	  _____________________________________________ __________
+ *   |	    |		 |                                             |          |
+ *   |______|	 	 |_____________________________________________|__________|
+ *  页表基地址寄存器     31                                          12 11        0
+ *    TTBRx
+ *			arm32 处理器查询页表
+ *
+ * 段映射:
+ * 如果采用单层的段映射,内存中有一个段映射表,表中有4096个表项,每个表项的大小都是4Byte,所以这个段映射表的大小是16KB,而且其位置必须与16KB边界对齐.
+ * 每个段表项可以寻址1MB大小的空间地址.当CPU访问内存时,32位虚拟地址的高12位(bit[31:20])用作访问段映射表的索引,从表中找到相应的表项.
+ * 每个表项提供一个12位的物理地址,以及相应的标志位,如可读、可写等标志位.
+ * 将这个12位物理地址和虚拟地址的低20位拼凑在一起,就可以得到32位物理地址.
+ *
+ * 页表映射:
+ * 如果采用页表映射的方式,段映射表就变成一级映射表(First Level Table,在Linux内核中称为PGD),其表项提供的不再是物理段的地址,而是二级页表的基地址.
+ * 32位虚拟地址的高12位(bit[31 : 20])作为访问一级页表的索引值,找到相应的表项,每个表项指向一个二级页表.以虚拟地址的次8位(bit[19:12])作为访问二级
+ * 页表的索引值,得到相应的页表项,从这个页表项中找到20位的物理页面地址.
+ * 最后将这个20位物理页面地址和虚拟地址的低12位拼凑在一起,最终得到的32位物理地址.这个过程在ARM32架构中由MMU硬件完成,软件不需要接入
+ */
 /*
  * Hardware-wise, we have a two level page table structure, where the first
  * level has 4096 entries, and the second level has 256 entries.  Each entry
  * is one 32-bit word.  Most of the bits in the second level entry are used
  * by hardware, and there aren't any "accessed" and "dirty" bits.
  *
+ * 在硬件方面,我们有一个两级页表结构,其中第一级有4096个entries,第二级有256个entries.
+ * 每个entries是一个32位的word.
+ * 第二级entry中的大多数位由硬件使用,并且没有任何“accessed”和“dirty”位.
+ *
  * Linux on the other hand has a three level page table structure, which can
  * be wrapped to fit a two level page table structure easily - using the PGD
  * and PTE only.  However, Linux also expects one "PTE" table per page, and
  * at least a "dirty" bit.
+ *
+ * Linux在另一方面有三级页表结构,它可以很容易地包装成适合两级页表的结构 - 只使用PGD和PTE.
+ * 然而,Linux也期望每页有一个“PTE”表,并且至少有一个”dirty“位.
  *
  * Therefore, we tweak the implementation slightly - we tell Linux that we
  * have 2048 entries in the first level, each of which is 8 bytes (iow, two
@@ -30,7 +82,13 @@
  * which contain the state information Linux needs.  We, therefore, end up
  * with 512 entries in the "PTE" level.
  *
+ * 因此,我们稍微调整了一下实现 - 我们告诉Linux,我们在第一级中有2048个条目,
+ * 每个条目都是8个字节(iow，两个硬件页表的指针指向第二级).
+ * 第二级包含两个连续排列的硬件PTE页表,前面是包含Linux所需的状态信息的Linux版本.
+ * 因此，我们最终在“PTE”级别中有512个条目.
+ *
  * This leads to the page tables having the following layout:
+ * 这导致页面表具有以下布局
  *
  *    pgd             pte
  * |        |
@@ -48,7 +106,11 @@
  * See L_PTE_xxx below for definitions of bits in the "Linux pt", and
  * PTE_xxx for definitions of bits appearing in the "h/w pt".
  *
+ * 有关“Linux pt”中的位的定义,请参见下面的L_PTE_xxx.
+ * 有关“h/w pt”中出现的位的描述，请参见PTE_xxx.
+ *
  * PMD_xxx definitions refer to bits in the first level page table.
+ * PMD_xxx定义是指一级页面表中的位.
  *
  * The "dirty" bit is emulated by only granting hardware write permission
  * iff the page is marked "writable" and "dirty" in the Linux PTE.  This
@@ -57,6 +119,10 @@
  * For the hardware to notice the permission change, the TLB entry must
  * be flushed, and ptep_set_access_flags() does that for us.
  *
+ * 当页面在Linux PTE中标记为“writable”和“dirty”时,仅通过授予硬件写入权限来模拟“dirty”位
+ * 这意味着写一个干净的页面将造成权限fault,Linux MM层将通过handle_pte_fault()将页面标记为脏.
+ * 要使硬件注意到权限更改，TLB条目必须被刷新,而ptep_set_access_flags()为我们执行此操作.
+ *
  * The "accessed" or "young" bit is emulated by a similar method; we only
  * allow accesses to the page if the "young" bit is set.  Accesses to the
  * page will cause a fault, and handle_pte_fault() will set the young bit
@@ -64,11 +130,20 @@
  * PTE entry.  Again, ptep_set_access_flags() will ensure that the TLB is
  * up to date.
  *
+ * 通过类似的方法模拟“accessed”或“young”位;
+ * 只有在设置了“young”位的情况下,我们才允许访问该页面.
+ * 对页面的访问将导致fault,只要页面在相应的Linux PTE entry中标记为present,
+ * handle_pte_fault()就会为我们设置young bit.
+ *
  * However, when the "young" bit is cleared, we deny access to the page
  * by clearing the hardware PTE.  Currently Linux does not flush the TLB
  * for us in this case, which means the TLB will retain the transation
  * until either the TLB entry is evicted under pressure, or a context
  * switch which changes the user space mapping occurs.
+ *
+ * 然而,当“young”位被清除时,我们通过清除硬件PTE来拒绝对页面的访问.
+ * 目前Linux在这种情况下不会为我们刷新TLB，这意味着TLB将保留转换,直到TLB entry在压力下被驱逐,
+ * 或者发生改变用户空间映射的上下文切换.
  */
 #define PTRS_PER_PTE		512
 #define PTRS_PER_PMD		1
@@ -116,7 +191,17 @@
  *
  * The PTE table pointer refers to the hardware entries; the "Linux"
  * entries are stored 1024 bytes below.
+ *
+ * “Linux” PTE定义。
+ *
+ * 我们保留了两组PTE - 硬件版本和linux版本.
+ * 这允许我们将Linux bit映射到硬件表的方式上具有更大的灵活性,
+ * 并允许我们使用YOUNG和DIRTY bits
+ *
+ * PTE表指针指的是硬件entries；“Linux”条目存储在1024字节以下.
  */
+
+/* prot_pte成员用于页表项的控制位和标志位 */
 #define L_PTE_VALID		(_AT(pteval_t, 1) << 0)		/* Valid */
 #define L_PTE_PRESENT		(_AT(pteval_t, 1) << 0)
 #define L_PTE_YOUNG		(_AT(pteval_t, 1) << 1)

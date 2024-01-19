@@ -15,9 +15,13 @@
 #include <asm/io.h>
 
 struct map_desc {
+	/* 虚拟地址的起始地址 */
 	unsigned long virtual;
+	/* 物理地址的开始地址的页帧号 */
 	unsigned long pfn;
+	/* 内存区间大小 */
 	unsigned long length;
+	/* 内存区间的属性 */
 	unsigned int type;
 };
 

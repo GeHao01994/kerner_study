@@ -36,10 +36,17 @@
 #define PAGE_ALLOC_COSTLY_ORDER 3
 
 enum {
+	/* 页框中的内容不可移动.内核分配的大部分内存属于这种类型 */
 	MIGRATE_UNMOVABLE,
+	/* 页框中的内容可移动.用户空间分配的内存大部分属于这种类型.
+	 * 移动页框的方法为将老页框中的内容拷贝到新页框中,然后将页表的pte entry指向新页框地址即可
+	 */
 	MIGRATE_MOVABLE,
+	/* 这种页框一般用于文件缓存,它们虽然不能被移动,但可以被回收,当再次需要时可通过源文件重建 */
 	MIGRATE_RECLAIMABLE,
+	/* MIGRATE_PCPTYPES是per_cpu_pageset,即用来表示每CPU页框高速缓存的数据结构中的链表的迁移类型数目 */
 	MIGRATE_PCPTYPES,	/* the number of types on the pcp lists */
+	/* MIGRATE_HIGHATOMIC: 它是为那些不允许内存分配失败情形预留的紧急内存,只有当gfp_flags为__GFP_ATOMIC时,才可能会从该内存池中分配 */
 	MIGRATE_HIGHATOMIC = MIGRATE_PCPTYPES,
 #ifdef CONFIG_CMA
 	/*
@@ -55,9 +62,16 @@ enum {
 	 * MAX_ORDER_NR_PAGES should biggest page be bigger then
 	 * a single pageblock.
 	 */
+	/* MIGRATE_CMA: 这种内存被预留给驱动使用,当驱动未使用时,伙伴系统可以将其分配给用户进程使用.
+	 * 但驱动需要时,就需要用户进程通过回收或迁移的方式返还它们,以供驱动使用,因此它必须是可迁移或可回收的
+	 */
 	MIGRATE_CMA,
 #endif
 #ifdef CONFIG_MEMORY_ISOLATION
+	/* MIGRATE_ISOLATE：它用于numa节点之间移动内存，从而将内存迁移到访问它最频繁cpu的node上 */
+	/* 它用于numa节点之间移动内存,从而将内存迁移到访问它最频繁cpu的node上
+	 * 内核将可移动和可回收的内存页块通过移动物理内存或者回收内存的方法将内存碎片合并成连续的大块内存以此来缓解内存碎片.
+	 */
 	MIGRATE_ISOLATE,	/* can't allocate from here */
 #endif
 	MIGRATE_TYPES
@@ -274,8 +288,11 @@ enum zone_watermarks {
 #define high_wmark_pages(z) (z->watermark[WMARK_HIGH])
 
 struct per_cpu_pages {
+	/* 表示当前zone中的per_cpu_pages的页表 */
 	int count;		/* number of pages in the list */
+	/* 表示当缓存的页面高于这个水位时,会回收页面到伙伴系统 */
 	int high;		/* high watermark, emptying needed */
+	/* 表示一次回收页面到伙伴系统的页面数量 */
 	int batch;		/* chunk size for buddy add/remove */
 
 	/* Lists of pages, one per migrate type stored on the pcp-lists */
@@ -749,6 +766,9 @@ typedef struct pglist_data {
 	 * If memory initialisation on large machines is deferred then this
 	 * is the first PFN that needs to be initialised.
 	 */
+	/* 若在大机器上的内存初始化被推迟了，那么这是
+	 * 第一个需要被初始化的 PFN
+	 */
 	unsigned long first_deferred_pfn;
 	unsigned long static_init_size;
 #endif /* CONFIG_DEFERRED_STRUCT_PAGE_INIT */
@@ -889,6 +909,10 @@ unsigned long __init node_memmap_size_bytes(int, unsigned long, unsigned long);
  * All the reclaim decisions have to use this function rather than
  * populated_zone(). If the whole zone is reserved then we can easily
  * end up with populated_zone() && !managed_zone().
+ *
+ * 如果zone内有由伙伴分配器管理的页面,则返回true.
+ * 所有回收决策都必须使用此函数,而不是populated_zone().
+ * 如果整个区域都是reserved,那么我们可以用 populated_zone() &&! managed_zone() 判断
  */
 static inline bool managed_zone(struct zone *zone)
 {
