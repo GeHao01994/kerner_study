@@ -74,35 +74,51 @@ static phys_addr_t __init early_pgtable_alloc(void)
 {
 	phys_addr_t phys;
 	void *ptr;
-
+	/* 使用 memblock 函数,找到一页空闲的物理内存,地址是phys */
 	phys = memblock_alloc(PAGE_SIZE, PAGE_SIZE);
 
 	/*
 	 * The FIX_{PGD,PUD,PMD} slots may be in active use, but the FIX_PTE
 	 * slot will be free, so we can (ab)use the FIX_PTE slot to initialise
 	 * any level of table.
+	 *
+	 * FIX_{PGD、PUD、PMD}插槽可能处于活动使用状态，但FIX_PTE插槽将是空闲的,
+	 * 所以我们可以（ab）使用FIX_PTE插槽初始化任何级别的表。
+	 *
+	 * fixmap中,pgd pud pmd对应的虚拟地址可能正在被使用,但是pte对应的虚拟地址肯定是可以被覆盖的。
+	 * 因为修改地址转换页表时,需要使用虚拟地址,因为已经使能了MMU,CPU 操作的地址都是VA 地址.
+	 * 但是修改完成后,MMU工作时,就仅仅依赖页表里面填写的物理地址了。
+	 * 所以,FIXMAP中的pte这个VA地址,哪里需要就映射到哪里,然后就可以使用这个VA 地址,填充里面的值。
 	 */
-	ptr = pte_set_fixmap(phys);
 
+	/* 将找到的物理地址,映射到fixmap总pte idx对应的VA 地址处 */
+	ptr = pte_set_fixmap(phys);
+	/* 使用 memset 函数进行填充为0 */
 	memset(ptr, 0, PAGE_SIZE);
 
 	/*
 	 * Implicit barriers also ensure the zeroed page is visible to the page
 	 * table walker
+	 *
+	 * 隐式屏障也确保0页对页表 walker是可视的
 	 */
 	pte_clear_fixmap();
-
+	/* 返回物理地址 */
 	return phys;
 }
 
+/* PTE页表是4级页表的最后一级,alloc_init_pte配置PTE页表项 */
 static void alloc_init_pte(pmd_t *pmd, unsigned long addr,
 				  unsigned long end, unsigned long pfn,
 				  pgprot_t prot,
 				  phys_addr_t (*pgtable_alloc)(void))
 {
 	pte_t *pte;
-
+	/* 如果pmd是段映射,那么就报个BUG */
 	BUG_ON(pmd_sect(*pmd));
+	/* 首先判断pmd是否为空,如果为空,说明下一级页表不存在,需要动态分配512个表项,
+	 * 然后通过__pmd_populate函数来设置PMD页表项
+	 */
 	if (pmd_none(*pmd)) {
 		phys_addr_t pte_phys;
 		BUG_ON(!pgtable_alloc);
@@ -112,9 +128,10 @@ static void alloc_init_pte(pmd_t *pmd, unsigned long addr,
 		pte_clear_fixmap();
 	}
 	BUG_ON(pmd_bad(*pmd));
-
+	/* 通过bit[20:12]作为索引,索引到相应的PTE页表项 */
 	pte = pte_set_fixmap_offset(pmd, addr);
 	do {
+		/* 循环设置PTE表项 */
 		set_pte(pte, pfn_pte(pfn, prot));
 		pfn++;
 	} while (pte++, addr += PAGE_SIZE, addr != end);
@@ -133,7 +150,14 @@ static void alloc_init_pmd(pud_t *pud, unsigned long addr, unsigned long end,
 	/*
 	 * Check for initial section mappings in the pgd/pud and remove them.
 	 */
+	/* 如果是段映射
+	 * #define pud_sect(pud) ((pud_val(pud) & PUD_TYPE_MASK) == PUD_TYPE_SECT)
+	 */
 	BUG_ON(pud_sect(*pud));
+	/* 首先判断PUD页表项的内容是否为空?
+	 * 如果为空,表示PUD指向的下一级页表PMD不存在,需要动态分配PMD页表.
+	 * 分配PTRS_PER_PMD个页表项,即512个,然后通过pud_populate来设置pud页表项
+	 */
 	if (pud_none(*pud)) {
 		phys_addr_t pmd_phys;
 		BUG_ON(!pgtable_alloc);
@@ -143,11 +167,12 @@ static void alloc_init_pmd(pud_t *pud, unsigned long addr, unsigned long end,
 		pmd_clear_fixmap();
 	}
 	BUG_ON(pud_bad(*pud));
-
+	/* 使用bit[29:21]位获取PUD表项 */
 	pmd = pmd_set_fixmap_offset(pud, addr);
 	do {
 		next = pmd_addr_end(addr, end);
 		/* try section mapping first */
+		/* 段映射,同alloc_init_pud,这是颗粒SECTION_MASK(2MB)有所不同 */
 		if (((addr | next | phys) & ~SECTION_MASK) == 0 &&
 		      allow_block_mappings) {
 			pmd_t old_pmd =*pmd;
@@ -165,6 +190,7 @@ static void alloc_init_pmd(pud_t *pud, unsigned long addr, unsigned long end,
 				}
 			}
 		} else {
+			/* 如果映射的内存不是和SECTION_MASK对齐的,那么需要通过alloc_init_pte函数来映射下一级PTE页表 */
 			alloc_init_pte(pmd, addr, next, __phys_to_pfn(phys),
 				       prot, pgtable_alloc);
 		}
@@ -177,9 +203,11 @@ static void alloc_init_pmd(pud_t *pud, unsigned long addr, unsigned long end,
 static inline bool use_1G_block(unsigned long addr, unsigned long next,
 			unsigned long phys)
 {
+	/* 如果不是4K的大小 返回false */
 	if (PAGE_SHIFT != 12)
 		return false;
 
+	/* 如果addr、next、phys不是PUD_MASK(也就是说不是1G对齐的),那么返回false */
 	if (((addr | next | phys) & ~PUD_MASK) != 0)
 		return false;
 
@@ -193,24 +221,58 @@ static void alloc_init_pud(pgd_t *pgd, unsigned long addr, unsigned long end,
 {
 	pud_t *pud;
 	unsigned long next;
-
+	/* 通过pgd_none判断当前PGD表项内容是否为空.
+	 * 如果pgd表项内容为空,说明下一级页表为空,
+	 * 那么需要动态分配下一级页表.
+	 */
 	if (pgd_none(*pgd)) {
 		phys_addr_t pud_phys;
 		BUG_ON(!pgtable_alloc);
+		/* 这里是分配内存,如果是4K的表项,那么分配4K,4096/8 = 512,正好是512个表项
+		 * 返回物理地址
+		 */
 		pud_phys = pgtable_alloc();
+		/* 通过pgd_populate把刚刚分配的PUD页表设置到相应的PGD页表项中
+		 * 将pud物理地址写到pgd entry，完成pgd entry设置
+		 */
 		__pgd_populate(pgd, pud_phys, PUD_TYPE_TABLE);
 	}
 	BUG_ON(pgd_bad(*pgd));
-
+	/* 计算虚拟地址在pud页表中对应的pgd entry的虚拟地址.
+	 * (1)读取pgd entry获取pud页表基地址的物理地址
+	 * (2)根据虚拟地址与pud相关的域计算pud index
+	 * (3)根据(1)(2)的结果获取pud entry的物理地址
+	 * (4)利用fixmap中的FIX_PUD映射其虚拟地址,该虚拟地址就是addr虚拟地址对应第一个pud entry的指针,指针进行+1操作会自动跳转到下一个pgd entry指针
+	 *
+	 * 最终使用虚拟地址的bit[38 ~ 30]位来做索引值
+	 */
 	pud = pud_set_fixmap_offset(pgd, addr);
 	do {
+		/* 接下来以PUD_SIZE(即1 << 30，1GB为步长,通过while循坏来设置下一级页表). */
+		/* #define pud_addr_end(addr, end)						\
+		 * ({	unsigned long __boundary = ((addr) + PUD_SIZE) & PUD_MASK;	\
+		 * (__boundary - 1 < (end) - 1)? __boundary: (end);		\
+		 * })
+		 */
 		next = pud_addr_end(addr, end);
 
 		/*
 		 * For 4K granule only, attempt to put down a 1GB block
+		 * 针对4K颗粒，尝试分配1GB的块
+		 */
+		/* use_1G_block 函数会判断是否使用1GB大小的block来映射? 当这里要映射的大小内存块正好是PUD_SIZE的时候,
+		 * 那么只需要映射到PUD就好了,接下来的PMD和PTE页表等到真正需要使用时在映射,通过set_pud函数来设置相应的PUD表项
 		 */
 		if (use_1G_block(addr, next, phys) && allow_block_mappings) {
 			pud_t old_pud = *pud;
+			/* int pud_set_huge(pud_t *pud, phys_addr_t phys, pgprot_t prot)
+			 * {
+			 * 	BUG_ON(phys & ~PUD_MASK);
+			 *	这里就是设置为大小为1G的块映射
+			 *	set_pud(pud, __pud(phys | PUD_TYPE_SECT | pgprot_val(mk_sect_prot(prot))));
+			 *	return 1;
+			 * }
+			 */
 			pud_set_huge(pud, phys, prot);
 
 			/*
@@ -219,16 +281,30 @@ static void alloc_init_pud(pgd_t *pgd, unsigned long addr, unsigned long end,
 			 * need (from swapper_pg_dir).
 			 *
 			 * Look up the old pmd table and free it.
+			 *
+			 * 如果我们有一个pud的旧值，它将指向我们不再需要的pmd表（来自swapper_pg_dir）。
+			 *
+			 * 查找旧的pmd表并将其释放。
 			 */
+			/* 如果原来的pud里面有东西 */
 			if (!pud_none(old_pud)) {
+				/* 由于被替换的old entry内容,可能已被加载到tlb中.
+				 * 因此,为了保持tlb和页表内容的一致,需要刷新tlb
+				 */
 				flush_tlb_all();
+				/* 如果是页表映射
+				 * #define pud_table(pud)  ((pud_val(pud) & PUD_TYPE_MASK) == PUD_TYPE_TABLE)
+				 */
 				if (pud_table(old_pud)) {
+					/* 拿到物理地址 */
 					phys_addr_t table = pud_page_paddr(old_pud);
+					/* 释放它 */
 					if (!WARN_ON_ONCE(slab_is_available()))
 						memblock_free(table, PAGE_SIZE);
 				}
 			}
 		} else {
+			/* 如果use_1G_block 函数判断不能通过1GB大小来映射,那么就需要调用alloc_init_pmd函数来进行下一级页表的映射 */
 			alloc_init_pmd(pud, addr, next, phys, prot,
 				       pgtable_alloc, allow_block_mappings);
 		}
@@ -250,16 +326,26 @@ static void __create_pgd_mapping(pgd_t *pgdir, phys_addr_t phys,
 	/*
 	 * If the virtual and physical address don't have the same offset
 	 * within a page, we cannot map the region as the caller expects.
+	 *
+	 * 如果虚拟地址和物理地址在页面内的偏移量不相同,
+	 * 我们无法按照调用者期望的方式去映射内存
 	 */
 	if (WARN_ON((phys ^ virt) & ~PAGE_MASK))
 		return;
-
+	/* 把物理地址按照页面对齐 */
 	phys &= PAGE_MASK;
+	/* 虚拟地址按照页面对齐 */
 	addr = virt & PAGE_MASK;
+	/* 让虚拟地址按页对齐多出来的部分 + size */
 	length = PAGE_ALIGN(size + (virt & ~PAGE_MASK));
-
+	/* 结束地址end = addr + length */
 	end = addr + length;
 	do {
+		/* #define pgd_addr_end(addr, end)		\
+		 * ({	unsigned long __boundary = ((addr) + PGDIR_SIZE) & PGDIR_MASK;	\
+		 *  (__boundary - 1 < (end) - 1)? __boundary: (end);		\
+		 *  })
+		 */
 		next = pgd_addr_end(addr, end);
 		alloc_init_pud(pgd, addr, next, phys, prot, pgtable_alloc,
 			       allow_block_mappings);
@@ -319,6 +405,7 @@ static void create_mapping_late(phys_addr_t phys, unsigned long virt,
 
 static void __init __map_memblock(pgd_t *pgd, phys_addr_t start, phys_addr_t end)
 {
+	/* 从__text段(内核的代码段)到__init_begin(内核初始化所需的代码和数据) */
 	unsigned long kernel_start = __pa(_text);
 	unsigned long kernel_end = __pa(__init_begin);
 
@@ -328,6 +415,9 @@ static void __init __map_memblock(pgd_t *pgd, phys_addr_t start, phys_addr_t end
 	 */
 
 	/* No overlap with the kernel text/rodata */
+	/* 注意不要为内核映像的只读text和rodata段创建可写别名
+	 * 不要和内核的text/rodata重叠
+	 */
 	if (end < kernel_start || start >= kernel_end) {
 		__create_pgd_mapping(pgd, start, __phys_to_virt(start),
 				     end - start, PAGE_KERNEL,
