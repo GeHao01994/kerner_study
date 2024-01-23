@@ -21,24 +21,40 @@ struct mm_struct;
 /*
  * Describe a memory policy.
  *
+ * 描述一个内存策略.
+ *
  * A mempolicy can be either associated with a process or with a VMA.
  * For VMA related allocations the VMA policy is preferred, otherwise
  * the process policy is used. Interrupts ignore the memory policy
  * of the current process.
+ *
+ * mempolicy可以与进程关联，也可以与VMA关联.
+ * 对于与VMA相关的分配,首选VMA策略,否则使用进程策略.
+ * 中断会忽略当前进程的内存策略.
  *
  * Locking policy for interlave:
  * In process context there is no locking because only the process accesses
  * its own state. All vma manipulation is somewhat protected by a down_read on
  * mmap_sem.
  *
+ * interlave的锁定策略: 在进程上下文中没有锁定,因为只有进程访问自己的状态.
+ * 所有vma操作都在一定程度上受到mmap_sem上的down_read的保护.
+ *
  * Freeing policy:
  * Mempolicy objects are reference counted.  A mempolicy will be freed when
  * mpol_put() decrements the reference count to zero.
+ *
+ * Freeing策略:
+ * Mempolicy对象被引用计数.
+ * 当mpol_put()将引用计数减为零时,将释放mempolicy.
  *
  * Duplicating policy objects:
  * mpol_dup() allocates a new mempolicy and copies the specified mempolicy
  * to the new storage.  The reference count of the new object is initialized
  * to 1, representing the caller of mpol_dup().
+ *
+ * 复制策略对象:mpol_dup()分配一个新的mempolicy,并将指定的mempolicy复制到新的存储中.
+ * 新对象的引用计数初始化为1,表示mpol_dup()的调用方.
  */
 struct mempolicy {
 	atomic_t refcnt;

@@ -99,17 +99,25 @@ EXPORT_SYMBOL(latent_entropy);
 /*
  * Array of node states.
  */
+
+/* node状态的数组 */
 nodemask_t node_states[NR_NODE_STATES] __read_mostly = {
+	/* POSSIBLE的node位图 */
 	[N_POSSIBLE] = NODE_MASK_ALL,
+	/* online node的位图 */
 	[N_ONLINE] = { { [0] = 1UL } },
 #ifndef CONFIG_NUMA
+	/* 有normal memory的node的位图 */
 	[N_NORMAL_MEMORY] = { { [0] = 1UL } },
 #ifdef CONFIG_HIGHMEM
+	/* HIGHMEM node节点的位图 */
 	[N_HIGH_MEMORY] = { { [0] = 1UL } },
 #endif
 #ifdef CONFIG_MOVABLE_NODE
+	/* 有内存的node的位图 */
 	[N_MEMORY] = { { [0] = 1UL } },
 #endif
+	/* 对应node有CPU的位图 */
 	[N_CPU] = { { [0] = 1UL } },
 #endif	/* NUMA */
 };

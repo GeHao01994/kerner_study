@@ -368,6 +368,28 @@ enum zone_type {
 	 */
 	ZONE_HIGHMEM,
 #endif
+	/* ZONE_MOVABLE: 网上看到一些文章经常会把它叫做虚拟内存区(pseudo zone),为什么说它是一个虚拟内存区呢?
+	 * 实际上它是从平台中最高内存区中(比如ZONE_HIHGMEM)划出了一部分内存,作为ZONE_MOVABLE.
+	 * 内核中有如下代码可以作为参考依据: find_usable_zone_for_movable
+	 * 那么引入该内存区的目的是什么？
+	 * 它存在的意义实际上是为了减少内存的碎片化,想象一下这个场景,当我们需要一块大的连续内存时向伙伴系统申请,虽然对应的内存区剩余内存还很多,
+	 * 但是却发现对应的内存区并无法满足连续的内存申请需求,这就是由于内存碎片化导致的问题.
+	 * 那么此时是可以通过内存迁移来完成连续内存的申请,但是这个过程并不一定能够成功,因为中间有一些页面可能是不允许迁移的.
+	 * 引入ZONE_MOVABLE就是为了优化内存迁移场景的,主要目的是想要把Non-Movable和Movable的内存区分管理,当我们划分出该区域后,那么只有可迁移的页才能够从该区域申请,
+	 * 这样当我们后面回收内存时,针对该区域就都可以执行迁移.从而保证能够获取到足够大的连续内存.
+	 * 除了这个用途之外,该区域还有一种使用场景,那就是memory hotplug场景,内存热插拔场景,当我们对内存区执行remove时,
+	 * 必须保证其中的内容都是可以被迁移走的,因此热插拔的内存区必须位于ZONE_MOVABLE区域.
+	 *
+	 * ZONE_MOVABLE的开启与是否指定了kernelcore有关,该参数指定了不可移动的内存数量,计算结果会存储在required_kernelcore.
+	 * movablecore指定了可移动的内存数量.
+	 * 如果同时指定kernelcore和movablecore此时会按照两种方式计算出较大的required_kernelcore,如果都未指定,则该区域范围为0,相当于未开启.
+	 * 内核中find_zone_movable_pfns_for_nodes就是在做这个事情,该函数会按照上述的参数计算出ZONE_MOVABLE内存域的首个page的PFN(page frame number).
+	 * 一直都说ZONE_MOVABLE是一个虚拟内存域,是因为ZONE_MOVABLE管理了NORMAL或者HIGHMEM的内存,看到这里之后我就产生了疑问.
+	 * 管理的内存与其他zone是重叠的吗?难道同一个内存页会属于两个内存域吗?答案是ZONE_MOVABLE管理的内存与其他内存区域是不重叠的.
+	 * 之前我们计算好了ZONE_MOVABLE的区域大小和在每个node上的起始pfn的时候就已经确定了ZONE_MOVABLE管理的内存区域,在做其他内存区域的初始化时就会对原本的内存区域进行调整,
+	 * 如果别的内存区域计算出的范围和ZONE_MOVABLE内定的范围产生了重叠,adjust_zone_range_for_zone_movable这个函数就会对这些区域进行压缩.
+	 * 比如某个情况下的HIGHMEM区域的内存都被包含在ZONE_MOBVABLE中了,经过调整后高端内存内存区域管理的内存就为0.
+	 */
 	ZONE_MOVABLE,
 #ifdef CONFIG_ZONE_DEVICE
 	ZONE_DEVICE,

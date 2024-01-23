@@ -1,6 +1,8 @@
 /*
  * Simple NUMA memory policy for the Linux kernel.
  *
+ * Linux内核简单NUMA内存策略
+ *
  * Copyright 2003,2004 Andi Kleen, SuSE Labs.
  * (C) Copyright 2005 Christoph Lameter, Silicon Graphics, Inc.
  * Subject to the GNU Public License, version 2.
@@ -8,9 +10,15 @@
  * NUMA policy allows the user to give hints in which node(s) memory should
  * be allocated.
  *
+ * NUMA策略允许用户示意应该在哪个节点中分配内存.
+ *
  * Support four policies per VMA and per process:
  *
+ * 每个进程和每个VMA有四种分配策略
+ *
  * The VMA policy has priority over the process policy for a page fault.
+ *
+ * 对于page fault,VMA策略的优先级高于进程的策略
  *
  * interleave     Allocate memory interleaved over a set of nodes,
  *                with normal fallback if it fails.
@@ -19,38 +27,67 @@
  *                for anonymous memory. For process policy an process counter
  *                is used.
  *
+ * interleave		分配在一组节点上交错的内存,如果失败，则使用normal fallback.
+ *			对于基于VMA的分配，此交错基于到支持对象的偏移量或到匿名内存的映射的偏移量
+ *			对于进程策略，将使用进程计数器.
+ *
+ *
  * bind           Only allocate memory on a specific set of nodes,
  *                no fallback.
  *                FIXME: memory is allocated starting with the first node
  *                to the last. It would be better if bind would truly restrict
  *                the allocation to memory nodes instead
  *
- * preferred       Try a specific node first before normal fallback.
+ * bind			bind只在一组特定的节点上分配内存，没有fallback.
+ *			FIXME：内存从第一个节点开始分配到最后一个节点.
+ *			如果绑定能够真正限制对内存节点的分配，那会更好
+ *
+ * preferred      Try a specific node first before normal fallback.
  *                As a special case NUMA_NO_NODE here means do the allocation
  *                on the local CPU. This is normally identical to default,
  *                but useful to set in a VMA when you have a non default
  *                process policy.
  *
+ * preferred		preferred在normal fallback之前先尝试特定节点.
+ *			作为一种特殊情况,NUMA_NO_NODE在这里意味着在本地CPU上进行分配.
+ *			这通常与默认设置相同，但当您有非默认流程策略时，在VMA中进行设置很有用.
+ *
  * default        Allocate on the local node first, or when on a VMA
  *                use the process policy. This is what Linux always did
  *		  in a NUMA aware kernel and still does by, ahem, default.
+ *
+ * default	 首先在本地节点上分配，或者在VMA上分配时使用process策略
+ *		 这是Linux在支持NUMA的内核中一直做的事情,而且默认情况下仍然如此
  *
  * The process policy is applied for most non interrupt memory allocations
  * in that process' context. Interrupts ignore the policies and always
  * try to allocate on the local CPU. The VMA policy is only applied for memory
  * allocations for a VMA in the VM.
  *
+ * process策略应用于该进程上下文中的大多数非中断内存分配.中断会忽略策略,并始终尝试在本地CPU上进行分配.
+ * VMA策略仅适用于VM中VMA的内存分配.
+ *
  * Currently there are a few corner cases in swapping where the policy
  * is not applied, but the majority should be handled. When process policy
  * is used it is not remembered over swap outs/swap ins.
+ *
+ * 目前，在swap中有一些不适用该政策的角落案例,但大多数都应该得到处理.
+ * 当process策略被使用时,它不会在交换出/交换入时被记住.
  *
  * Only the highest zone in the zone hierarchy gets policied. Allocations
  * requesting a lower zone just use default policy. This implies that
  * on systems with highmem kernel lowmem allocation don't get policied.
  * Same with GFP_DMA allocations.
  *
+ * 只有zone层次结构中的最高区域才会受到监管
+ * 请求较低区域的分配只使用默认策略.
+ * 这意味着在具有高内存内核的系统上,低内存分配不会受到策略控制.
+ * 与GFP_DMA分配相同.
+ *
  * For shmfs/tmpfs/hugetlbfs shared memory the policy is shared between
  * all users and remembered even when nobody has memory mapped.
+ *
+ * 对于shmfs/tmpfs/hugettbfs共享内存,该策略在所有用户之间共享,即使没有内存映射,也会被记住.
  */
 
 /* Notebook:
@@ -65,6 +102,13 @@
    kernel is not always grateful with that.
 */
 
+/* Notebook
+ * 修复mmap readahead以遵守策略并为任何页面缓存启用策略的问题
+ * 大页面的统计信息
+ * page cache的全局策略? 目前它使用process策略.需要上面的第一个item.
+ * 处理共享内存的mremap（当前忽略策略)是否会增长?
+ * 仅使绑定策略成为根策略?它可以更快地触发oom,而内核并不总是对此心存感激.
+ */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/mempolicy.h>
@@ -1638,8 +1682,10 @@ bool vma_policy_mof(struct vm_area_struct *vma)
 
 static int apply_policy_zone(struct mempolicy *policy, enum zone_type zone)
 {
+	/* dynamic_policy_zone = policy_zone */
 	enum zone_type dynamic_policy_zone = policy_zone;
 
+	/* 如果dynamic_policy_zone == ZONE_MOVABLE,那就报个BUG吧 */
 	BUG_ON(dynamic_policy_zone == ZONE_MOVABLE);
 
 	/*
@@ -1649,6 +1695,22 @@ static int apply_policy_zone(struct mempolicy *policy, enum zone_type zone)
 	 * policy->v.nodes is intersect with node_states[N_MEMORY].
 	 * so if the following test faile, it implies
 	 * policy->v.nodes has movable memory only.
+	 *
+	 * 如果policy->v.nodes仅具有可移动内存,则我们仅在gfp_zone（gfp）=zone_movable时应用策略。
+	 * policy->v.nodes与node_states[N_MEMBORY]相交。因此，如果以下测试失败，则意味着policy->v.nodes只有可移动内存。
+	 */
+
+	/* bitmap_intersects 比较nbits指定的位数中是否有重合(相交Overlap)的1比特位,
+	 * 也即src1和src2中有共同设置为1的标志位.
+	 * 有则返回1,否则返回0.
+	 * 精确到位
+	 * #define nodes_intersects(src1, src2) \
+	 *	__nodes_intersects(&(src1), &(src2), MAX_NUMNODES)
+	 * static inline bool __nodes_intersects(const nodemask_t *src1p,
+	 *		const nodemask_t *src2p, unsigned int nbits)
+	 * {
+	 *	return bitmap_intersects(src1p->bits, src2p->bits, nbits);
+	 * }
 	 */
 	if (!nodes_intersects(policy->v.nodes, node_states[N_HIGH_MEMORY]))
 		dynamic_policy_zone = ZONE_MOVABLE;
@@ -1659,10 +1721,14 @@ static int apply_policy_zone(struct mempolicy *policy, enum zone_type zone)
 /*
  * Return a nodemask representing a mempolicy for filtering nodes for
  * page allocation
+ *
+ * 返回一个nodemask,表示用于筛选页面分配节点的mempolicy
  */
 static nodemask_t *policy_nodemask(gfp_t gfp, struct mempolicy *policy)
 {
-	/* Lower zones don't get a nodemask applied for MPOL_BIND */
+	/* Lower zones don't get a nodemask applied for MPOL_BIND
+	 * 较低的zone没有为MPOL_BIND应用nodemask
+	 */
 	if (unlikely(policy->mode == MPOL_BIND) &&
 			apply_policy_zone(policy, gfp_zone(gfp)) &&
 			cpuset_nodemask_valid_mems_allowed(&policy->v.nodes))
@@ -1675,7 +1741,10 @@ static nodemask_t *policy_nodemask(gfp_t gfp, struct mempolicy *policy)
 static struct zonelist *policy_zonelist(gfp_t gfp, struct mempolicy *policy,
 	int nd)
 {
+
 	switch (policy->mode) {
+	/* 如果说是MPOL_PREFERRED,且!policy->flags & MPOL_F_LOCAL
+	 * 那么nodeid就等于v.preferred_node */
 	case MPOL_PREFERRED:
 		if (!(policy->flags & MPOL_F_LOCAL))
 			nd = policy->v.preferred_node;
@@ -1686,6 +1755,9 @@ static struct zonelist *policy_zonelist(gfp_t gfp, struct mempolicy *policy,
 		 * allowed nodemask.  However, if __GFP_THISNODE is set and the
 		 * current node isn't part of the mask, we use the zonelist for
 		 * the first node in the mask instead.
+		 *
+		 * 通常，MPOL_BIND分配是允许的节点掩码内的node-local分配,
+		 * 但是,如果设置了__GFP_THESNODE,并且当前节点不是掩码的一部分,那么我们将使用掩码中第一个节点的zonelist.
 		 */
 		if (unlikely(gfp & __GFP_THISNODE) &&
 				unlikely(!node_isset(nd, policy->v.nodes)))
@@ -1702,9 +1774,13 @@ static unsigned interleave_nodes(struct mempolicy *policy)
 {
 	unsigned nid, next;
 	struct task_struct *me = current;
-
+	/* 函数定义局部变量nid为本次分配的节点号,next为下次分配的节点号,从task_struct结构的il_next变量获取本次进行分配的节点号,
+	 * 并把下次要进行分配的节点号存入il_next变量.
+	 */
 	nid = me->il_next;
+	/* Mempolicy结构里面联合变量v的成员nodes保存了一个位图数组,位为1,表示相应节点可以,next_node_in表示nodes结构里面的第nid位开始位查找第一个能用的位 */
 	next = next_node_in(nid, policy->v.nodes);
+	/* next小于最大节点数,把next存入task_struct结构的il_next变量,下次可以用这个节点进行分配 */
 	if (next < MAX_NUMNODES)
 		me->il_next = next;
 	return nid;
@@ -1937,9 +2013,10 @@ static struct page *alloc_page_interleave(gfp_t gfp, unsigned order,
 {
 	struct zonelist *zl;
 	struct page *page;
-
+	/* 找到这个zone */
 	zl = node_zonelist(nid, gfp);
 	page = __alloc_pages(gfp, order, zl);
+	/* 如果page && page_zone刚好是zl->_zonerefs[0]，那么NUMA_INTERLEAVE_HIT计数+1 */
 	if (page && page_zone(page) == zonelist_zone(&zl->_zonerefs[0]))
 		inc_zone_page_state(page, NUMA_INTERLEAVE_HIT);
 	return page;
@@ -2051,9 +2128,9 @@ struct page *alloc_pages_current(gfp_t gfp, unsigned order)
 	struct mempolicy *pol = &default_policy;
 	struct page *page;
 	unsigned int cpuset_mems_cookie;
-
+	/* 如果不在中断上下文中,并且没有带__GFP_THISNODE,那么就获得当前进程的pol */
 	if (!in_interrupt() && !(gfp & __GFP_THISNODE))
-		pol = get_task_policy(current);
+		pol = get_task_policy(current);/* 获得当前进程的mempolicy */
 
 retry_cpuset:
 	cpuset_mems_cookie = read_mems_allowed_begin();
@@ -2062,6 +2139,7 @@ retry_cpuset:
 	 * No reference counting needed for current->mempolicy
 	 * nor system default_policy
 	 */
+	/* 如果分配策略制定了交错模式,则调用interleave_nodes函数求得节点号,再调用alloc_page_interleave进行内存分配 */
 	if (pol->mode == MPOL_INTERLEAVE)
 		page = alloc_page_interleave(gfp, order, interleave_nodes(pol));
 	else

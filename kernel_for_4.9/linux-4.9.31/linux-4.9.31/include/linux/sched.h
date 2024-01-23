@@ -1813,7 +1813,11 @@ struct task_struct {
 	unsigned long preempt_disable_ip;
 #endif
 #ifdef CONFIG_NUMA
+	/* 进程的NUMA内存分配策略 */
 	struct mempolicy *mempolicy;	/* Protected by alloc_lock */
+	/* task_struct结构的il_next变量获取本次进行分配的节点号，
+	 * 并把下次要进行分配的节点号存入il_next变量.
+	 */
 	short il_next;
 	short pref_node_fork;
 #endif

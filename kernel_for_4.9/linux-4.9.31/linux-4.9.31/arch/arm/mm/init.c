@@ -509,7 +509,19 @@ void __init mem_init(void)
 #define MLK(b, t) b, t, ((t) - (b)) >> 10
 #define MLM(b, t) b, t, ((t) - (b)) >> 20
 #define MLK_ROUNDUP(b, t) b, t, DIV_ROUND_UP(((t) - (b)), SZ_1K)
-
+	/* 编译器在编译目标文件并且链接完成之后,就可以知道内核映像文件最终的大小,接下来打包成二进制文件,
+	 * 该操作由arch/arm/kernel/vmlinux.ld.S控制,
+	 * 其中也规划了内核的内存布局
+	 */
+	/* 内核image本身占据的内存空间从_text段到_end段,并且分为如下几个段.
+	 * 代码段: _text和_etext为代码段的起始和结束地址,包括了编译后的内核代码.
+	 * init段: _init_begin和_init_end为init段的起始和结束地址,
+	 * 数据段: _sdata和_edata为数据段的起始和结束地址,保存大部分内核的变量.
+	 * BSS段: _bss_start和__bss_stop为BSS段的开始和结束地址,包含初始化为0的所有静态全局变量.
+	 * 上诉几个段的大小在编译链接时根据内核配置来确定,因为每种配置的代码段和数据段长度都不相同,
+	 * 这取决于要编译哪些内核模块,但是起始地址_text总是相同的.
+	 * 内核编译完成之后,会生成一个System.map文件,查询这个文件可以找到这些地址的具体数值.
+	 */
 	pr_notice("Virtual kernel memory layout:\n"
 			"    vector  : 0x%08lx - 0x%08lx   (%4ld kB)\n"
 #ifdef CONFIG_HAVE_TCM
