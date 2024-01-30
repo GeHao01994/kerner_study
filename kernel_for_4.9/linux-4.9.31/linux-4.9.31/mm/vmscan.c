@@ -230,6 +230,7 @@ unsigned long pgdat_reclaimable_pages(struct pglist_data *pgdat)
 
 bool pgdat_reclaimable(struct pglist_data *pgdat)
 {
+	/* 扫描的数量 < 可回收的六倍? */
 	return node_page_state_snapshot(pgdat, NR_PAGES_SCANNED) <
 		pgdat_reclaimable_pages(pgdat) * 6;
 }
@@ -3675,6 +3676,10 @@ int sysctl_min_slab_ratio = 5;
 
 static inline unsigned long node_unmapped_file_pages(struct pglist_data *pgdat)
 {
+	/* NR_FILE_MAPPED,pagecache pages mapped into pagetables.only modified from process context
+	 * 看解释应该是映射到页表里面的才属于NR_FILE_MAPPED
+	 * 那些预读页的应该就不是的了
+	 */
 	unsigned long file_mapped = node_page_state(pgdat, NR_FILE_MAPPED);
 	unsigned long file_lru = node_page_state(pgdat, NR_INACTIVE_FILE) +
 		node_page_state(pgdat, NR_ACTIVE_FILE);
@@ -3683,11 +3688,16 @@ static inline unsigned long node_unmapped_file_pages(struct pglist_data *pgdat)
 	 * It's possible for there to be more file mapped pages than
 	 * accounted for by the pages on the file LRU lists because
 	 * tmpfs pages accounted for as ANON can also be FILE_MAPPED
+	 *
+	 * 文件映射的页面可能比file LRU列表上的页面所占的多
+	 * 因为tmpfs 页面有当做匿名页面又当做FILE_MAPPED
 	 */
 	return (file_lru > file_mapped) ? (file_lru - file_mapped) : 0;
 }
 
-/* Work out how many page cache pages we can reclaim in this reclaim_mode */
+/* Work out how many page cache pages we can reclaim in this reclaim_mode
+ * 计算出在这个回收模式中可以回收多少页面缓存页面
+ */
 static unsigned long node_pagecache_reclaimable(struct pglist_data *pgdat)
 {
 	unsigned long nr_pagecache_reclaimable;
@@ -3698,6 +3708,9 @@ static unsigned long node_pagecache_reclaimable(struct pglist_data *pgdat)
 	 * potentially reclaimable. Otherwise, we have to worry about
 	 * pages like swapcache and node_unmapped_file_pages() provides
 	 * a better estimate
+	 *
+	 * 如果设置了RECLAIM_UNMAP,则所有文件页都被认为是潜在的可回收页.
+	 * 否则,我们必须担心swapcache和node_unmapped_file_pages()这样的页面提供了更好的估计
 	 */
 	if (node_reclaim_mode & RECLAIM_UNMAP)
 		nr_pagecache_reclaimable = node_page_state(pgdat, NR_FILE_PAGES);
@@ -3705,10 +3718,15 @@ static unsigned long node_pagecache_reclaimable(struct pglist_data *pgdat)
 		nr_pagecache_reclaimable = node_unmapped_file_pages(pgdat);
 
 	/* If we can't clean pages, remove dirty pages from consideration */
+	/* 如果我们不能清理页面，考虑删除脏页面 */
 	if (!(node_reclaim_mode & RECLAIM_WRITE))
 		delta += node_page_state(pgdat, NR_FILE_DIRTY);
 
-	/* Watch for any possible underflows due to delta */
+	/* Watch for any possible underflows due to delta
+	 * 注意delta引起的任何可能的下溢
+	 */
+
+	/* 如果delta > nr_pagecache_reclaimable,那么delta = nr_pagecache_reclaimable */
 	if (unlikely(delta > nr_pagecache_reclaimable))
 		delta = nr_pagecache_reclaimable;
 
@@ -3776,11 +3794,25 @@ int node_reclaim(struct pglist_data *pgdat, gfp_t gfp_mask, unsigned int order)
 	 * thrown out if the node is overallocated. So we do not reclaim
 	 * if less than a specified percentage of the node is used by
 	 * unmapped file backed pages.
+	 *
+	 * 如果超过定义的限制,node回收将回收未映射的文件backed页和slab页.
+	 * 
+	 * 文件I/O需要一小部分未映射的文件备份页,否则如果节点过度分配,文件I/O读取的页将立即抛出.
+	 * 因此，如果未映射的文件备份页使用的节点百分比低于指定百分比，则我们不会回收。
+	 */
+
+	/* pgdat->min_unmapped_pages 是“/proc/sys/vm/min_unmapped_ratio”乘上总的页数.
+	 * 页缓存中潜在可回收页数如果大于pgdat->min_unmapped_pages才做页回收
+	 *
+	 * min_slab_pages:如果用于slab的页达到这个值就缓存收缩.
+	 * 如果这个pgdat所有的NR_SLAB_RECLAIMABLE <= pgdat->min_slab_pages
+	 * 那么也不用回收了
 	 */
 	if (node_pagecache_reclaimable(pgdat) <= pgdat->min_unmapped_pages &&
 	    sum_zone_node_page_state(pgdat->node_id, NR_SLAB_RECLAIMABLE) <= pgdat->min_slab_pages)
 		return NODE_RECLAIM_FULL;
 
+	/* 扫描的数量 >= 可回收的六倍 */
 	if (!pgdat_reclaimable(pgdat))
 		return NODE_RECLAIM_FULL;
 

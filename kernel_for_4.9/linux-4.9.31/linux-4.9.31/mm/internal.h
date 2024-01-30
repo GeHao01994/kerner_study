@@ -108,6 +108,9 @@ struct alloc_context {
 	struct zoneref *preferred_zoneref;
 	int migratetype;
 	enum zone_type high_zoneidx;
+	/* 当申请内存时,采用了标志__GFP_WRITE,则说明此次申请的物理页面将会生成脏页,
+	 * 内核中就是通过语句ac->spread_dirty_pages = (gfp_mask & __GFP_WRITE)来设置该成员的.
+	 */
 	bool spread_dirty_pages;
 };
 

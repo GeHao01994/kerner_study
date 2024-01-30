@@ -50,6 +50,11 @@ struct vm_area_struct;
  * without the underscores and use them consistently. The definitions here may
  * be used in bit comparisons.
  */
+/* 分配掩码在内核代码中分成两类,一类叫zone modifiers,另一类叫action modifiers.
+ * zone modifiers指定从哪个zone中分配所需的页面.
+ * zone_modifiers由分配掩码的最低4位来定义,分别是__GFP_DMA、
+ * __GFP_HIGHMEM、__GFP_DMA32和__GFP_MOVABLE
+ */
 #define __GFP_DMA	((__force gfp_t)___GFP_DMA)
 #define __GFP_HIGHMEM	((__force gfp_t)___GFP_HIGHMEM)
 #define __GFP_DMA32	((__force gfp_t)___GFP_DMA32)
@@ -63,22 +68,40 @@ struct vm_area_struct;
  * mobility are placed within the same pageblocks to minimise problems due
  * to external fragmentation.
  *
+ * 页面移动和放置提示
+ *
+ * 这些标志提供了有关页面移动性的提示
+ * 具有相似移动性的页面被放置在相同的页面块中,以最大限度地减少由于外部的碎片化.
+ *
  * __GFP_MOVABLE (also a zone modifier) indicates that the page can be
  *   moved by page migration during memory compaction or can be reclaimed.
  *
+ * _GFP_MOVABLE(也是一个区域修饰符)指示页面可以在内存规整和内存回收的时候通过页面迁移移动
+ *
  * __GFP_RECLAIMABLE is used for slab allocations that specify
  *   SLAB_RECLAIM_ACCOUNT and whose pages can be freed via shrinkers.
+ *
+ * __GFP_RELAIMABLE用于指定SLAB_RECLAIM_ACCOUNT的slab分配并且其页面可以通过页面回收器释放.
  *
  * __GFP_WRITE indicates the caller intends to dirty the page. Where possible,
  *   these pages will be spread between local zones to avoid all the dirty
  *   pages being in one zone (fair zone allocation policy).
  *
+ * __GFP_WRITE表示调用方打算弄脏页面.
+ * 在可能的情况下,这些页面将分布在本地zone之间以避免所有脏页面都在一个zone中(公平区域分配策略)
+ *
  * __GFP_HARDWALL enforces the cpuset memory allocation policy.
+ *
+ * __GFP_HARDWALL强制执行cpuset内存分配策略。
  *
  * __GFP_THISNODE forces the allocation to be satisified from the requested
  *   node with no fallbacks or placement policy enforcements.
  *
+ * __GFP_THESNODE强制从请求的node中分配,没有fallbacks和安置政策的执行.
+ *
  * __GFP_ACCOUNT causes the allocation to be accounted to kmemcg.
+ *
+ * __GFP_ACCOUNT使分配计入kmemcg
  */
 #define __GFP_RECLAIMABLE ((__force gfp_t)___GFP_RECLAIMABLE)
 #define __GFP_WRITE	((__force gfp_t)___GFP_WRITE)
@@ -89,21 +112,36 @@ struct vm_area_struct;
 /*
  * Watermark modifiers -- controls access to emergency reserves
  *
+ * 水位修饰符 -- 控制对紧急预留内存的访问
+ *
  * __GFP_HIGH indicates that the caller is high-priority and that granting
  *   the request is necessary before the system can make forward progress.
  *   For example, creating an IO context to clean pages.
  *
+ * __GFP_ HIGH 表示调用者是高优先级的,并且在系统能够进行前向进展之前是必要的
+ * 例如，创建一个IO上下文来清理页面.
+ *
  * __GFP_ATOMIC indicates that the caller cannot reclaim or sleep and is
  *   high priority. Users are typically interrupt handlers. This may be
  *   used in conjunction with __GFP_HIGH
+ *
+ * __GFP_ATOMIC表示调用者无法回收或睡眠，并且有高优先级.
+ * 用户通常是中断处理程序。这可能是与__GFP_HIGH一起使用
  *
  * __GFP_MEMALLOC allows access to all memory. This should only be used when
  *   the caller guarantees the allocation will allow more memory to be freed
  *   very shortly e.g. process exiting or swapping. Users either should
  *   be the MM or co-ordinating closely with the VM (e.g. swap over NFS).
  *
+ * __GFP_MEMALLOC允许访问所有内存.只有当调用者保证很快可能释放更多内存时,才应使用此选项
+ * 例如进程退出或交换.
+ * 用户应该是MM或与VM密切协调(例如,通过NFS交换).
+ *
  * __GFP_NOMEMALLOC is used to explicitly forbid access to emergency reserves.
  *   This takes precedence over the __GFP_MEMALLOC flag if both are set.
+ *
+ * __GFP_NUMMALLOC用于明确禁止访问应急储备.
+ * 如果同时设置了__GFP_MEMALLOC,则此标志优先于__GFP_MEMALLOC标志.
  */
 #define __GFP_ATOMIC	((__force gfp_t)___GFP_ATOMIC)
 #define __GFP_HIGH	((__force gfp_t)___GFP_HIGH)
@@ -113,15 +151,24 @@ struct vm_area_struct;
 /*
  * Reclaim modifiers
  *
+ * 回收行为
+ *
  * __GFP_IO can start physical IO.
+ *
+ * __GFP_IO可以启动物理IO.
  *
  * __GFP_FS can call down to the low-level FS. Clearing the flag avoids the
  *   allocator recursing into the filesystem which might already be holding
  *   locks.
  *
+ * __GFP_ FS可以向下调用到底层的FS.清除这个标志可避免分配器递归到可能已经持有锁的文件系统中.
+ *
  * __GFP_DIRECT_RECLAIM indicates that the caller may enter direct reclaim.
  *   This flag can be cleared to avoid unnecessary delays when a fallback
  *   option is available.
+ *
+ * __GFP_DIRECT_RECLAIM表示调用者可以进入直接回收.
+ * 当后备选项可用时,可以清除此标志以避免不必要的延迟。
  *
  * __GFP_KSWAPD_RECLAIM indicates that the caller wants to wake kswapd when
  *   the low watermark is reached and have it reclaim pages until the high
@@ -130,10 +177,18 @@ struct vm_area_struct;
  *   canonical example is THP allocation where a fallback is cheap but
  *   reclaim/compaction may cause indirect stalls.
  *
+ * __GFP_KSWAPD_RECLAIM表示调用方希望在达到低水印时唤醒KSWAPD,并让它回收页面,直到达到高水位.
+ * 当后备选项可用并且回收可能会中断系统时,调用方可能希望清除此标志.
+ * 这个典型的例子是THP分配,其中fallback是廉价的,但回收/压缩可能会导致间接停滞.
+ *
  * __GFP_RECLAIM is shorthand to allow/forbid both direct and kswapd reclaim.
+ *
+ * __GFP_RELAIM是允许/禁止直接回收和kswapd回收的简写.
  *
  * __GFP_REPEAT: Try hard to allocate the memory, but the allocation attempt
  *   _might_ fail.  This depends upon the particular VM implementation.
+ *
+ * __GFP_REPEAT: 努力分配内存,但在_might_ fail的时候尝试分配,这取决于特定的VM实现.
  *
  * __GFP_NOFAIL: The VM implementation _must_ retry infinitely: the caller
  *   cannot handle allocation failures. New users should be evaluated carefully
@@ -141,10 +196,17 @@ struct vm_area_struct;
  *   policy) but it is definitely preferable to use the flag rather than
  *   opencode endless loop around allocator.
  *
+ * __GFP_NOFAIL：VM实现_must_无限重试: 调用者无法处理分配失败.应仔细评估新用户
+ * (并且只有在没有合理的失败策略时才应该使用该标志),但使用该标志肯定比打开无休止循环分配器更可取.
+ *
  * __GFP_NORETRY: The VM implementation must not retry indefinitely and will
  *   return NULL when direct reclaim and memory compaction have failed to allow
  *   the allocation to succeed.  The OOM killer is not called with the current
  *   implementation.
+ *
+ * __GFP_NORETRY：VM实现不能无限期重试,当直接回收和内存压缩失败,无法成功分配时,它将返回NULL
+ * OOM killer不是调用当前实现
+ *
  */
 #define __GFP_IO	((__force gfp_t)___GFP_IO)
 #define __GFP_FS	((__force gfp_t)___GFP_FS)
@@ -158,25 +220,44 @@ struct vm_area_struct;
 /*
  * Action modifiers
  *
+ * 行为修饰符
+ *
  * __GFP_COLD indicates that the caller does not expect to be used in the near
  *   future. Where possible, a cache-cold page will be returned.
  *
+ * __GFP_COLD表示调用者不希望在不久的将来被使用.在可能的情况下，将返回一个cache-cold页面.
+ *
  * __GFP_NOWARN suppresses allocation failure reports.
+ *
+ * __GFP_NOWARN抑制分配失败报告
  *
  * __GFP_COMP address compound page metadata.
  *
+ * _GFP_COMP 地址复合页元数据
+ *
  * __GFP_ZERO returns a zeroed page on success.
  *
+ * __GFP_ZERO成功返回归零页面
+ *
  * __GFP_NOTRACK avoids tracking with kmemcheck.
+ *
+ * __GFP_NOTRACK避免使用kmemcheck进行跟踪.
  *
  * __GFP_NOTRACK_FALSE_POSITIVE is an alias of __GFP_NOTRACK. It's a means of
  *   distinguishing in the source between false positives and allocations that
  *   cannot be supported (e.g. page tables).
  *
+ * __GFP_NOTRACK_ALSE_POSITIVE是__GFP_NOTRACK的别名.
+ * 这是一种在源中区分误报和不受支持的分配（例如页表）的方法.
+ *
  * __GFP_OTHER_NODE is for allocations that are on a remote node but that
  *   should not be accounted for as a remote allocation in vmstat. A
  *   typical user would be khugepaged collapsing a huge page on a remote
  *   node.
+ *
+ * __GFP_OTHER_NODE用于远程节点上的分配，但不应在vmstat中将其视为远程分配.
+ * 一个典型的用户会在远程节点上通过khugepaged分配一个huge page
+ *
  */
 #define __GFP_COLD	((__force gfp_t)___GFP_COLD)
 #define __GFP_NOWARN	((__force gfp_t)___GFP_NOWARN)
@@ -195,27 +276,46 @@ struct vm_area_struct;
  * that subsystems start with one of these combinations and then set/clear
  * __GFP_FOO flags as necessary.
  *
+ * 常用的有用的GFP标志组合. 建议子系统从这些组合中的一个开始，然后根据需要设置/清除__GFP_FOO标志.
+ *
  * GFP_ATOMIC users can not sleep and need the allocation to succeed. A lower
  *   watermark is applied to allow access to "atomic reserves"
+ *
+ * GFP_ATOMIC用户无法睡眠,需要分配成功
+ * 应用较低的水位以允许访问“atomic reserves”.
  *
  * GFP_KERNEL is typical for kernel-internal allocations. The caller requires
  *   ZONE_NORMAL or a lower zone for direct access but can direct reclaim.
  *
+ * GFP_KERNEL是典型的内核内部分配.调用者要求ZONE_NORMAL或用于直接访问但可以直接回收的较低的zone.
+ *
  * GFP_KERNEL_ACCOUNT is the same as GFP_KERNEL, except the allocation is
  *   accounted to kmemcg.
+ *
+ * GFP_KERNEL_ACCOUNT与GFP_KENNEL相同,只是分配被计入kmemcg.
  *
  * GFP_NOWAIT is for kernel allocations that should not stall for direct
  *   reclaim, start physical IO or use any filesystem callback.
  *
+ * GFP_NOWAIT用于不应因直接回收、启动物理IO或使用任何文件系统回调而暂停的内核分配.
+ *
  * GFP_NOIO will use direct reclaim to discard clean pages or slab pages
  *   that do not require the starting of any physical IO.
  *
+ * GFP_NOIO将使用直接回收来丢弃干净的页面或者不需要启动任何物理IO的slab pages
+ *
  * GFP_NOFS will use direct reclaim but will not use any filesystem interfaces.
+ *
+ * GFP_NOFS将使用直接回收，但不会使用任何文件系统接口。
  *
  * GFP_USER is for userspace allocations that also need to be directly
  *   accessibly by the kernel or hardware. It is typically used by hardware
  *   for buffers that are mapped to userspace (e.g. graphics) that hardware
  *   still must DMA to. cpuset limits are enforced for these allocations.
+ *
+ * GFP_USER用于也需要由内核或硬件直接访问的用户空间分配.
+ * 它通常由硬件使用用于硬件映射buffer给用户空间(例如 图形)硬件必须做DMA
+ * 对这些分配强制执行cpuset limits
  *
  * GFP_DMA exists for historical reasons and should be avoided where possible.
  *   The flags indicates that the caller requires that the lowest zone be
@@ -224,24 +324,41 @@ struct vm_area_struct;
  *   others use the flag to avoid lowmem reserves in ZONE_DMA and treat the
  *   lowest zone as a type of emergency reserve.
  *
+ * GFP_DMA的存在是由于历史原因,应尽可能避免.这个flag表明调用者要求最低的zone被使用
+ * (x86-64上的ZONE_DMA或16M).理想情况下,这将被删除，但它将需要仔细的审计,因为一些用户确实需要它
+ * 而另一些用户使用该标志来避免ZONE_DMA的lowmem reserves，将最低的ZONE视为一种紧急reserve
+ *
  * GFP_DMA32 is similar to GFP_DMA except that the caller requires a 32-bit
  *   address.
+ *
+ * GFP_DMA32类似于GFP_DMA，不同之处在于调用者需要32位地址
  *
  * GFP_HIGHUSER is for userspace allocations that may be mapped to userspace,
  *   do not need to be directly accessible by the kernel but that cannot
  *   move once in use. An example may be a hardware allocation that maps
  *   data directly into userspace but has no addressing limitations.
  *
+ * GFP_HIGHUSER用于可以映射到用户空间的用户空间分配,不需要内核直接访问,一旦使用就不用移动了.
+ * 一个例子可能是硬件分配直接映射数据到用户空间,但是没有地址限制
+ *
  * GFP_HIGHUSER_MOVABLE is for userspace allocations that the kernel does not
  *   need direct access to but can use kmap() when access is required. They
  *   are expected to be movable via page reclaim or page migration. Typically,
  *   pages on the LRU would also be allocated with GFP_HIGHUSER_MOVABLE.
+ *
+ * GFP_HIGHHUSER_MOVABLE用于内核不需要直接访问的用户空间分配
+ * 但可以在需要访问时使用kmap().
+ * 它们可以通过页面回收或页面迁移进行移动.
+ * 通常，LRU上的页面也将分配有GFP_HIGHHUSER_MOVABLE.
  *
  * GFP_TRANSHUGE and GFP_TRANSHUGE_LIGHT are used for THP allocations. They are
  *   compound allocations that will generally fail quickly if memory is not
  *   available and will not wake kswapd/kcompactd on failure. The _LIGHT
  *   version does not attempt reclaim/compaction at all and is by default used
  *   in page fault path, while the non-light is used by khugepaged.
+ *
+ * TRANSHUGE和GFP_TRANSHUGE_LIGHT用于THP分配.它们是复合分配,如果内存不可用,通常会很快失败,并且在失败时不会唤醒kswapd/kcompactd.
+ * _LIGHT版本根本不尝试回收/压缩,默认情况下用于page faulg,而non-light版本由khugepaged使用.
  */
 #define GFP_ATOMIC	(__GFP_HIGH|__GFP_ATOMIC|__GFP_KSWAPD_RECLAIM)
 #define GFP_KERNEL	(__GFP_RECLAIM | __GFP_IO | __GFP_FS)
@@ -377,6 +494,7 @@ static inline bool gfpflags_allow_blocking(const gfp_t gfp_flags)
 static inline enum zone_type gfp_zone(gfp_t flags)
 {
 	enum zone_type z;
+	/* GFP_ZONEMASK是分配掩码的低4位 */
 	int bit = (__force int) (flags & GFP_ZONEMASK);
 
 	z = (GFP_ZONE_TABLE >> (bit * GFP_ZONES_SHIFT)) &

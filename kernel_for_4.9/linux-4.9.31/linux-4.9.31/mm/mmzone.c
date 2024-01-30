@@ -51,6 +51,18 @@ static inline int zref_in_nodemask(struct zoneref *zref, nodemask_t *nodes)
 #endif /* CONFIG_NUMA */
 }
 
+/* 计算zone的核心函数在next_zones_zonelist函数中,这里highest_zoneindex是gfp_zone()函数计算分配掩码得来.
+ * zonelist有一个zoneref数组,zoneref数据结构里有一个成员zone指针会指向zone数据结构,还有 一个zone_index
+ * 成员指向zone的编号.
+ * zone在系统处理时会初始化这个数组,具体函数在build_zonelists_node中.
+ * 如
+ * ZONE_HIGHMEN _zonerefs[0] -> zone_index = 1
+ * ZONE_NORMAL  _zonerefs[1] -> zone_index = 0
+ * zonerefs[0] 表示ZONE_HIGHMEM,其zone的编号就是zone_index值为1；
+ * zonerefs[1] 表示ZONE_NORMAL,其 zone的编号zone_index为0.
+ * 也就是说,基于zone的设计思想是:分配物理页面时会优先考虑ZONE_HIGHMEN,
+ * 因为ZONE_HIGHMEN在zonelist中排在ZONE_NORMAL前面
+ */
 /* Returns the next zone at or below highest_zoneidx in a zonelist */
 struct zoneref *__next_zones_zonelist(struct zoneref *z,
 					enum zone_type highest_zoneidx,
@@ -60,10 +72,11 @@ struct zoneref *__next_zones_zonelist(struct zoneref *z,
 	 * Find the next suitable zone to use for the allocation.
 	 * Only filter based on nodemask if it's set
 	 */
-	if (likely(nodes == NULL))
+	/* 如果node为空 */
+	if (likely(nodes == NULL))/* 如果zonelist_zone_idx(z) > highest_zoneidx,那么z++ */
 		while (zonelist_zone_idx(z) > highest_zoneidx)
 			z++;
-	else
+	else /* 如果nodes不为空,那么zonelist_zone_idx(z) > highest_zoneidx 或者z->zone不为空,zoneref->zone->node在nodes这个位图里面,那么z++ */
 		while (zonelist_zone_idx(z) > highest_zoneidx ||
 				(z->zone && !zref_in_nodemask(z, nodes)))
 			z++;

@@ -255,15 +255,24 @@ static void wb_min_max_ratio(struct bdi_writeback *wb,
  * lowmem and the ability to uphold the zone's watermarks without
  * requiring writeback.
  *
+ * 在内存zone中,我们认为有一定数量的页面可用于页面缓存,
+ * 这基本上是free和可回收页面的数量,减去一些保护低内存的zone保留,以及在不需要写回的情况下维护zone水位的能力.
+ *
  * This number of dirtyable pages is the base value of which the
  * user-configurable dirty ratio is the effictive number of pages that
  * are allowed to be actually dirtied.  Per individual zone, or
  * globally by using the sum of dirtyable pages over all zones.
  *
+ * 这个可脏页面的数量是基本值,用户可配置的脏比率是允许实际脏的有效页面数量.
+ * 按单个zone,或通过使用所有区域上的可引导页面的总和进行全局设置.
+ *
  * Because the user is allowed to specify the dirty limit globally as
  * absolute number of bytes, calculating the per-zone dirty limit can
  * require translating the configured limit into a percentage of
  * global dirtyable memory first.
+ *
+ * 由于允许用户将全局脏限制指定为绝对字节数,因此计算每个zone的脏限制可能需要首先将配置的限制转换为全局可脏内存的百分比.
+ *
  */
 
 /**
@@ -538,19 +547,28 @@ void global_dirty_limits(unsigned long *pbackground, unsigned long *pdirty)
  *
  * Returns the maximum number of dirty pages allowed in a node, based
  * on the node's dirtyable memory.
+ *
+ * node_dirty_limit - node中允许的最大脏页数
+ * @pgdat：节点
+ *
+ * 根据节点的可变脏页内存,返回node中允许的最大脏页数。
  */
 static unsigned long node_dirty_limit(struct pglist_data *pgdat)
 {
+	/* 这里就是这个node里面所有的zone的FREE_PAGES - totalreserve_pages + NR_INACTIVE_FILE + NR_ACTIVE_FILE */
 	unsigned long node_memory = node_dirtyable_memory(pgdat);
 	struct task_struct *tsk = current;
 	unsigned long dirty;
-
+	/* 如果user设置了vm_dirty_bytes,drity = vm_dirty_bytes/ PAGE_SIZE * node_memory / 全局的dirtyable_memory */
 	if (vm_dirty_bytes)
 		dirty = DIV_ROUND_UP(vm_dirty_bytes, PAGE_SIZE) *
 			node_memory / global_dirtyable_memory();
 	else
 		dirty = vm_dirty_ratio * node_memory / 100;
 
+	/* PF_LESS_THROTTLE表示减少对该进程的限制,让它清理内存
+	 * 如果当前进程有这个flag或者说是rt进程
+	 */
 	if (tsk->flags & PF_LESS_THROTTLE || rt_task(tsk))
 		dirty += dirty / 4;
 
@@ -566,13 +584,14 @@ static unsigned long node_dirty_limit(struct pglist_data *pgdat)
  */
 bool node_dirty_ok(struct pglist_data *pgdat)
 {
+	/* 算出我们的limit */
 	unsigned long limit = node_dirty_limit(pgdat);
 	unsigned long nr_pages = 0;
 
 	nr_pages += node_page_state(pgdat, NR_FILE_DIRTY);
 	nr_pages += node_page_state(pgdat, NR_UNSTABLE_NFS);
 	nr_pages += node_page_state(pgdat, NR_WRITEBACK);
-
+	/* 如果我们drity的page小于 limit,就返回true */
 	return nr_pages <= limit;
 }
 

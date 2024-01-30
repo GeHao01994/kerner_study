@@ -131,6 +131,9 @@ unsigned long totalreserve_pages __read_mostly;
 unsigned long totalcma_pages __read_mostly;
 
 int percpu_pagelist_fraction;
+/* gfp_allowed_mask在启动早期阶段(中断未使能前)，标志是GFP_BOOT_MASK;
+ * 在中断起来后,设置为__GFP_BITS_MASK,在这里就是__GFP_BITS_MASK
+ */
 gfp_t gfp_allowed_mask __read_mostly = GFP_BOOT_MASK;
 
 /*
@@ -2807,17 +2810,29 @@ static inline bool should_fail_alloc_page(gfp_t gfp_mask, unsigned int order)
  * one free page of a suitable size. Checking now avoids taking the zone lock
  * to check in the allocation paths if no pages are free.
  */
+
+/* 参数z表示要判断的zone,order是要分配内存的阶数,mask是要检查的水位.
+ * 通常分配物理内存页面的内核路径是检查WMARK_LOW水位,而页面回收kswapd内核线程则是检查WMARK_HIGH水位,
+ * 这会导致一个内存节点中各个zone的页面老化速度不一致的问题,为了解决这一问题,内核提出了很多诡异的补丁
+ */
 bool __zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
 			 int classzone_idx, unsigned int alloc_flags,
 			 long free_pages)
 {
 	long min = mark;
 	int o;
+	/* ALLOC_HARDER表示需求很迫切,试图更努力的分配内存 */
 	const bool alloc_harder = (alloc_flags & ALLOC_HARDER);
 
 	/* free_pages may go negative - that's OK */
+	/* 然后用free_pages减去order个page -1? 这里为啥要-1 */
 	free_pages -= (1 << order) - 1;
 
+	/*
+	 * 如果alloc_flags里面有ALLOC_HIGH,说明有高优先级
+	 * ALLOC_HIGH==__GFP_HIGH，请求分配非常紧急的内存，降低水线阀值
+	 * 那么就让min -= min/2,让水位减半
+	 */
 	if (alloc_flags & ALLOC_HIGH)
 		min -= min / 2;
 
@@ -2825,14 +2840,20 @@ bool __zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
 	 * If the caller does not have rights to ALLOC_HARDER then subtract
 	 * the high-atomic reserves. This will over-estimate the size of the
 	 * atomic reserve but it avoids a search.
+	 *
+	 * 如果调用方没有ALLOC_HARDER的权限，则减去high_atomic reserves
+	 * 这将高估atomic reserve的大小,但避免了搜索。
 	 */
+
+	/* 只有设置了ALLOC_HARDER，才能从free_list[MIGRATE_HIGHATOMIC]的链表中进行页面分配，否则减去 */
 	if (likely(!alloc_harder))
 		free_pages -= z->nr_reserved_highatomic;
-	else
+	else //若设置了ALLOC_HARDER，分配水线阀值进一步降低
 		min -= min / 4;
 
 #ifdef CONFIG_CMA
 	/* If allocation can't use CMA areas don't use free CMA pages */
+	/* 如果分配不带ALLOC_CMA,那么减去CMA PAGES的数量 */
 	if (!(alloc_flags & ALLOC_CMA))
 		free_pages -= zone_page_state(z, NR_FREE_CMA_PAGES);
 #endif
@@ -2842,30 +2863,42 @@ bool __zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
 	 * are not met, then a high-order request also cannot go ahead
 	 * even if a suitable page happened to be free.
 	 */
+	/* 如果free pages已经小于等于保留内存和min之和,说明此次分配请求不满足wartmark要求 */
 	if (free_pages <= min + z->lowmem_reserve[classzone_idx])
 		return false;
 
 	/* If this is an order-0 request then the watermark is fine */
+	/* 如果这是order = 0的请求，那么水位是OK的 */
 	if (!order)
 		return true;
 
 	/* For a high-order request, check at least one suitable page is free */
+	/* 此zone的水线检查已经通过,下面主要是检查当前zone是否具有分配order大小连续内存块的能力
+	 * 具体做法是：
+	 * 在当前zone中从申请order往上循环查看伙伴系统中的各个free_area链表中是否有空闲节点可以进行此次内存分配,
+	 * 有这判断通过,该zone具有此次内存分配能力.
+	 */
 	for (o = order; o < MAX_ORDER; o++) {
 		struct free_area *area = &z->free_area[o];
 		int mt;
-
+		/* 如果area里面没有free了,那么网上寻找 */
 		if (!area->nr_free)
 			continue;
-
+		/* 如果需求很迫切,试图更努力的分配内存
+		 * 那么不管了,直接返回true
+		 */
 		if (alloc_harder)
 			return true;
-
+		/* 如果在MIGRATE_UNMOVABLE,MIGRATE_MOVABLE,MIGRATE_RECLAIMABLE有一个不为空的
+		 * 那么返回true
+		 */
 		for (mt = 0; mt < MIGRATE_PCPTYPES; mt++) {
 			if (!list_empty(&area->free_list[mt]))
 				return true;
 		}
 
 #ifdef CONFIG_CMA
+		/* 如果可以用CMA,且相关的区域里面不是空的,那么返回true */
 		if ((alloc_flags & ALLOC_CMA) &&
 		    !list_empty(&area->free_list[MIGRATE_CMA])) {
 			return true;
@@ -2885,11 +2918,13 @@ bool zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
 static inline bool zone_watermark_fast(struct zone *z, unsigned int order,
 		unsigned long mark, int classzone_idx, unsigned int alloc_flags)
 {
+	/* 拿到我们该zone的free_pages数 */
 	long free_pages = zone_page_state(z, NR_FREE_PAGES);
 	long cma_pages = 0;
 
 #ifdef CONFIG_CMA
 	/* If allocation can't use CMA areas don't use free CMA pages */
+	/* 如果分配不使用CMA区域,不要使用CMA的free pages */
 	if (!(alloc_flags & ALLOC_CMA))
 		cma_pages = zone_page_state(z, NR_FREE_CMA_PAGES);
 #endif
@@ -2900,7 +2935,15 @@ static inline bool zone_watermark_fast(struct zone *z, unsigned int order,
 	 * passes but only the high-order atomic reserve are free. If
 	 * the caller is !atomic then it'll uselessly search the free
 	 * list. That corner case is then slower but it is harmless.
+	 *
+	 * 仅对 order-0 进行快速检查.
+	 * 如果失败,则reserves需要被计算.
+	 * 有一种情况是,检查通过了,但是只有high-order atomic reserve 是free的.
+	 * 如果调用者是!atomic,那么它将无法地搜索空闲列表.
+	 * 那个角落的情况会慢一些,但无害.
 	 */
+
+	/* 如果order等于0，free_pages -cma_pages > mark + z->lowmem_reserve[zonelist_zone_idx(ac->preferred_zoneref)] */
 	if (!order && (free_pages - cma_pages) > mark + z->lowmem_reserve[classzone_idx])
 		return true;
 
@@ -2941,6 +2984,7 @@ static struct page *
 get_page_from_freelist(gfp_t gfp_mask, unsigned int order, int alloc_flags,
 						const struct alloc_context *ac)
 {
+	/* 拿到我们的preferred_zoneref */
 	struct zoneref *z = ac->preferred_zoneref;
 	struct zone *zone;
 	struct pglist_data *last_pgdat_dirty_limit = NULL;
@@ -2948,6 +2992,28 @@ get_page_from_freelist(gfp_t gfp_mask, unsigned int order, int alloc_flags,
 	/*
 	 * Scan zonelist, looking for a zone with enough free.
 	 * See also __cpuset_node_allowed() comment in kernel/cpuset.c.
+	 */
+	/* for_next_zone_zonelist_nodemask首先从给定的zoneidx开始查找,这个给定的zoneidx就是highidx,之前通过gfp_zone函数转换来的.
+	 * 计算zone的核心函数在next_zones_zonelist函数中,这里highest_zoneindex是gfp_zone()函数计算分配掩码得来.
+	 * zonelist有一个zoneref数组,zoneref数据结构里有一个成员zone指针会指向zone数据结构,还有 一个zone_index
+	 * 成员指向zone的编号.
+	 * zone在系统处理时会初始化这个数组,具体函数在build_zonelists_node中.
+	 * 如
+	 * ZONE_HIGHMEN _zonerefs[0] -> zone_index = 1
+	 * ZONE_NORMAL  _zonerefs[1] -> zone_index = 0
+	 * zonerefs[0] 表示ZONE_HIGHMEM,其zone的编号就是zone_index值为1；
+	 * zonerefs[1] 表示ZONE_NORMAL,其 zone的编号zone_index为0.
+	 * 也就是说,基于zone的设计思想是:分配物理页面时会优先考虑ZONE_HIGHMEN,
+	 * 因为ZONE_HIGHMEN在zonelist中排在ZONE_NORMAL前面
+	 *
+	 * 回到我们刚刚的例子,gfp_zone(GFP_KERNEL)函数返回0,即highest_zoneidx 为0,而这个内存节点的第一个zone是ZONE_HIGHMEM,
+	 * 其zone编号zone_index的值为1.
+	 * 因此在next_zones_zonelist中,z++,最终first_zones_zonelist函数会返回ZONE_NORMAL.
+	 * 在for_next_zone_zonlist_nodemask遍历过程中也只能遍历ZONE_NORMAL这一个zone了
+	 * 再举一个例子,分配掩码为GFP_HIGHUSER_MOVEABLE,GFP_HIGHUSER_MOVABLE包含了__GFP_HIGHMEM,那么next_zones_zonelist函数会返回哪个zone呢?
+	 * GFP_HIGHUSER_MOVEABLE值为0x200da,那么gfp_zone(GFP_HIGHUSER_MOVEABLE)等于2,即highest_zoneidx为2,而这个内存节点的第一个ZONE_HIGHMEM,其zone编号zone_index的值为1.
+	 * 第一个zone为ZONE_HIGHMEM,然后进入next_zone_zonelist(++z,highidx,nodemask)依然会返回ZONE_NORMAL
+	 * 因此这里会遍历ZONE_HIGHMEN和ZONE_NORMAL这两个zone,但是会先遍历ZONE_HIGHMEM,然后才是ZONE_NORMAL
 	 */
 	for_next_zone_zonelist_nodemask(zone, z, ac->zonelist, ac->high_zoneidx,
 								ac->nodemask) {
@@ -2968,6 +3034,10 @@ get_page_from_freelist(gfp_t gfp_mask, unsigned int order, int alloc_flags,
 		 * should be able to balance it without having to
 		 * write pages from its LRU list.
 		 *
+		 * 当分配一个页面缓存页面进行写入时,我们希望从其脏限制内的节点获取它,这样就没有一个节点能容纳超过其
+		 * 全局允许脏页的比例份额.脏限制考虑了节点的lowmem reserves 和高水位
+		 * 因此kswapd应该能够在不必从其LRU列表中写入页面的情况下对其进行平衡.
+		 *
 		 * XXX: For now, allow allocations to potentially
 		 * exceed the per-node dirty limit in the slowpath
 		 * (spread_dirty_pages unset) before going into reclaim,
@@ -2976,31 +3046,57 @@ get_page_from_freelist(gfp_t gfp_mask, unsigned int order, int alloc_flags,
 		 * global limit.  The proper fix for these situations
 		 * will require awareness of nodes in the
 		 * dirty-throttling and the flusher threads.
+		 *
+		 * XXX：目前，在进行回收之前,允许分配可能超过慢路径中的每个节点的脏限制(spread_dirty_pages unset),这在NUMA设置中,
+		 * 当允许的节点加在一起不足以达到全局限制时非常重要.
+		 * 针对这些情况的正确修复需要了解脏节流和刷新线程中的节点。
+		 */
+
+		/* 当申请内存时,采用了标志__GFP_WRITE,则说明此次申请的物理页面将会生成脏页,
+		 * 内核中就是通过语句ac->spread_dirty_pages=(gfp_mask & __GFP_WRITE)来设置该成员的.
 		 */
 		if (ac->spread_dirty_pages) {
+			/* 如果last_pgdat_dirty_limit == zone->zone_pgdat */
 			if (last_pgdat_dirty_limit == zone->zone_pgdat)
 				continue;
-
+			/* 如果本node已经超出了dirty_limit,那么就把本node设置为last_pgdat_dirty_limit */
 			if (!node_dirty_ok(zone->zone_pgdat)) {
 				last_pgdat_dirty_limit = zone->zone_pgdat;
 				continue;
 			}
 		}
-
+		/* 在__alloc_pages传过来是 alloc_flags = ALLOC_WMARK_LOW */
 		mark = zone->watermark[alloc_flags & ALLOC_WMARK_MASK];
+		/* 检查zone中空闲内存是否在水位之上,如果当前zone的空闲页面低于WMARK_LOW水位,会调用none_reclaim函数来回收页面.
+		 * 如果空闲页面充沛,接下来就会调用buffered_rmqueue从伙伴系统中分配物理页面
+		 */
 		if (!zone_watermark_fast(zone, order, mark,
 				       ac_classzone_idx(ac), alloc_flags)) {
 			int ret;
 
 			/* Checked here to keep the fast path fast */
 			BUILD_BUG_ON(ALLOC_NO_WATERMARKS < NR_WMARK);
+			/* 如果alloc_flags带了ALLOC_NO_WATERMARKS,表明他不需要收到WATERMARKS的限制
+			 * 那么跳到try_this_zone
+			 */
 			if (alloc_flags & ALLOC_NO_WATERMARKS)
 				goto try_this_zone;
-
+			/* node_reclaim_mode在CONFIG_NUMA下由/proc/sys/vm/zone_reclaim_mode决定,默认值为0
+			 * 如果没定义CONFIG_NUMA,那么就node_reclaim_mode = 0
+			 * 
+			 * zone_allows_reclaim在没有定义CONFIG_NUMA为true
+			 * 定义了CONFIG_NUMA的话
+			 * static bool zone_allows_reclaim(struct zone *local_zone, struct zone *zone) 
+			 * {
+			 *	return node_distance(zone_to_nid(local_zone), zone_to_nid(zone)) <=
+			 * node_reclaim_distance;
+			 * }
+			 */
 			if (node_reclaim_mode == 0 ||
 			    !zone_allows_reclaim(ac->preferred_zoneref->zone, zone))
 				continue;
-
+			/* 开始回收页面 */
+			/* 调用node_reclaim()进行页面回收,这个时候是不回收脏文件页的,这是为了加快内存分配速度,避免回写磁盘的耗时io操作. */
 			ret = node_reclaim(zone->zone_pgdat, gfp_mask, order);
 			switch (ret) {
 			case NODE_RECLAIM_NOSCAN:
@@ -3816,10 +3912,17 @@ __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order,
 	struct page *page;
 	unsigned int alloc_flags = ALLOC_WMARK_LOW;
 	gfp_t alloc_mask = gfp_mask; /* The gfp_t that was actually used for allocation */
+	/* struct alloc_context数据结构是伙伴系统分配函数中用于保存相关参数的数据结构. */
 	struct alloc_context ac = {
+		/* gfp_zone函数从分配掩码中计算出zone的zoneindex,并存放在high_zoneidx成员中 */
+		/* 例如GFP_KERNEL分配掩码(0xd0)为参数带入gfp_zone函数里,最终结果为0,即high_zoneidex为0 */
 		.high_zoneidx = gfp_zone(gfp_mask),
 		.zonelist = zonelist,
 		.nodemask = nodemask,
+		/* 把gfp_mask分配掩码转换成MIGRATE_TYPES类型
+		 * 例如分配掩码为GFP_KERNEL,那么MIGRATE_TYPES类型是MIGRATE_UNMOVABLE;
+		 * 如果分配掩码为GFP_HIGHUSER_MOVABLE,那么MIGRATE_TYPES类型为MIGRATE_MOVABLE
+		 */
 		.migratetype = gfpflags_to_migratetype(gfp_mask),
 	};
 
@@ -3833,9 +3936,11 @@ __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order,
 	gfp_mask &= gfp_allowed_mask;
 
 	lockdep_trace_alloc(gfp_mask);
-
+	/* 如果设置了__GFP_WAIT,就检查当前进程是否需要调度,如果要则会进行调度
+	 * 大多数情况的分配都会有__GFP_WAIT标志
+	 */
 	might_sleep_if(gfp_mask & __GFP_DIRECT_RECLAIM);
-
+	/* 检查gfp_mask和order是否符合要求,就是跟fail_page_alloc里面每一项对比检查 */
 	if (should_fail_alloc_page(gfp_mask, order))
 		return NULL;
 
@@ -3843,10 +3948,14 @@ __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order,
 	 * Check the zones suitable for the gfp_mask contain at least one
 	 * valid zone. It's possible to have an empty zonelist as a result
 	 * of __GFP_THISNODE and a memoryless node
+	 *
+	 * 检查适合gfp_mask的zones是否至少包含一个有效zone.
+	 * 由于__GFP_THESNODE和一个无内存节点,可能会有一个空的zonelist
 	 */
 	if (unlikely(!zonelist->_zonerefs->zone))
 		return NULL;
 
+	/* 如果使能了CMA，选定的页框类型是可迁移的页框，就在标志上加上ALLOC_CMA */
 	if (IS_ENABLED(CONFIG_CMA) && ac.migratetype == MIGRATE_MOVABLE)
 		alloc_flags |= ALLOC_CMA;
 
@@ -3857,9 +3966,18 @@ __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order,
 	 * The preferred zone is used for statistics but crucially it is
 	 * also used as the starting point for the zonelist iterator. It
 	 * may get reset for allocations that ignore memory policies.
+	 *
+	 * 首选区域用于统计,但至关重要的是,它也被用作zonelist迭代器的起点.
+	 * 对于忽略内存策略的分配，它可能会被重置。
 	 */
+
+	/* 获取链表中第一个管理区，每一次retry_cpuset就是在一个管理区中进行分配
+	 * preferred_zone指向第一个合适的管理区
+	 */
+	/* 实际上这里就是去找到对应的zoneref */
 	ac.preferred_zoneref = first_zones_zonelist(ac.zonelist,
 					ac.high_zoneidx, ac.nodemask);
+	/* 如果说找到的zone为空,那么设置page = NULL,然后跳转到no_zone里面去 */
 	if (!ac.preferred_zoneref->zone) {
 		page = NULL;
 		/*
@@ -3870,6 +3988,11 @@ __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order,
 		goto no_zone;
 	}
 
+	/* 第一次尝试分配页框，这里是快速分配
+	 * 快速分配时以low阀值为标准
+	 * 遍历zonelist，尝试获取2的order次方个连续的页框
+	 * 在遍历zone时，如果此zone当前空闲内存减去需要申请的内存之后，空闲内存是低于low阀值，那么此zone会进行快速内存回收
+	 */
 	/* First allocation attempt */
 	page = get_page_from_freelist(alloc_mask, order, alloc_flags, &ac);
 	if (likely(page))
@@ -6865,15 +6988,20 @@ static void setup_per_zone_lowmem_reserve(void)
 	/* update totalreserve_pages */
 	calculate_totalreserve_pages();
 }
-
+/* 计算watermark水位用到min_free_kbytes这个值,它是在系统启动时通过系统空闲页面的数量来计算的,
+ * 具体计算在init_per_zone_wmark_min函数中.
+ * 另外系统起来之后也可以通过sysfs来设置,节点在“/proc/sys/vm/min_free_kbytes”.
+ */
 static void __setup_per_zone_wmarks(void)
 {
+	/* min_free_kbytes * 2^10 / PAGE_SHIFT,实际上就是转换成page */
 	unsigned long pages_min = min_free_kbytes >> (PAGE_SHIFT - 10);
 	unsigned long lowmem_pages = 0;
 	struct zone *zone;
 	unsigned long flags;
 
 	/* Calculate total number of !ZONE_HIGHMEM pages */
+	/* 计算整个lowmen的pages */
 	for_each_zone(zone) {
 		if (!is_highmem(zone))
 			lowmem_pages += zone->managed_pages;
@@ -6883,6 +7011,9 @@ static void __setup_per_zone_wmarks(void)
 		u64 tmp;
 
 		spin_lock_irqsave(&zone->lock, flags);
+		/* 1. 相当于先计算zone->managed_pages占总managed_pages的比例;
+		 * 2. 然后将这个比例 * 总警戒水位, 得到此zone的警戒水位
+		 */
 		tmp = (u64)pages_min * zone->managed_pages;
 		do_div(tmp, lowmem_pages);
 		if (is_highmem(zone)) {
@@ -6894,16 +7025,23 @@ static void __setup_per_zone_wmarks(void)
 			 * The WMARK_HIGH-WMARK_LOW and (WMARK_LOW-WMARK_MIN)
 			 * deltas control asynch page reclaim, and so should
 			 * not be capped for highmem.
+			 *
+			 * __GFP_HIGH和PF_MEMALLOC分配通常不需要highmem页面,所以在这里将pages_min限制为一个小值.
+			 * WMARK_HIGH-WMARK_LOW和(WMARK_LOW-WMARK_MIN)增量控制异步页面回收，因此不应为highmem设置上限。
 			 */
 			unsigned long min_pages;
-
+			/* min_pages就等于zone->managed_pages / 1024 */
 			min_pages = zone->managed_pages / 1024;
+			/* val = clamp(val,a,b)取a b边界值,若val小于a,则值为a,若大于b,则值为b,其余值不变. */
+			/* #define SWAP_CLUSTER_MAX 32UL */
 			min_pages = clamp(min_pages, SWAP_CLUSTER_MAX, 128UL);
 			zone->watermark[WMARK_MIN] = min_pages;
 		} else {
 			/*
 			 * If it's a lowmem zone, reserve a number of pages
 			 * proportionate to the zone's size.
+			 *
+			 * 如果是低内存区域，请保留与该zone大小成比例的页面数。
 			 */
 			zone->watermark[WMARK_MIN] = tmp;
 		}
@@ -6912,11 +7050,16 @@ static void __setup_per_zone_wmarks(void)
 		 * Set the kswapd watermarks distance according to the
 		 * scale factor in proportion to available memory, but
 		 * ensure a minimum size on small systems.
+		 *
+		 * 根据可用内存的比例因子大小设置kswapd水位的距离,
+		 * 但在小型系统上确保最小大小.
 		 */
+		/* mult_frac可以看博客https://blog.csdn.net/u012028275/article/details/118051599 */
+		/* 换到这里的语境就是比较pages_min * zone->managed_pages >> 2 和zone->managed_pages * watermark_scale_factor / 10000的最大值 */
 		tmp = max_t(u64, tmp >> 2,
 			    mult_frac(zone->managed_pages,
 				      watermark_scale_factor, 10000));
-
+		/* 然后WMARK_LOW = 最小水位 + tmp,WMARK_HIGH = 最小水位 + tmp *2 */
 		zone->watermark[WMARK_LOW]  = min_wmark_pages(zone) + tmp;
 		zone->watermark[WMARK_HIGH] = min_wmark_pages(zone) + tmp * 2;
 

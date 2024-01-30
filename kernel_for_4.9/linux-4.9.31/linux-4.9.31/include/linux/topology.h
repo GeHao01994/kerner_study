@@ -56,6 +56,9 @@ int arch_update_cpu_topology(void);
  * (in whatever arch specific measurement units returned by node_distance())
  * and node_reclaim_mode is enabled then the VM will only call node_reclaim()
  * on nodes within this distance.
+ *
+ * 如果系统中nodes之间的距离大于RECLAIM_distance(以node_dinstance返回的任何arch特定测量单位),
+ * 并且启用了node_reclaim_mode,则VM将仅在此距离内的节点上调用node_reclaim()
  */
 #define RECLAIM_DISTANCE 30
 #endif

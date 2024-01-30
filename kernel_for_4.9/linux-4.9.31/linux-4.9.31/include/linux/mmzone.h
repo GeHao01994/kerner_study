@@ -775,7 +775,11 @@ typedef struct pglist_data {
 	/*
 	 * zone reclaim becomes active if more unmapped pages exist.
 	 */
+	/* pgdat->min_unmapped_pages 是“/proc/sys/vm/min_unmapped_ratio”乘上总的页数.
+	 * 页缓存中潜在可回收页数如果大于pgdat->min_unmapped_pages才做页回收
+	 */
 	unsigned long		min_unmapped_pages;
+	/* min_slab_pages:如果用于slab的页达到这个值就缓存收缩 */
 	unsigned long		min_slab_pages;
 #endif /* CONFIG_NUMA */
 
@@ -1090,6 +1094,12 @@ static __always_inline struct zoneref *next_zones_zonelist(struct zoneref *z,
 					enum zone_type highest_zoneidx,
 					nodemask_t *nodes)
 {
+	/* 如果node不为空,并且zonelist_zone_idx(z) <= highest_zoneidx
+	 * 那么返回zoneref
+	 * 在build_zonelists_node中
+	 * ZONE_HIGHMEM _zonerefs[0] -> zone_index = 1
+	 * ZONE_NORMAL  _zonerefs[1] -> zone_index = 0
+	 */
 	if (likely(!nodes && zonelist_zone_idx(z) <= highest_zoneidx))
 		return z;
 	return __next_zones_zonelist(z, highest_zoneidx, nodes);
@@ -1110,6 +1120,18 @@ static __always_inline struct zoneref *next_zones_zonelist(struct zoneref *z,
  * When no eligible zone is found, zoneref->zone is NULL (zoneref itself is
  * never NULL). This may happen either genuinely, or due to concurrent nodemask
  * update due to cpuset modification.
+ *
+ * first_zones_zonelist-返回在允许的nodemask的zonelist中第一个小于等于highest_zoneidx的zone
+ * @zonelist-搜索合适zone的zonelist
+ * @highest_zoneidx-要返回的最高区域的zone index
+ * @nodes-一个可选的nodemask，用于过滤zonelist
+ * @return-找到的第一个合适区域的Zoneref指针（见下文）
+ *
+ * 此函数返回在allowed nodemask 位于或低于给定zone inde的第一个区域,
+ * 返回的zoneref是一个游标,可通过在调用前让其+1通过next_zones_zonelist去迭代zonelist
+ *
+ * 当找不到符合条件的zone时,zoneref->区域为NULL(zoneref本身从不为NULL).
+ * 这可能是真实发生的，也可能是由于cpuset修改导致的并发nodemask更新.
  */
 static inline struct zoneref *first_zones_zonelist(struct zonelist *zonelist,
 					enum zone_type highest_zoneidx,
@@ -1136,6 +1158,7 @@ static inline struct zoneref *first_zones_zonelist(struct zonelist *zonelist,
 		z = next_zones_zonelist(++z, highidx, nodemask),	\
 			zone = zonelist_zone(z))
 
+/* 首先通过first_zones_zonelist从给定的zoneidx开始查找,这个给定的zoneidx就是highidx,之前通过gfp_zone函数转换得来的 */
 #define for_next_zone_zonelist_nodemask(zone, z, zlist, highidx, nodemask) \
 	for (zone = z->zone;	\
 		zone;							\
