@@ -245,7 +245,7 @@ unsigned long lruvec_lru_size(struct lruvec *lruvec, enum lru_list lru, int zone
 {
 	unsigned long lru_size;
 	int zid;
-
+	/* 获得整个node的lru的数量 */
 	if (!mem_cgroup_disabled())
 		lru_size = mem_cgroup_get_lru_size(lruvec, lru);
 	else
@@ -257,7 +257,10 @@ unsigned long lruvec_lru_size(struct lruvec *lruvec, enum lru_list lru, int zone
 
 		if (!managed_zone(zone))
 			continue;
-
+		/* 这里就是减去它上面的lru链表数量
+		 * 比如你这里如果是normal的话就减去了high
+		 * 但是你还包括了DMA这些的
+		 */
 		if (!mem_cgroup_disabled())
 			size = mem_cgroup_get_zone_lru_size(lruvec, lru, zid);
 		else
@@ -1338,6 +1341,10 @@ unsigned long reclaim_clean_pages_from_list(struct zone *zone,
  * page:	page to consider
  * mode:	one of the LRU isolation modes defined above
  *
+ * 尝试从LRU中删除指定的页面.
+ * 只有当此页面处于适当的PageActive状态时,才可使用此页面.
+ * 其他地方正在释放的页面也会被忽略.
+ *
  * returns 0 on success, -ve errno on failure.
  */
 int __isolate_lru_page(struct page *page, isolate_mode_t mode)
@@ -1345,10 +1352,17 @@ int __isolate_lru_page(struct page *page, isolate_mode_t mode)
 	int ret = -EINVAL;
 
 	/* Only take pages on the LRU. */
+	/* 如果page已经不在LRU链表里面了,那么直接返回 */
 	if (!PageLRU(page))
 		return ret;
 
-	/* Compaction should not handle unevictable pages but CMA can do so */
+	/* Compaction should not handle unevictable pages but CMA can do so
+	 * 内存压缩不应处理不可回收的页面,但CMA可以这样做
+	 */
+
+	/* 如果页面是LRU_UNEVICTABLE,但是mode是ISOLATE_UNEVICTABLE
+	 * 那么就直接返回了
+	 */
 	if (PageUnevictable(page) && !(mode & ISOLATE_UNEVICTABLE))
 		return ret;
 
@@ -1364,15 +1378,27 @@ int __isolate_lru_page(struct page *page, isolate_mode_t mode)
 	 *
 	 * ISOLATE_ASYNC_MIGRATE is used to indicate that it only wants to pages
 	 * that it is possible to migrate without blocking
+	 *
+	 * 为了最大限度地减少LRU中断,调用方可以指示它只想隔离它将能够在不阻塞的情况下操作的页面--大多数情况下是clean
+	 *
+	 * ISOLATE_CLEAN意味着只应隔离干净的页面.
+	 * 当回收无法写入后备存储时,它会被回收使用
+	 *
+	 * ISOLATE_ASYNC_MIGRATE用于指示它只想对可以在不阻塞的情况下进行migrate的页面
+	 */
+
+	/* ISOLATE_CLEAN: 分离干净的页面
+	 * ISOLATE_ASYNC_MIGRATE：分离异步迁移的页面
 	 */
 	if (mode & (ISOLATE_CLEAN|ISOLATE_ASYNC_MIGRATE)) {
 		/* All the caller can do on PageWriteback is block */
+		/* 如果page正在写回,那么直接返回 */
 		if (PageWriteback(page))
 			return ret;
-
+		/* 如果page是dirty的 */
 		if (PageDirty(page)) {
 			struct address_space *mapping;
-
+			/* ISOLATE_CLEAN 意味这只有干净的页面 */
 			/* ISOLATE_CLEAN means only clean pages */
 			if (mode & ISOLATE_CLEAN)
 				return ret;
@@ -1381,21 +1407,31 @@ int __isolate_lru_page(struct page *page, isolate_mode_t mode)
 			 * Only pages without mappings or that have a
 			 * ->migratepage callback are possible to migrate
 			 * without blocking
+			 *
 			 */
+			/* 如果page有映射且有migratepage函数,那么也直接返回 */
 			mapping = page_mapping(page);
 			if (mapping && !mapping->a_ops->migratepage)
 				return ret;
 		}
 	}
 
+	/* ISOLATE_UNMAPPED: 分离没有映射的页面
+	 * page_mapped 表示page已经被映射了
+	 */
 	if ((mode & ISOLATE_UNMAPPED) && page_mapped(page))
 		return ret;
 
+	/* 如果page的引用计数为0则退出,否则增加其引用计数
+	 * 也就是说，这个page不能是空闲页面，否则返回-EBUSY
+	 */
 	if (likely(get_page_unless_zero(page))) {
 		/*
 		 * Be careful not to clear PageLRU until after we're
 		 * sure the page is not being freed elsewhere -- the
 		 * page release code relies on it.
+		 *
+		 * 请注意,在我们确定页面没有在其他地方释放之前,不要清除PageLRU -- page release代码依赖它
 		 */
 		ClearPageLRU(page);
 		ret = 0;
@@ -1431,10 +1467,17 @@ static __always_inline void update_lru_sizes(struct lruvec *lruvec,
  * shrink the lists perform better by taking out a batch of pages
  * and working on them outside the LRU lock.
  *
+ * zone_lru_lock受到严重竞争.
+ * 通过取出一批页面并在LRU锁定之外对其进行处理，一些回收链表的功能执行得更好.
+ *
  * For pagecache intensive workloads, this function is the hottest
  * spot in the kernel (apart from copy_*_user functions).
  *
+ * 对于pagecheck密集型工作负载,此函数是内核中最热门的部分(除了copy_*_user函数)
+ *
  * Appropriate locks must be held before calling this function.
+ *
+ * 调用此函数之前，必须持有适当的锁.
  *
  * @nr_to_scan:	The number of pages to look through on the list.
  * @lruvec:	The LRU vector to pull pages from.
@@ -1461,12 +1504,20 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 	for (scan = 0; scan < nr_to_scan && nr_taken < nr_to_scan &&
 					!list_empty(src);) {
 		struct page *page;
-
+		/* #define lru_to_page(head) (list_entry((head)->prev, struct page, lru))
+		 * 拿到这个链表的最后一个page
+		 */
 		page = lru_to_page(src);
 		prefetchw_prev_lru_page(page, src, flags);
-
+		/* 如果page的LRU没有,说明page已经不在LRU链表里面了
+		 * 那么就直接报个BUG吧
+		 */
 		VM_BUG_ON_PAGE(!PageLRU(page), page);
-
+		/* 如果pagg的zonenum要 > sc->reclaim_idx
+		 * 那么就skip掉这个page
+		 * 具体是把这个page移动到pages_skipped链表里面去
+		 * 然后对应的nr_skipped ++
+		 */
 		if (page_zonenum(page) > sc->reclaim_idx) {
 			list_move(&page->lru, &pages_skipped);
 			nr_skipped[page_zonenum(page)]++;
@@ -1476,18 +1527,28 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 		/*
 		 * Account for scanned and skipped separetly to avoid the pgdat
 		 * being prematurely marked unreclaimable by pgdat_reclaimable.
+		 *
+		 * 扫描和skip分别计数,以避免pgdat_reclaimable过早地将pgdat标记为不可回收.
 		 */
 		scan++;
 
 		switch (__isolate_lru_page(page, mode)) {
-		case 0:
+		case 0: /* static inline int hpage_nr_pages(struct page *page)
+			 * {
+			 *   if (unlikely(PageTransHuge(page)))
+			 *	return HPAGE_PMD_NR;
+			 * return 1;
+			 * }
+			 */
 			nr_pages = hpage_nr_pages(page);
+			/* 然后nr_taken加上我们刚刚可以隔离的page */
 			nr_taken += nr_pages;
+			/* 然后nr_zone_taken[zone]加上刚刚隔离出来的nr_pages */
 			nr_zone_taken[page_zonenum(page)] += nr_pages;
 			list_move(&page->lru, dst);
 			break;
 
-		case -EBUSY:
+		case -EBUSY: /* 如果是EBUSY,把page移回去 */
 			/* else it is being freed elsewhere */
 			list_move(&page->lru, src);
 			continue;
@@ -1503,15 +1564,23 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 	 * we cannot splice to the tail. If we did then the SWAP_CLUSTER_MAX
 	 * scanning would soon rescan the same pages to skip and put the
 	 * system at risk of premature OOM.
+	 *
+	 * 将任何skipped的页面拼接到LRU列表的开头.
+	 *
+	 * 请注意，当回收较低zone时,这会扰乱LRU顺序,但我们无法拼接到尾部.
+	 * 如果我们这样做了，那么SWAP_CLUSTER_MAX扫描将很快重新扫描相同的页面以跳过,并使系统面临过早OOM的风险.
 	 */
 	if (!list_empty(&pages_skipped)) {
 		int zid;
 		unsigned long total_skipped = 0;
 
 		for (zid = 0; zid < MAX_NR_ZONES; zid++) {
+			/* 如果该zone的nr_skipped为0,那么continue */
 			if (!nr_skipped[zid])
 				continue;
-
+			/* total_skipped 加上nr_skipped[zid]的值
+			 * 然后zone的PGSCAN_SKIP + 上nr_skipped[zid]的值
+			 */
 			__count_zid_vm_events(PGSCAN_SKIP, zid, nr_skipped[zid]);
 			total_skipped += nr_skipped[zid];
 		}
@@ -1520,9 +1589,16 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 		 * Account skipped pages as a partial scan as the pgdat may be
 		 * close to unreclaimable. If the LRU list is empty, account
 		 * skipped pages as a full scan.
+		 *
+		 * 将skipped pages视为部分扫描,因为pgdat可能接近不可回收.
+		 * 如果LRU列表为空,视skipped pages为完全扫描
+		 */
+
+		/* 如果src为空,那么scan + total_skipped
+		 * 否则scan + total_skipped >> 2
 		 */
 		scan += list_empty(src) ? total_skipped : total_skipped >> 2;
-
+		/* 将两个链表拼接在一起 */
 		list_splice(&pages_skipped, src);
 	}
 	*nr_scanned = scan;
@@ -1924,6 +2000,10 @@ static void shrink_active_list(unsigned long nr_to_scan,
 	unsigned long nr_taken;
 	unsigned long nr_scanned;
 	unsigned long vm_flags;
+	/* 定义3个临时链表l_hold、l_active和l_inactive.
+	 * 在操作LRU链表时,有一把保护LRU的spinlock锁zone->lru_lock.
+	 * isolate_lru_pages批量地把LRU链表的部分页面先迁移到临时链表中,从而减少加锁的时间
+	 */
 	LIST_HEAD(l_hold);	/* The pages which were snipped off */
 	LIST_HEAD(l_active);
 	LIST_HEAD(l_inactive);
@@ -1932,6 +2012,7 @@ static void shrink_active_list(unsigned long nr_to_scan,
 	unsigned long nr_rotated = 0;
 	isolate_mode_t isolate_mode = 0;
 	int file = is_file_lru(lru);
+	/* 拿到我们的pgdat数据结构 */
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
 
 	lru_add_drain();
@@ -1942,7 +2023,9 @@ static void shrink_active_list(unsigned long nr_to_scan,
 		isolate_mode |= ISOLATE_CLEAN;
 
 	spin_lock_irq(&pgdat->lru_lock);
-
+	/* isolate_lru_pages批量从LRU链表中分离nr_to_scan个页面到l_hold链表里,这里会根据isolate_mode
+	 * 来考虑一些特殊情况,基本上就是把LRU链表的页面迁移到临时l_hold链表中
+	 */
 	nr_taken = isolate_lru_pages(nr_to_scan, lruvec, &l_hold,
 				     &nr_scanned, sc, isolate_mode, lru);
 
@@ -2041,7 +2124,29 @@ static void shrink_active_list(unsigned long nr_to_scan,
  *  100GB      31         3GB
  *    1TB     101        10GB
  *   10TB     320        32GB
+ *
+ * 非活动的匿名页面列表应该足够小，这样VM就不必做太多的工作。
+ *
+ * 非活动文件列表应足够小,以将大部分内存留给抵制-扫描的活动列表上已建立的工作集
+ * 但应足够大,以避免破坏聚合预读窗口.
+ *
+ * 两个非活动列表也应该足够大，以便每个非活动页面在回收之前都有机会再次被引用。
+ *
+ * inactive_ratio是该LRU上ACTIVE与inactive页面的目标比率,由pageout代码维护.
+ * zone->inactive_ratio为3意味着3:1或25%的页面保留在非活动列表中.
+ *
+ * total     target    max
+ * memory    ratio     inactive
+ * -------------------------------------
+ *   10MB       1         5MB
+ *  100MB       1        50MB
+ *    1GB       3       250MB
+ *   10GB      10       0.9GB
+ * 100GB      31         3GB
+ *    1TB     101        10GB
+ *   10TB     320        32GB
  */
+
 static bool inactive_list_is_low(struct lruvec *lruvec, bool file,
 						struct scan_control *sc)
 {
@@ -2054,6 +2159,8 @@ static bool inactive_list_is_low(struct lruvec *lruvec, bool file,
 	/*
 	 * If we don't have swap space, anonymous page deactivation
 	 * is pointless.
+	 *
+	 * 如果我们没有交换空间，匿名页面停用是毫无意义的.
 	 */
 	if (!file && !total_swap_pages)
 		return false;
@@ -2073,6 +2180,12 @@ static bool inactive_list_is_low(struct lruvec *lruvec, bool file,
 static unsigned long shrink_list(enum lru_list lru, unsigned long nr_to_scan,
 				 struct lruvec *lruvec, struct scan_control *sc)
 {
+	/* 处理活跃的LRU链表,包括匿名页面和文件映射页面,如果不活跃页面少于活跃页面,
+	 * 那么需要调用shrink_active_list函数来看哪些活跃页面可以迁移到不活跃页面链表中
+	 * 为什么活跃LRU链表页面的数量少于不活跃LRU时,不去扫描活跃LRU呢?
+	 * 系统常常会有只使用一次的文件访问的情况,不活跃LRU链表增长速度变快,不活跃LRU页面数量
+	 * 大于活跃页面数量,这时不会去扫描活跃LRU
+	 */
 	if (is_active_lru(lru)) {
 		if (inactive_list_is_low(lruvec, is_file_lru(lru), sc))
 			shrink_active_list(nr_to_scan, lruvec, sc, lru);
@@ -2098,14 +2211,41 @@ enum scan_balance {
  * nr[0] = anon inactive pages to scan; nr[1] = anon active pages to scan
  * nr[2] = file inactive pages to scan; nr[3] = file active pages to scan
  */
+
+/* 根据swappiness参数和sc->priority优先级去计算4个LRU链表中应该扫描的页面页数,
+ * 结果存放在nr[]数组中,扫描规则总结如下
+ * 1、如果系统没有swap交换分区或者SWAP空间,则不用扫描匿名页面.
+ * 2、如果zone_free + zone_lru_file <= watermark[WMARK_HIGH],那么只扫描匿名页面
+ * 3、如果LRU_INACTIVE_FILE > LRU_ACTIVE_FILE,那么只扫描文件映射页面
+ * 4、除此之外,两种页面都要扫描
+ *
+ * 扫描页面计算公式如下
+ * 1、扫描一种页面(如果我没有swap空间,那就是说得这种情况)
+ *    scan = LRU上总页面数 >> sc->priority
+ * 2、同时扫描两种页面
+ *    scan = LRU上总页面数 >> sc->priority
+ *    ap = (swappniess * (recent_scanned[0] + 1)) / ( recent_rotated[0] + 1)
+ *    fp = ((200 - swappniess)) * (recent_scanned[1] + 1) / ( recent_rotated[1] + 1)
+ *    scan_anon = (scan * ap) / (ap + fp +1)
+ *    scan_file = (scan * fp) / (ap + fp +1)
+ * recent_scanned: 指最近扫描页面的数量,在扫描活跃链表和不活跃链表时,会统计到recent_scanned变量中.
+ *		   详见shrink_inactive_list()函数和shrink_active_list()函数.
+ * recent_rotated: 1、在扫描不活跃链表时,统计那些被踢回活跃链表的页面数量到recent_rotated变量中,
+ *                 详见shrink_inactive_list -> putback_inactive_pages
+ *		   2、在扫描活跃页面时,访问引用的页面也被加入到recent_rotated变量.
+ *		   3、总之,该变量反映了真实的活跃页面的数量
+ */
+
 static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 			   struct scan_control *sc, unsigned long *nr,
 			   unsigned long *lru_pages)
 {
+	/* 拿到swappiness */
 	int swappiness = mem_cgroup_swappiness(memcg);
 	struct zone_reclaim_stat *reclaim_stat = &lruvec->reclaim_stat;
 	u64 fraction[2];
 	u64 denominator = 0;	/* gcc */
+	/* 拿到pgdat */
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
 	unsigned long anon_prio, file_prio;
 	enum scan_balance scan_balance;
@@ -2125,8 +2265,22 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 	 * reclaiming for a memcg, a priority drop can cause high
 	 * latencies, so it's better to scan a minimum amount there as
 	 * well.
+	 *
+	 * 如果zone或memcg较小,则nr[l]可以为0.
+	 * 这导致没有对此优先级进行扫描,并且可能导致优先级下降.
+	 * 全局的直接回收可以进入下一个zone,而且往往没有问题.
+	 * 全局kswapd用于zone平衡,它需要扫描最小的数量.
+	 * 当回收memcg时,优先级下降可能会导致高延迟,因此最好也扫描最小的数量.
 	 */
+
+	/* 如果当前进程是kswapd的话 */
 	if (current_is_kswapd()) {
+		/*  bool pgdat_reclaimable(struct pglist_data *pgdat)
+		 * {
+		 *	return node_page_state_snapshot(pgdat, NR_PAGES_SCANNED) <
+		 *		pgdat_reclaimable_pages(pgdat) * 6;
+		 * }
+		 */
 		if (!pgdat_reclaimable(pgdat))
 			force_scan = true;
 		if (!mem_cgroup_online(memcg))
@@ -2136,6 +2290,7 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 		force_scan = true;
 
 	/* If we have no swap space, do not bother scanning anon pages. */
+	/* 如果我们没有swap空间或者说sc->may_swap 设置为0,那么不要扫描匿名页面 */
 	if (!sc->may_swap || mem_cgroup_get_nr_swap_pages(memcg) <= 0) {
 		scan_balance = SCAN_FILE;
 		goto out;
@@ -2147,6 +2302,9 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 	 * disable swapping for individual groups completely when
 	 * using the memory controller's swap limit feature would be
 	 * too expensive.
+	 *
+	 * 全局回收将进行交换以防止OOM，即使没有swappiness
+	 * 但memcg用户希望使用此旋钮去完全禁用单个groups的交换,因为使用内存控制器的swap limit功能会过于昂贵.
 	 */
 	if (!global_reclaim(sc) && !swappiness) {
 		scan_balance = SCAN_FILE;
@@ -2157,8 +2315,11 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 	 * Do not apply any pressure balancing cleverness when the
 	 * system is close to OOM, scan both anon and file equally
 	 * (unless the swappiness setting disagrees with swapping).
+	 *
+	 * 当系统接近OOM时,不要应用任何压力平衡技巧,平均扫描anon和file(除非swappiness为0).
 	 */
 	if (!sc->priority && swappiness) {
+		/* SCAN_EQUAL 计算出的扫描值按原样使用 */
 		scan_balance = SCAN_EQUAL;
 		goto out;
 	}
@@ -2171,14 +2332,20 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 	 * This means we have a runaway feedback loop where a tiny
 	 * thrashing file LRU becomes infinitely more attractive than
 	 * anon pages.  Try to detect this based on file LRU size.
+	 *
+	 * 防止回收器落入缓存陷阱:当cache 页面开始处于非活动状态时,每个cache fault都会使scan balance 向file LRU倾斜.
+	 * 随着file LRU的缩小,从references rotation的窗口也会缩小。
+	 * 这意味着我们有一个失控的反馈循环，在这个循环中,一个微小的颠簸file LRU变得比一个匿名页面更有吸引力.
+	 * 尝试根据file LRU大小检测此问题。
 	 */
 	if (global_reclaim(sc)) {
 		unsigned long pgdatfile;
 		unsigned long pgdatfree;
 		int z;
 		unsigned long total_high_wmark = 0;
-
+		/* 拿到这个node的FREE_PAGES */
 		pgdatfree = sum_zone_node_page_state(pgdat->node_id, NR_FREE_PAGES);
+		/* 拿到这个node的file pages数 */
 		pgdatfile = node_page_state(pgdat, NR_ACTIVE_FILE) +
 			   node_page_state(pgdat, NR_INACTIVE_FILE);
 
@@ -2186,10 +2353,11 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 			struct zone *zone = &pgdat->node_zones[z];
 			if (!managed_zone(zone))
 				continue;
-
+			/* total_high_wmark 等于整个node的各个zone的高水位相加 */
 			total_high_wmark += high_wmark_pages(zone);
 		}
 
+		/* 如果pgdatfile + pgdatfree 都比整个高水位之和小,那么就扫描匿名页面 */
 		if (unlikely(pgdatfile + pgdatfree <= total_high_wmark)) {
 			scan_balance = SCAN_ANON;
 			goto out;
@@ -2204,19 +2372,27 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 	 * Without the second condition we could end up never scanning an
 	 * lruvec even if it has plenty of old anonymous pages unless the
 	 * system is under heavy pressure.
+	 *
+	 * 如果有足够的非活动页面缓存,如果非活动列表的大小大于活动列表的大小,并且非活动列表实际上有一些页面在此优先级上扫描,
+	 * 我们现在不会从匿名页面工作集中回收任何内容.
+	 * 如果没有第二个条件,我们可能永远不会扫描lruvec,即使它有很多旧的匿名页面，除非系统承受巨大压力。
 	 */
 	if (!inactive_list_is_low(lruvec, true, sc) &&
 	    lruvec_lru_size(lruvec, LRU_INACTIVE_FILE, sc->reclaim_idx) >> sc->priority) {
 		scan_balance = SCAN_FILE;
 		goto out;
 	}
-
+	/* SCAN_FRACT 将分数应用于计算的扫描值 */
 	scan_balance = SCAN_FRACT;
 
 	/*
 	 * With swappiness at 100, anonymous and file have the same priority.
 	 * This scanning priority is essentially the inverse of IO cost.
+	 *
+	 * 当swappiness为100时，匿名页面和文件页面具有相同的优先级.
+	 * 该扫描优先级本质上是IO成本的倒数.
 	 */
+
 	anon_prio = swappiness;
 	file_prio = 200 - anon_prio;
 
@@ -2230,19 +2406,35 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 	 * up weighing recent references more than old ones.
 	 *
 	 * anon in [0], file in [1]
+	 *
+	 * OK,所以我们有交换空间和相当多的page cache的页面.
+	 * 我们使用最近 rotated/最近scanned 的比率来确定每个缓存的价值.
+	 *
+	 * 因为工作负载会随着时间的推移而变化(并避免溢出)
+	 * 我们将这些统计数据作为一个浮动平均值,它最终比旧的更能权衡最近的references
+	 *
+	 * anon在[0]中，file在[1]中
 	 */
 
+	/* 拿到这个zone所有的匿名页面 */
 	anon  = lruvec_lru_size(lruvec, LRU_ACTIVE_ANON, MAX_NR_ZONES) +
 		lruvec_lru_size(lruvec, LRU_INACTIVE_ANON, MAX_NR_ZONES);
+	/* 拿到这个zone左右的page cache */
 	file  = lruvec_lru_size(lruvec, LRU_ACTIVE_FILE, MAX_NR_ZONES) +
 		lruvec_lru_size(lruvec, LRU_INACTIVE_FILE, MAX_NR_ZONES);
 
 	spin_lock_irq(&pgdat->lru_lock);
+	/* 如果最近扫描的匿名页面大于总的匿名页面的1/4
+	 * 那么每个都减半
+	 */
 	if (unlikely(reclaim_stat->recent_scanned[0] > anon / 4)) {
 		reclaim_stat->recent_scanned[0] /= 2;
 		reclaim_stat->recent_rotated[0] /= 2;
 	}
 
+	/* 如果最近扫描的page cache 大于总的page cache的1/4
+	 * 那么每个都减半
+	 */
 	if (unlikely(reclaim_stat->recent_scanned[1] > file / 4)) {
 		reclaim_stat->recent_scanned[1] /= 2;
 		reclaim_stat->recent_rotated[1] /= 2;
@@ -2253,26 +2445,32 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 	 * proportional to the fraction of recently scanned pages on
 	 * each list that were recently referenced and in active use.
 	 */
+
+	/* ap = anon_prio * (reclaim_stat->recent_scanned[0] + 1) / (reclaim_stat->recent_rotated[0] + 1 ) */
 	ap = anon_prio * (reclaim_stat->recent_scanned[0] + 1);
 	ap /= reclaim_stat->recent_rotated[0] + 1;
 
+	/* fp = file_prio * (reclaim_stat->recent_scanned[1] + 1) / (reclaim_stat->recent_rotated[1] + 1) */
 	fp = file_prio * (reclaim_stat->recent_scanned[1] + 1);
 	fp /= reclaim_stat->recent_rotated[1] + 1;
 	spin_unlock_irq(&pgdat->lru_lock);
-
+	/* fraction 应该是分子的意思? */
 	fraction[0] = ap;
 	fraction[1] = fp;
+	/* denominator 是说分母的意思 */
 	denominator = ap + fp + 1;
 out:
 	some_scanned = false;
 	/* Only use force_scan on second pass. */
 	for (pass = 0; !some_scanned && pass < 2; pass++) {
 		*lru_pages = 0;
+		/* #define for_each_evictable_lru(lru) for (lru = 0; lru <= LRU_ACTIVE_FILE; lru++) */
 		for_each_evictable_lru(lru) {
+			/* file是判断是不是file lru */
 			int file = is_file_lru(lru);
 			unsigned long size;
 			unsigned long scan;
-
+			/* 拿到当前lru的大小 */
 			size = lruvec_lru_size(lruvec, lru, sc->reclaim_idx);
 			scan = size >> sc->priority;
 
@@ -2304,12 +2502,15 @@ out:
 				BUG();
 			}
 
+			/* lru_pages + size */
 			*lru_pages += size;
+			/* 把它给到nr里面 */
 			nr[lru] = scan;
 
 			/*
 			 * Skip the second pass and don't force_scan,
 			 * if we found something to scan.
+			 * 如果我们找到要扫描的东西，跳过第二次，不要强制扫描.
 			 */
 			some_scanned |= !!scan;
 		}
@@ -2322,6 +2523,9 @@ out:
 static void shrink_node_memcg(struct pglist_data *pgdat, struct mem_cgroup *memcg,
 			      struct scan_control *sc, unsigned long *lru_pages)
 {
+	/* 获得目标lruvec，lruvec包含5个lru链表，分别是活跃/非活跃匿名页
+	 * 活跃/非活跃文件页，不可回收链表
+	 */
 	struct lruvec *lruvec = mem_cgroup_lruvec(pgdat, memcg);
 	unsigned long nr[NR_LRU_LISTS];
 	unsigned long targets[NR_LRU_LISTS];
@@ -2331,10 +2535,17 @@ static void shrink_node_memcg(struct pglist_data *pgdat, struct mem_cgroup *memc
 	unsigned long nr_to_reclaim = sc->nr_to_reclaim;
 	struct blk_plug plug;
 	bool scan_adjusted;
-
+	/* 根据swappiness参数和sc->priority优先级去计算4个LRU链表中应该扫描的页面页数,
+	 * 结果存放在nr[]数组中,扫描规则总结如下
+	 * 1、如果系统没有swap交换分区或者SWAP空间,则不用扫描匿名页面.
+	 * 2、如果zone_free + zone_lru_file <= watermark[WMARK_HIGH],那么只扫描匿名页面
+	 * 3、如果LRU_INACTIVE_FILE > LRU_ACTIVE_FILE,那么只扫描文件映射页面
+	 * 4、除此之外,两种页面都要扫描
+	 */
 	get_scan_count(lruvec, memcg, sc, nr, lru_pages);
 
 	/* Record the original scan target for proportional adjustments later */
+	/* 记录原始扫描的目标为之后的比例调整 */
 	memcpy(targets, nr, sizeof(nr));
 
 	/*
@@ -2347,19 +2558,31 @@ static void shrink_node_memcg(struct pglist_data *pgdat, struct mem_cgroup *memc
 	 * do a batch of work at once. For memcg reclaim one check is made to
 	 * abort proportional reclaim if either the file or anon lru has already
 	 * dropped to zero at the first pass.
+	 *
+	 * 当内存压力很小时DEF_PRIORITY处的直接回收内的全局回收可能会发生是一种正常的事情,
+	 * 例如多个流式读者/写者.
+	 * 因此,当在DEF_PRIORITY扫描时,请求的页面数被回收时,我们不会中止扫描.
+	 * 因为我们直接回收的事实意味着kswapd没有跟上,最好一次做一批工作.
+	 * 对于memcg回收，如果file或anon lru在第一次通过时已降至零，则进行一次检查以中止比例回收.
 	 */
 	scan_adjusted = (global_reclaim(sc) && !current_is_kswapd() &&
 			 sc->priority == DEF_PRIORITY);
 
 	blk_start_plug(&plug);
+	/* 这里循环为什么会漏掉活跃的匿名页面呢(LRU_ACTIVE_ANON)呢?
+	 * 因为活跃的匿名页面不能直接回收,根据局部原理,它有可能很快被访问了,匿名页面
+	 * 需要经过时间的老化且加入不活跃匿名页面LRU链表后才能被回收
+	 */
 	while (nr[LRU_INACTIVE_ANON] || nr[LRU_ACTIVE_FILE] ||
 					nr[LRU_INACTIVE_FILE]) {
 		unsigned long nr_anon, nr_file, percentage;
 		unsigned long nr_scanned;
-
+		/* 依次扫描可回收的4种LRU链表,shrink_list函数会具体处理各种LRU链表的情况 */
 		for_each_evictable_lru(lru) {
 			if (nr[lru]) {
+				/* 选nr[lru]和SWAP_CLUSTER_MAX的最小值 */
 				nr_to_scan = min(nr[lru], SWAP_CLUSTER_MAX);
+				/* nr[lru] -= nr_to_scan */
 				nr[lru] -= nr_to_scan;
 
 				nr_reclaimed += shrink_list(lru, nr_to_scan,
@@ -2368,7 +2591,7 @@ static void shrink_node_memcg(struct pglist_data *pgdat, struct mem_cgroup *memc
 		}
 
 		cond_resched();
-
+		/* 如果已经回收的页面数量(nr_reclaimed)没有达到预期值(nr_to_reclaim),那么继续扫描 */
 		if (nr_reclaimed < nr_to_reclaim || scan_adjusted)
 			continue;
 
@@ -2522,7 +2745,11 @@ static inline bool should_continue_reclaim(struct pglist_data *pgdat,
 static bool shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 {
 	struct reclaim_state *reclaim_state = current->reclaim_state;
+	/* nr_reclaimed: 已回收的页框数
+	 * nr_scanned : 已扫描的页框数
+	 */
 	unsigned long nr_reclaimed, nr_scanned;
+	/* 是否允许回收 */
 	bool reclaimable = false;
 
 	do {
@@ -3739,17 +3966,22 @@ static unsigned long node_pagecache_reclaimable(struct pglist_data *pgdat)
 static int __node_reclaim(struct pglist_data *pgdat, gfp_t gfp_mask, unsigned int order)
 {
 	/* Minimum pages needed in order to stay on node */
+	/* 停留在这个节点上,本次最少需要的页面数 */
 	const unsigned long nr_pages = 1 << order;
 	struct task_struct *p = current;
 	struct reclaim_state reclaim_state;
 	int classzone_idx = gfp_zone(gfp_mask);
 	struct scan_control sc = {
+		/* 如果本次需要页面数不足32个，则回收32个页面 */
 		.nr_to_reclaim = max(nr_pages, SWAP_CLUSTER_MAX),
 		.gfp_mask = (gfp_mask = memalloc_noio_flags(gfp_mask)),
 		.order = order,
 		.priority = NODE_RECLAIM_PRIORITY,
+		/* 是否允许页回写到磁盘 */
 		.may_writepage = !!(node_reclaim_mode & RECLAIM_WRITE),
+		/* 是否允许对page进行unmap */
 		.may_unmap = !!(node_reclaim_mode & RECLAIM_UNMAP),
+		/* 是否允许将匿名页写入到swap分区 */
 		.may_swap = 1,
 		.reclaim_idx = classzone_idx,
 	};
@@ -3759,16 +3991,28 @@ static int __node_reclaim(struct pglist_data *pgdat, gfp_t gfp_mask, unsigned in
 	 * We need to be able to allocate from the reserves for RECLAIM_UNMAP
 	 * and we also need to be able to write out pages for RECLAIM_WRITE
 	 * and RECLAIM_UNMAP.
+	 *
+	 * 我们需要为了RECLAIM_UNMAP从reserves中分配,我们还需要能够为RECLAIM_WRITE和RECLAIM_UNMAP写回页面
 	 */
 	p->flags |= PF_MEMALLOC | PF_SWAPWRITE;
 	lockdep_set_current_reclaim_state(gfp_mask);
 	reclaim_state.reclaimed_slab = 0;
 	p->reclaim_state = &reclaim_state;
-
+	/* min_unmapped_pages: 内存回收的阀值，如果unmapped 页达到这个值
+	 * node进行快速内存回收的条件是可回收的页框大于node预留的min_unmapped_pages个页框.
+	 * 而min_unmapped_pages是由/proc/sys/vm/min_unmapped_ratio配置的,该值的含义是每个zone最小预留unmapped_pages的比率,其范围是0-100.
+	 * 如果条件满足时,则会对node循环进行快速内存回收
+	 * 结束条件是：1.已经回收到所需要的页框数.
+	 *	       2.优先级已经小于0,这表示已经进行过一次全node内存碎片回收了,如果还是满足不了要求,也没有其他办法了
+	 */
 	if (node_pagecache_reclaimable(pgdat) > pgdat->min_unmapped_pages) {
 		/*
 		 * Free memory by calling shrink zone with increasing
 		 * priorities until we have enough memory freed.
+		 */
+
+		/* 每一趟内存回收，对应优先级的值就会减一，当优先级小于0或者
+		 * 回收到的页面数满足要求的时候，则停止内存回收
 		 */
 		do {
 			shrink_node(pgdat, &sc);
@@ -3827,10 +4071,19 @@ int node_reclaim(struct pglist_data *pgdat, gfp_t gfp_mask, unsigned int order)
 	 * have associated processors. This will favor the local processor
 	 * over remote processors and spread off node memory allocations
 	 * as wide as possible.
+	 *
+	 * 仅在本地节点或没有关联处理器的节点上运行节点回收.
+	 * 这将有利于本地处理器而不是远程处理器,并尽可能广泛地分配节点内存.
+	 */
+
+	/* numa_node_id是看你本地CPU属于哪个node
 	 */
 	if (node_state(pgdat->node_id, N_CPU) && pgdat->node_id != numa_node_id())
 		return NODE_RECLAIM_NOSCAN;
 
+	/* 如果原来就被PGDAT_RECLAIM_LOCKED住了,那么直接返回
+	 * 否则设置PGDAT_RECLAIM_LOCKED
+	 */
 	if (test_and_set_bit(PGDAT_RECLAIM_LOCKED, &pgdat->flags))
 		return NODE_RECLAIM_NOSCAN;
 
