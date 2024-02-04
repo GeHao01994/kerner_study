@@ -778,32 +778,62 @@ int remove_mapping(struct address_space *mapping, struct page *page)
  * Page may still be unevictable for other reasons.
  *
  * lru_lock must not be held, interrupts must be enabled.
+ *
+ * putback_lru_page-将先前隔离的页面放到适当的lru列表中
+ * @page：要放回相应lru列表的页面
+ *
+ * 将先前隔离的@页面添加到适当的LRU列表中.
+ * 由于其他原因，page可能仍然无法回收.
+ *
+ * lru_lock不能获得,必须启用中断.
+ *
  */
 void putback_lru_page(struct page *page)
 {
 	bool is_unevictable;
+	/* 如果page是不可回收的 */
 	int was_unevictable = PageUnevictable(page);
-
+	/* 如果Page不在LRU链表里面,那么报个BUG吧 */
 	VM_BUG_ON_PAGE(PageLRU(page), page);
 
 redo:
+	/* 清除PG_unevictable */
 	ClearPageUnevictable(page);
-
+	/* 注意这里不是测试page flag是不是PG_unevictable了
+	 *
+	 * int page_evictable(struct page *page)
+	 * {
+	 *	int ret;
+	 *	Prevent address_space of inode and swap cache from being freed
+	 *	rcu_read_lock();
+	 *	ret = !mapping_unevictable(page_mapping(page)) && !PageMlocked(page);
+	 *	rcu_read_unlock();
+	 *	return ret;
+	 * }
+	 */
 	if (page_evictable(page)) {
 		/*
 		 * For evictable pages, we can use the cache.
 		 * In event of a race, worst case is we end up with an
 		 * unevictable page on [in]active list.
 		 * We know how to handle that.
+		 *
+		 * 对于可收回的页面,我们可以使用cache.
+		 * 在发生竞争的情况下,最坏的情况是我们最终会在[in]active list中出现一个无法回收的页面.
+		 * 我们知道如何处理它.
 		 */
 		is_unevictable = false;
+		/* 把它加回到lru链表里面去 */
 		lru_cache_add(page);
 	} else {
 		/*
 		 * Put unevictable pages directly on zone's unevictable
 		 * list.
+		 *
+		 * 将不可回收的页面直接放在zone的不可回收链表里面
 		 */
 		is_unevictable = true;
+		/* 把页面添加到不可回收链表里面去 */
 		add_page_to_unevictable_list(page);
 		/*
 		 * When racing with an mlock or AS_UNEVICTABLE clearing
@@ -814,6 +844,12 @@ redo:
 		 * the page back to the evictable list.
 		 *
 		 * The other side is TestClearPageMlocked() or shmem_lock().
+		 *
+		 * 当使用mlock或AS_UNEVICTABLE清除(页面已解锁)进行竞争时,确保如果另一个线程没有遵守我们的PG_lru设置
+		 * 并且在isolation/check_move_unevictable_pages失败，
+		 * 我们看到PG_mlocked/AS_UNIVICTABLE在下面被清除,并将页面移回可收回列表.
+		 *
+		 * 另一边是TestClearPageMlocked()或者shmem_lock().
 		 */
 		smp_mb();
 	}
@@ -822,9 +858,22 @@ redo:
 	 * page's status can change while we move it among lru. If an evictable
 	 * page is on unevictable list, it never be freed. To avoid that,
 	 * check after we added it to the list, again.
+	 *
+	 * 当我们在lru之间移动页面时,页面的状态可能会发生变化.
+	 * 如果一个可收回的页面在不可收回的列表中,它将永远不会被释放.
+	 * 为了避免这种情况,请在我们将其添加到列表后再次进行检查.
+	 */
+
+	/* 根据上下文,is_unevictable = true的时候已经添加到不可回收链表里面去了
+	 * page_evictable说明页面可回收
+	 * 所以把页面分离出来
 	 */
 	if (is_unevictable && page_evictable(page)) {
+		/* 从lru中分离页面,返回0表示分离成功 */
 		if (!isolate_lru_page(page)) {
+			/* isolate_lru_page 会调用get_page,所以这里put_page
+			 * 然后在重新试一下
+			 */
 			put_page(page);
 			goto redo;
 		}
@@ -833,12 +882,17 @@ redo:
 		 * nothing to do here.
 		 */
 	}
-
+	/* 如果之前page带有flag为PG_unevictable,但是经过转换变成了可回收的
+	 * 那么UNEVICTABLE_PGRESCUED event++
+	 */
 	if (was_unevictable && !is_unevictable)
 		count_vm_event(UNEVICTABLE_PGRESCUED);
+	/* 如果之前page带有flag没有PG_unevictable,但是经过转换变成了不可回收的
+	 * 那么UNEVICTABLE_PGCULLED event++
+	 */
 	else if (!was_unevictable && is_unevictable)
 		count_vm_event(UNEVICTABLE_PGCULLED);
-
+	/* 因为我们添加到list的时候会调用get_page,所以这里put_page把之前的refcout -1 */
 	put_page(page);		/* drop ref from isolate */
 }
 
@@ -1548,7 +1602,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 			list_move(&page->lru, dst);
 			break;
 
-		case -EBUSY: /* 如果是EBUSY,把page移回去 */
+		case -EBUSY: /* 如果是EBUSY,把page移动到lruvec->lists的头部,这样避免下次scan扫到这样的页面 */
 			/* else it is being freed elsewhere */
 			list_move(&page->lru, src);
 			continue;
@@ -1601,9 +1655,27 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 		/* 将两个链表拼接在一起 */
 		list_splice(&pages_skipped, src);
 	}
+	/* 把scan赋值给nr_scanned */
 	*nr_scanned = scan;
 	trace_mm_vmscan_lru_isolate(sc->reclaim_idx, sc->order, nr_to_scan, scan,
 				    nr_taken, mode, is_file_lru(lru));
+	/* 更新zone的lru的size
+	 *
+	 * static __always_inline void update_lru_sizes(struct lruvec *lruvec,
+	 *		enum lru_list lru, unsigned long *nr_zone_taken){
+	 *		int zid;
+	 *		for (zid = 0; zid < MAX_NR_ZONES; zid++) {
+	 *			if (!nr_zone_taken[zid])
+	 *				continue;
+	 *
+	 *			__update_lru_size(lruvec, lru, zid, -nr_zone_taken[zid]);
+	 *		#ifdef CONFIG_MEMCG
+	 *		mem_cgroup_update_lru_size(lruvec, lru, zid, -nr_zone_taken[zid]);
+	 *		#endif
+	 *			}
+	 *
+	 *	}
+	 */
 	update_lru_sizes(lruvec, lru, nr_zone_taken);
 	return nr_taken;
 }
@@ -1636,20 +1708,34 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 int isolate_lru_page(struct page *page)
 {
 	int ret = -EBUSY;
-
+	/*  static inline int page_count(struct page *page)
+	 * {
+	 *	return atomic_read(&compound_head(page)->_refcount);
+	 * }
+	 *
+	 * 如果page的_refcount为0,那么就报个BUG吧
+	 */
 	VM_BUG_ON_PAGE(!page_count(page), page);
 	WARN_RATELIMIT(PageTail(page), "trying to isolate tail page");
 
+	/* 如果Page在LRU链表里面 */
 	if (PageLRU(page)) {
+		/* 拿到page所在的zone */
 		struct zone *zone = page_zone(page);
 		struct lruvec *lruvec;
 
 		spin_lock_irq(zone_lru_lock(zone));
+		/* 拿到对应pgdat里面的lruvec */
 		lruvec = mem_cgroup_page_lruvec(page, zone->zone_pgdat);
+		/* 如果Page还在LRU里面里面 */
 		if (PageLRU(page)) {
+			/* 拿到page所在的lru */
 			int lru = page_lru(page);
+			/* 将page的refcount + 1 */
 			get_page(page);
+			/* 清除Page的PG_lru */
 			ClearPageLRU(page);
+			/* 把页面从lruvce的相应的lru链表中删除 */
 			del_page_from_lru_list(page, lruvec, lru);
 			ret = 0;
 		}
@@ -1949,6 +2035,18 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
  *
  * The downside is that we have to touch page->_refcount against each page.
  * But we had to alter page->flags anyway.
+ *
+ * 这会将页面从活动列表移动到非活动列表.
+ *
+ * 如果页面被来自rmap的一个或多个进程引用,我们会将它们移到另一种方式。
+ *
+ * 如果页面大多未映射,则处理速度很快,并且在整个操作中在zone_lru_lock保护下是合适的.
+ * 但是,如果页面被映射,处理速度会很慢(page_referenced()),所以我们应该在每个页面dropzone_lru_lock.
+ * 这是不可能平衡的,所以我们在处理页面时从LRU中删除页面。
+ * 对此处的非LRU页面使用PG_active是安全的，因为没有人会在非LRU页面上玩该位.
+ *
+ * 不利的一面是,我们必须针对每一页touch page->_refcount.
+ * 但我们还是不得不更改page->flags
  */
 
 static void move_active_pages_to_lru(struct lruvec *lruvec,
@@ -1961,21 +2059,54 @@ static void move_active_pages_to_lru(struct lruvec *lruvec,
 	struct page *page;
 	int nr_pages;
 
+	/* 如果list不为空 */
 	while (!list_empty(list)) {
+		/* 拿到这个链表的最后一个page */
 		page = lru_to_page(list);
+		/* 拿到相关的lruvec */
 		lruvec = mem_cgroup_page_lruvec(page, pgdat);
-
+		/* 如果该page不在LRU链表里面
+		 * 那么就报个BUG吧
+		 */
 		VM_BUG_ON_PAGE(PageLRU(page), page);
+		/* 设置Page的PG_lru */
 		SetPageLRU(page);
 
+		/* 获得该page的page数量 */
 		nr_pages = hpage_nr_pages(page);
+		/* update lru size
+		 * static __always_inline void __update_lru_size(struct lruvec *lruvec,
+		 *	enum lru_list lru, enum zone_type zid,int nr_pages)
+		 * {
+		 *	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
+		 *	__mod_node_page_state(pgdat, NR_LRU_BASE + lru, nr_pages);
+		 *	__mod_zone_page_state(&pgdat->node_zones[zid],
+		 *	NR_ZONE_LRU_BASE + lru, nr_pages);
+		 * }
+		 * static __always_inline void update_lru_size(struct lruvec *lruvec,
+		 *	enum lru_list lru, enum zone_type zid,int nr_pages)
+		 * {
+		 *	__update_lru_size(lruvec, lru, zid, nr_pages);
+		 * #ifdef CONFIG_MEMCG
+		 * mem_cgroup_update_lru_size(lruvec, lru, zid, nr_pages);
+		 * #endif
+		 * }
+		 */
 		update_lru_size(lruvec, lru, page_zonenum(page), nr_pages);
+
+		/* 将page移动到相关的链表里面去 */
 		list_move(&page->lru, &lruvec->lists[lru]);
+		/* 算移动的pages的个数 */
 		pgmoved += nr_pages;
 
+		/* 因为我们在isolate_lru_pages中对page的_refcount进行了+1
+		 * 所以这里需要将_refcount -1,然后判断是否等于0 */
 		if (put_page_testzero(page)) {
+			/* 清除PG_lru标志 */
 			__ClearPageLRU(page);
+			/* 清除PageActive标志 */
 			__ClearPageActive(page);
+			/* 从lru链表里面删除这个page */
 			del_page_from_lru_list(page, lruvec, lru);
 
 			if (unlikely(PageCompound(page))) {
@@ -1983,11 +2114,11 @@ static void move_active_pages_to_lru(struct lruvec *lruvec,
 				mem_cgroup_uncharge(page);
 				(*get_compound_page_dtor(page))(page);
 				spin_lock_irq(&pgdat->lru_lock);
-			} else
+			} else	/* 添加到pages_to_free链表里面 */
 				list_add(&page->lru, pages_to_free);
 		}
 	}
-
+	/* 如果是非活跃链表,把PGDEACTIVATE + pgmoved */
 	if (!is_active_lru(lru))
 		__count_vm_events(PGDEACTIVATE, pgmoved);
 }
@@ -2028,27 +2159,90 @@ static void shrink_active_list(unsigned long nr_to_scan,
 	 */
 	nr_taken = isolate_lru_pages(nr_to_scan, lruvec, &l_hold,
 				     &nr_scanned, sc, isolate_mode, lru);
-
+	/* void __mod_node_page_state(struct pglist_data *pgdat, enum node_stat_item item,
+	 * long delta)
+	 * {
+	 *	struct per_cpu_nodestat __percpu *pcp = pgdat->per_cpu_nodestats;
+	 *	s8 __percpu *p = pcp->vm_node_stat_diff + item;
+	 *	long x;
+	 *	long t;
+	 *
+	 *	x = delta + __this_cpu_read(*p);
+	 *	t = __this_cpu_read(pcp->stat_threshold);
+	 *
+	 *	if (unlikely(x > t || x < -t)) {
+	 *		node_page_state_add(x, pgdat, item);
+	 *		x = 0;
+	 *	}
+	 *	__this_cpu_write(*p, x);
+	 * }
+	 */
 	__mod_node_page_state(pgdat, NR_ISOLATED_ANON + file, nr_taken);
+	/* reclaim_stat->recent_scanned[file] + 上我们scan的页面 */
 	reclaim_stat->recent_scanned[file] += nr_taken;
-
+	/* 如果是global_reclaim,那么
+	 * 那么
+	 * void __mod_node_page_state(struct pglist_data *pgdat, enum node_stat_item item,
+	 *	long delta)
+	 * {
+	 *	struct per_cpu_nodestat __percpu *pcp = pgdat->per_cpu_nodestats;
+	 *	s8 __percpu *p = pcp->vm_node_stat_diff + item;
+	 *	long x;
+	 *	long t;
+	 *	x = delta + __this_cpu_read(*p);
+	 *
+	 *	t = __this_cpu_read(pcp->stat_threshold);
+	 *
+	 *	if (unlikely(x > t || x < -t)) {
+	 *		node_page_state_add(x, pgdat, item);
+	 *		x = 0;
+	 *	}
+	 *	__this_cpu_write(*p, x);
+	 * }
+	 */
 	if (global_reclaim(sc))
 		__mod_node_page_state(pgdat, NR_PAGES_SCANNED, nr_scanned);
+	/* 将vm_event_states的PGREFILL + nr_scanned
+	 *
+	 * static inline void __count_vm_events(enum vm_event_item item, long delta)
+	 * {
+	 * 	raw_cpu_add(vm_event_states.event[item], delta);
+	 * }
+	 */
 	__count_vm_events(PGREFILL, nr_scanned);
-
 	spin_unlock_irq(&pgdat->lru_lock);
 
 	while (!list_empty(&l_hold)) {
 		cond_resched();
+		/* #define lru_to_page(head) (list_entry((head)->prev, struct page, lru)) */
+		/* 这里进行一个page 一个page的处理
+		 * 从这个链表的最后一个page开始处理
+		 */
 		page = lru_to_page(&l_hold);
+		/* 把page从lru的链表中删除 */
 		list_del(&page->lru);
-
+		/* 如果page是不可回收的,注意这里不是测试flag
+		 *
+		 * int page_evictable(struct page *page)
+		 * {
+		 *	int ret;
+		 * 	Prevent address_space of inode and swap cache from being freed
+		 *	rcu_read_lock();
+		 *	ret = !mapping_unevictable(page_mapping(page)) && !PageMlocked(page);
+		 *	rcu_read_unlock();
+		 *	return ret;
+		 * }
+		 */
 		if (unlikely(!page_evictable(page))) {
+			/* 把页面放回到相关的链表里面去 */
 			putback_lru_page(page);
 			continue;
 		}
-
+		/* 如果buffer_heads已经超过了limit,那么尝试释放该page */
 		if (unlikely(buffer_heads_over_limit)) {
+			/* 这个private是只有buffer_heads的时候才有
+			 * 也就是说缓冲读的时候才有
+			 */
 			if (page_has_private(page) && trylock_page(page)) {
 				if (page_has_private(page))
 					try_to_release_page(page, 0);
@@ -2056,8 +2250,14 @@ static void shrink_active_list(unsigned long nr_to_scan,
 			}
 		}
 
+		/* 这里是看这个page有没有访问引用(实际上就是看有多少个进程映射了它) */
 		if (page_referenced(page, 0, sc->target_mem_cgroup,
 				    &vm_flags)) {
+			/* 这里是个BUG,因为nr_rotated反应的是活跃页面的数量
+			 * 这里应该要放到list_add(&page->lru, &l_active)
+			 * 而不是这里,因为在这里加实际上还是有可能把这个页面添加到inactive里面去
+			 * 这里将nr_rotated加上该pages数量
+			 */
 			nr_rotated += hpage_nr_pages(page);
 			/*
 			 * Identify referenced, file-backed active pages and
@@ -2067,14 +2267,23 @@ static void shrink_active_list(unsigned long nr_to_scan,
 			 * are not likely to be evicted by use-once streaming
 			 * IO, plus JVM can create lots of anon VM_EXEC pages,
 			 * so we ignore them here.
+			 *
+			 * 识别被refrenced,后备文件的活跃页面,让它们在活动列表中再循环一次
+			 * 这样可执行代码就有更好的机会在内存压力下留在内存中.
+			 * 一旦使用流式IO,Anon页面不太可能被回收,加上JVM可以创建许多Anon VM_EXEC页面,所以我们在这里忽略它们.
+			 */
+
+			/* 如果vm有可执行权限并且是page cache的
+			 * 那么把它添加到活跃链表里面去
 			 */
 			if ((vm_flags & VM_EXEC) && page_is_file_cache(page)) {
 				list_add(&page->lru, &l_active);
 				continue;
 			}
 		}
-
+		/* 清除PG_active标志位 */
 		ClearPageActive(page);	/* we are de-activating */
+		/* 把它添加到非活跃链表里面去 */
 		list_add(&page->lru, &l_inactive);
 	}
 
@@ -2087,15 +2296,20 @@ static void shrink_active_list(unsigned long nr_to_scan,
 	 * even though only some of them are actually re-activated.  This
 	 * helps balance scan pressure between file and anonymous pages in
 	 * get_scan_count.
+	 *
+	 * 将当前使用的映射中的引用页计数为rotated,即使实际上只有其中一些被重新激活.
+	 * 这有助于在get_scan_count中平衡文件页和匿名页之间的扫描压力。
 	 */
 	reclaim_stat->recent_rotated[file] += nr_rotated;
 
+	/* 把 l_active和 l_inactive 链表的页迁移到LRU相应的链表中 */
 	move_active_pages_to_lru(lruvec, &l_active, &l_hold, lru);
 	move_active_pages_to_lru(lruvec, &l_inactive, &l_hold, lru - LRU_ACTIVE);
 	__mod_node_page_state(pgdat, NR_ISOLATED_ANON + file, -nr_taken);
 	spin_unlock_irq(&pgdat->lru_lock);
 
 	mem_cgroup_uncharge_list(&l_hold);
+	/* l_hold是剩下的页面,可以释放 */
 	free_hot_cold_page_list(&l_hold, true);
 }
 

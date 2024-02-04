@@ -478,6 +478,14 @@ void lru_cache_add(struct page *page)
  * munmap or exit, while it's not on the lru, we want to add the page
  * while it's locked or otherwise "invisible" to other tasks.  This is
  * difficult to do when using the pagevec cache, so bypass that.
+ *
+ * add_page_to_unevictable_list-将页面添加到不可回收链表
+ * @page: 要添加到不可回收链表的页面
+ *
+ * 将页面直接添加到其zone的不可回收列表中.
+ * 为了避免在页面不在lru上时,通过例如munlock、munmap或exit让页面变得可回收的tasks发生竞争,
+ * 我们希望在页面被locked 或 其他tasks “不可见”的情况下添加页面.
+ * 当使用pagevec缓存时,这很难做到,所以请绕过它.
  */
 void add_page_to_unevictable_list(struct page *page)
 {
@@ -485,10 +493,15 @@ void add_page_to_unevictable_list(struct page *page)
 	struct lruvec *lruvec;
 
 	spin_lock_irq(&pgdat->lru_lock);
+	/* 获得lruvec 变量 */
 	lruvec = mem_cgroup_page_lruvec(page, pgdat);
+	/* 清除该page的PG_active */
 	ClearPageActive(page);
+	/* 设置页面的PG_unevictable */
 	SetPageUnevictable(page);
+	/* 设置page的PG_lru flag */
 	SetPageLRU(page);
+	/* 把页面添加到不可回收链表里面去 */
 	add_page_to_lru_list(page, lruvec, LRU_UNEVICTABLE);
 	spin_unlock_irq(&pgdat->lru_lock);
 }
