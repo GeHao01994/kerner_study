@@ -98,7 +98,7 @@ enum pageflags {
 	/* page中的数据正在被回写到后备存储器。*/
 	PG_writeback,		/* Page is under writeback */
 	PG_head,		/* A head page */
-	/* 已经加入到了swap cache中(只有非文件页使用) */
+	/* 已经分配了swap空间 */
 	PG_swapcache,		/* Swap page: swp_entry_t in private */
 	/* 表示page中的数据在后备存储器中有对应的块 */
 	PG_mappedtodisk,	/* Has blocks allocated on-disk */
