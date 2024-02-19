@@ -2864,7 +2864,7 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 	 * 如果没有第二个条件,我们可能永远不会扫描lruvec,即使它有很多旧的匿名页面，除非系统承受巨大压力。
 	 */
 
-	/* 如果page的不活跃链表没有到low,且sc->reclaim_idx以及其以下的LRU_INACTIVE_FILE lru size还能在sc->priority粒度下分离出页面
+	/* 如果page cache(第二个参数表示是不是page cache)的不活跃链表没有到low,且sc->reclaim_idx以及其以下的LRU_INACTIVE_FILE lru size还能在sc->priority粒度下分离出页面
 	 * 那么就扫描文件页面
 	 */
 	if (!inactive_list_is_low(lruvec, true, sc) &&
@@ -2906,10 +2906,10 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 	 * anon在[0]中，file在[1]中
 	 */
 
-	/* 拿到这个zone所有的匿名页面 */
+	/* 拿到这个node中所有的匿名页面 */
 	anon  = lruvec_lru_size(lruvec, LRU_ACTIVE_ANON, MAX_NR_ZONES) +
 		lruvec_lru_size(lruvec, LRU_INACTIVE_ANON, MAX_NR_ZONES);
-	/* 拿到这个zone所有的page cache */
+	/* 拿到这个node中所有的page cache */
 	file  = lruvec_lru_size(lruvec, LRU_ACTIVE_FILE, MAX_NR_ZONES) +
 		lruvec_lru_size(lruvec, LRU_INACTIVE_FILE, MAX_NR_ZONES);
 
@@ -2960,7 +2960,7 @@ out:
 			int file = is_file_lru(lru);
 			unsigned long size;
 			unsigned long scan;
-			/* 拿到当前lru的大小 */
+			/* 拿到sc->reclaim_idx及其以下的lru的大小 */
 			size = lruvec_lru_size(lruvec, lru, sc->reclaim_idx);
 			scan = size >> sc->priority;
 
