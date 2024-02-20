@@ -326,6 +326,13 @@ static unsigned long do_shrink_slab(struct shrink_control *shrinkctl,
 				    unsigned long nr_scanned,
 				    unsigned long nr_eligible)
 {
+	/* 这里可以通过fs/super.c里面的来看
+	 *
+	 * s->s_shrink.seeks = DEFAULT_SEEKS;
+	 * s->s_shrink.scan_objects = super_cache_scan;
+	 * s->s_shrink.count_objects = super_cache_count;
+	 * s->s_shrink.batch = 1024;
+	 */
 	unsigned long freed = 0;
 	unsigned long long delta;
 	long total_scan;
@@ -333,11 +340,13 @@ static unsigned long do_shrink_slab(struct shrink_control *shrinkctl,
 	long nr;
 	long new_nr;
 	int nid = shrinkctl->nid;
+	/* 如果shrinker->batch有的话，那么batch_size就等于shrinker->batch,否则就等于SHRINK_BATCH */
 	long batch_size = shrinker->batch ? shrinker->batch
 					  : SHRINK_BATCH;
 	long scanned = 0, next_deferred;
-
+	/* 计算可以回收的对象 */
 	freeable = shrinker->count_objects(shrinker, shrinkctl);
+	/* 如果可回收对象为0,直接返回 */
 	if (freeable == 0)
 		return 0;
 
@@ -345,13 +354,21 @@ static unsigned long do_shrink_slab(struct shrink_control *shrinkctl,
 	 * copy the current shrinker scan count into a local variable
 	 * and zero it so that other concurrent shrinker invocations
 	 * don't also do this scanning work.
+	 *
+	 * 将当前的shrinker 扫描计数复制到一个局部变量中并将其置零,这样其他并发的shrinker调用就不会执行此扫描工作.
 	 */
+
+	/* nr_deferred: 内部使用的成员，记录每个内存节点延迟到下一次扫描的对象数量 */
+	/* 这里就是把0赋值给shrinker->nr_deferred[nid]，然后把shrinker->nr_deferred[nid]返回给nr */
 	nr = atomic_long_xchg(&shrinker->nr_deferred[nid], 0);
 
+	/* 将nr赋值给total_scan */
 	total_scan = nr;
+	/* delta = (4 * nr_scanned ) / shrinker->seeks * freeable /(nr_eligible + 1 ) */
 	delta = (4 * nr_scanned) / shrinker->seeks;
 	delta *= freeable;
 	do_div(delta, nr_eligible + 1);
+	/* 让total_scan 加上这个值 */
 	total_scan += delta;
 	if (total_scan < 0) {
 		pr_err("shrink_slab: %pF negative objects to delete nr=%ld\n",
@@ -372,6 +389,17 @@ static unsigned long do_shrink_slab(struct shrink_control *shrinkctl,
 	 *
 	 * Hence only allow the shrinker to scan the entire cache when
 	 * a large delta change is calculated directly.
+	 *
+	 * 我们需要避免由于大量的GFP_NOFS分配导致shrinkers 一直返回-1而导致文件系统压缩器过度饱和.
+	 * 这导致了一个大的nr被建立起来,所以当一个可以做一些工作的shrink出现时,它会清空整个缓存，因为nr >>> freeable.
+	 * 这不利于在内存中维持工作集.
+	 *
+	 * 因此，只有在直接计算大的delta(增量)变化时,才允许shrink扫描整个缓存.
+	 *
+	 */
+
+	/* 如果delta < freeable / 4
+	 * 那么total_scan = total_scan 和 freeable/2的最小值
 	 */
 	if (delta < freeable / 4)
 		total_scan = min(total_scan, freeable / 2);
@@ -380,7 +408,12 @@ static unsigned long do_shrink_slab(struct shrink_control *shrinkctl,
 	 * Avoid risking looping forever due to too large nr value:
 	 * never try to free more than twice the estimate number of
 	 * freeable entries.
+	 *
+	 * 避免由于nr值过大而导致永远循环的风险:
+	 * 永远不要尝试释放超过可释放条目估计数量两倍的条目。
 	 */
+
+	/* 如果total_scan 比freeable的两倍还大,那么赋值为两倍 */
 	if (total_scan > freeable * 2)
 		total_scan = freeable * 2;
 
@@ -402,25 +435,38 @@ static unsigned long do_shrink_slab(struct shrink_control *shrinkctl,
 	 * than the total number of objects on slab (freeable), we must be
 	 * scanning at high prio and therefore should try to reclaim as much as
 	 * possible.
+	 *
+	 * 通常,我们不应该在一次扫描中扫描小于batch_size的对象,以避免过于频繁的shrinker调用,但如果slab的对象总数小于batch_size.并且我们的内存非常紧张,
+	 * 我们将尝试回收所有可用的对象,否则我们可能会导致分配失败,尽管有很多可回收对象分布在几个使用量小于batch_size的slab上.
+	 *
+	 * 我们通过查看要扫描的对象总数(total_scan)来检测“内存紧张”的情况.
+	 * 如果它大于slab上的对象总数(freeable),我们必须在高prio下扫描,因此应该尽可能多地回收.
 	 */
+	/* 如果total_scan >= batch_size或者说total_scan >= freeable */
 	while (total_scan >= batch_size ||
 	       total_scan >= freeable) {
 		unsigned long ret;
+		/* 计算出total_scan和batch_size的最小值 */
 		unsigned long nr_to_scan = min(batch_size, total_scan);
 
 		shrinkctl->nr_to_scan = nr_to_scan;
+		/* 去回收nr_to_scan个对象 */
 		ret = shrinker->scan_objects(shrinker, shrinkctl);
 		if (ret == SHRINK_STOP)
 			break;
+		/* freed += ret */
 		freed += ret;
 
 		count_vm_events(SLABS_SCANNED, nr_to_scan);
+		/* total_scan 减去nr_to_scan */
 		total_scan -= nr_to_scan;
+		/* scanned + nr_to_scan */
 		scanned += nr_to_scan;
 
 		cond_resched();
 	}
 
+	/* 最开始如果没有出错的情况下,next_deferred是等于total_scan的 */
 	if (next_deferred >= scanned)
 		next_deferred -= scanned;
 	else
@@ -429,7 +475,12 @@ static unsigned long do_shrink_slab(struct shrink_control *shrinkctl,
 	 * move the unused scan count back into the shrinker in a
 	 * manner that handles concurrent updates. If we exhausted the
 	 * scan, there is no need to do an update.
+	 *
+	 * 以处理并发更新的方式将未使用的扫描计数移回到shrinker中.
+	 * 如果我们用完了扫描，就没有必要进行更新。
 	 */
+
+	/* 让shrinker->nr_deferred[nid] + next_deferred,然后赋值给new_nr */
 	if (next_deferred > 0)
 		new_nr = atomic_long_add_return(next_deferred,
 						&shrinker->nr_deferred[nid]);
@@ -467,6 +518,24 @@ static unsigned long do_shrink_slab(struct shrink_control *shrinkctl,
  * cost to recreate an object relative to that of an LRU page.
  *
  * Returns the number of reclaimed slab objects.
+ *
+ * shrink_slab - shrink slab caches
+ * @gfp_mask: allocation context
+ * @nid: node whose slab caches to target
+ * @memcg: memory cgroup whose slab caches to target
+ * @nr_scanned: pressure numerator (压力分子?)
+ * @nr_eligible: pressure denominator (压力分母?)
+ *
+ * 调用shrink函数以老化可回收缓存.
+ *
+ * nid被传递给设置了SHRINKER_NUMA_WARE的回收者,不知道的回收程序将接收节点id 0.
+ *
+ * @memcg指定要作为目标的内存 cgroup.
+ * 如果不为NULL，则仅调用设置了SHRINKER_MEMCG_AWARE的shrinkers来扫描指定memory cgroup中的对象.
+ * 否则，只调用不知情的收缩器.
+ *
+ * @nr_scanned和@nr_eligible形成一个比率,指示应该扫描多少可用对象.例如,页面回收传递扫描的页面数量和它在@nid上考虑的LRU列表上的页面数量,
+ * 加上遇到映射页面时@nr_scanned中的偏差.shrink函数的->seeks设置进一步偏置了该比率,该设置指示相对于LRU页面重新创建对象的成本.
  */
 static unsigned long shrink_slab(gfp_t gfp_mask, int nid,
 				 struct mem_cgroup *memcg,
@@ -476,9 +545,10 @@ static unsigned long shrink_slab(gfp_t gfp_mask, int nid,
 	struct shrinker *shrinker;
 	unsigned long freed = 0;
 
+	/* 如果memcg设置了,但是memcg_kmem_enabled = 0或者说该memcg已经不是online的,那么返回0 */
 	if (memcg && (!memcg_kmem_enabled() || !mem_cgroup_online(memcg)))
 		return 0;
-
+	/* 如果nr_scanned == 0,那么将它设置成SWAP_CLUSTER_MAX */
 	if (nr_scanned == 0)
 		nr_scanned = SWAP_CLUSTER_MAX;
 
@@ -488,11 +558,15 @@ static unsigned long shrink_slab(gfp_t gfp_mask, int nid,
 		 * have nothing else to shrink and give up trying. By returning
 		 * 1 we keep it going and assume we'll be able to shrink next
 		 * time.
+		 *
+		 * 如果我们返回0,我们的调用者就会明白,我们没有其他事情可以shrink,放弃尝试.
+		 * 通过返回1,我们继续前进,并假设我们下次能够shrink
 		 */
 		freed = 1;
 		goto out;
 	}
 
+	/* 遍历shrinker_list列表,提取shrinker */
 	list_for_each_entry(shrinker, &shrinker_list, list) {
 		struct shrink_control sc = {
 			.gfp_mask = gfp_mask,
@@ -505,13 +579,28 @@ static unsigned long shrink_slab(gfp_t gfp_mask, int nid,
 		 * SHRINKER_MEMCG_AWARE flag and call all shrinkers
 		 * passing NULL for memcg.
 		 */
+
+		/* 如果内核内存计数被禁用，我们将忽略SHRINKER_MEMCG_AWARE标志,并调用所有为MEMCG传递NULL的shrink */
+
+		/* 如果memcg_kmem_enabled 并且shrinker->flags & SHRINKER_MEMCG_AWARE != memcg
+		 * 也就是说如果memcg为NULL但是shrinker->flags有SHRINKER_MEMCG_AWARE标志
+		 * 如果memcg不为NULL,那么shrink->flags没有SHRINKER_MEMCG_AWARE
+		 * 那么就下一位
+		 */
+		/* SHRINKER_MEMCG_AWARE表示感知内存控制组,所以如果有你就必须有memcg */
 		if (memcg_kmem_enabled() &&
 		    !!memcg != !!(shrinker->flags & SHRINKER_MEMCG_AWARE))
 			continue;
 
+		/* SHRINKER_NUMA_AWARE表示感知NUMA内存节点 */
+		/* 如果没有SHRINKER_NUMA_AWARE，那么nid就为0 */
 		if (!(shrinker->flags & SHRINKER_NUMA_AWARE))
 			sc.nid = 0;
 
+		/*
+		 * 以shrink_control和shrinker为参数进行对应slab cache收缩操作:主要是通过shrinker->scan_objects对该接口
+		 * 对应的slab cache中的shrinker->count_objects个空闲缓存进行扫描和释放操作
+		 */
 		freed += do_shrink_slab(&sc, shrinker, nr_scanned, nr_eligible);
 	}
 
@@ -3276,8 +3365,9 @@ static bool shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 		};
 		unsigned long node_lru_pages = 0;
 		struct mem_cgroup *memcg;
-
+		/* sc->nr_reclaimed 为回收的页面数 */
 		nr_reclaimed = sc->nr_reclaimed;
+		/* nr_scanned为扫描的不活跃页面数 */
 		nr_scanned = sc->nr_scanned;
 
 		memcg = mem_cgroup_iter(root, NULL, &reclaim);
@@ -3292,9 +3382,11 @@ static bool shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 				mem_cgroup_events(memcg, MEMCG_LOW, 1);
 			}
 
+			/* sc->nr_reclaimed表示回收的页面数 */
 			reclaimed = sc->nr_reclaimed;
+			/* sc->nr_scanned 表示扫描的不可活跃的页面数量 */
 			scanned = sc->nr_scanned;
-
+			/* 这里的lru_pages是在get_scan_count里面去计算的,表示计算出来的lru链表的page数量 */
 			shrink_node_memcg(pgdat, memcg, sc, &lru_pages);
 			node_lru_pages += lru_pages;
 
