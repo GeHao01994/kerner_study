@@ -37,6 +37,16 @@
  *
  * TODO: Make the window size depend on machine size, as we do for vmstat
  * thresholds. Currently we set it to 512 pages (2MB for 4KB pages).
+ *
+ * 窗口大小(vmpressure_win)是在我们尝试分析scanned/reclaimed比率之前scanned页数.
+ * 因此,该窗口被用作"low"级别的通知的可调的rate-limit,也用于平均medium/critical级别的比率.
+ * 使用较小的窗口大小可能会导致大量误报,但过大的窗口大小会延迟通知。
+ *
+ * 由于vmscan回收器逻辑处理的块是SWAP_CLUSTER_MAX的倍数,因此将其用于窗口大小也是有意义的.
+ *
+ * TODO:使窗口大小取决于机器大小,就像我们对vmstat阈值所做的那样.
+ *
+ * 目前,我们将其设置为512页(4KB页面为2MB).
  */
 static const unsigned long vmpressure_win = SWAP_CLUSTER_MAX * 16;
 
@@ -101,6 +111,14 @@ static const char * const vmpressure_str_levels[] = {
 
 static enum vmpressure_levels vmpressure_level(unsigned long pressure)
 {
+	/* 如果pressure 大于等于vmpressure_level_critical(95)
+	 * 也就是说明recaimed / scanned 要小于5%,说明回收的比较少
+	 * 返回VMPRESSURE_CRITICAL
+	 *
+	 * 如果pressure 大于等于vmpressure_level_med(60)
+	 * 也就是说明recaimed / scanned 要小于40%,说明回收的比较中等
+	 * 返回VMPRESSURE_MEDIUM
+	 */
 	if (pressure >= vmpressure_level_critical)
 		return VMPRESSURE_CRITICAL;
 	else if (pressure >= vmpressure_level_med)
@@ -118,7 +136,11 @@ static enum vmpressure_levels vmpressure_calc_level(unsigned long scanned,
 	 * reclaimed can be greater than scanned in cases
 	 * like THP, where the scanned is 1 and reclaimed
 	 * could be 512
+	 *
+	 * 在THP这样的情况下,回收的可以大于扫描的,其中扫描的是1,回收的可能是512
 	 */
+
+	/* 如果回收的大于扫描的不活跃页面数量,那么直接out */
 	if (reclaimed >= scanned)
 		goto out;
 	/*
@@ -127,7 +149,14 @@ static enum vmpressure_levels vmpressure_calc_level(unsigned long scanned,
 	 * time is in VM reclaimer's "ticks", i.e. number of pages
 	 * scanned. This makes it possible to set desired reaction time
 	 * and serves as a ratelimit.
+	 *
+	 * 我们计算在给定的时间段(窗口)内扫描的页面数与回收的页面数的比率(以百分比为单位).
+	 * 请注意,时间以vm 回收器的“刻度”为单位,例如扫描的页数.
+	 * 这使得可以设置所需的反应时间并用作速率限制。
 	 */
+
+	/* preesure = ((scanned + reclaimed) - (reclaimed * (scanned + reclaimed ) / scanned)) * 100 / (scanned + reclaimed) */
+	/* preesure = ( 1 - recaimed / scanned ) * 100 */
 	pressure = scale - (reclaimed * scale / scanned);
 	pressure = pressure * 100 / scale;
 
@@ -151,7 +180,10 @@ static bool vmpressure_event(struct vmpressure *vmpr,
 	bool signalled = false;
 
 	mutex_lock(&vmpr->events_lock);
-
+	/* 这是通过vmpressure_event来注册进来的 */
+	/* 看一下这篇博客 https://blog.csdn.net/ds1130071727/article/details/93474431
+	 * 想一下android的lmkd的实现
+	 */
 	list_for_each_entry(ev, &vmpr->events, node) {
 		if (level >= ev->level) {
 			eventfd_signal(ev->efd, 1);
@@ -179,21 +211,31 @@ static void vmpressure_work_fn(struct work_struct *work)
 	 * just after the old work returns, but then scanned might be zero
 	 * here. No need for any locks here since we don't care if
 	 * vmpr->reclaimed is in sync.
+	 *
+	 * 几个上下文可能正在调用vmpressure(),
+	 * 因此在旧的工作上下文清除计数器之前,可能会再次rescheduled.
+	 * 在这种情况下,我们将在旧工作返回后立即运行,但扫描的结果可能为零.
+	 * 这里不需要任何锁,因为我们不在乎vmpr->回收的是否同步.
 	 */
+
+	/* 获得scanned的数目 */
 	scanned = vmpr->tree_scanned;
 	if (!scanned) {
 		spin_unlock(&vmpr->sr_lock);
 		return;
 	}
 
+	/* 获得回收的数目 */
 	reclaimed = vmpr->tree_reclaimed;
 	vmpr->tree_scanned = 0;
 	vmpr->tree_reclaimed = 0;
 	spin_unlock(&vmpr->sr_lock);
 
+	/* 计算然后得到vmpreesure level */
 	level = vmpressure_calc_level(scanned, reclaimed);
 
 	do {
+		/* 发送event */
 		if (vmpressure_event(vmpr, level))
 			break;
 		/*
@@ -223,6 +265,22 @@ static void vmpressure_work_fn(struct work_struct *work)
  * only in-kernel users are notified.
  *
  * This function does not return any value.
+ *
+ * vmpressure（）- 通过scanned/reclaimed 比率计算内存压力
+ * @gfp：回收者的gfp mask
+ * @memcg: cgroup 内存控制处理
+ * @tree: 传统子树模式
+ * @scanned：已扫描的页数
+ * @reclaimed: 回收的页面数量
+ *
+ * 应从vmscan回收路径调用此函数,以考虑“瞬时”内存压力(scanned/reclaimed 比率).
+ * 然后对原始压力指数进行进一步细化,并随时间进行平均。
+ *
+ * 如果设置了@tree,则vmpressure处于传统的用户空间报告模式:@memcg被视为压力根,并且用户空间被通知整个子树的回收效率.
+ *
+ * 如果没有设置@tree,则会记录@memcg的回收效率,并且只通知内核中的用户.
+ *
+ * 此函数不返回任何值。
  */
 void vmpressure(gfp_t gfp, struct mem_cgroup *memcg, bool tree,
 		unsigned long scanned, unsigned long reclaimed)
@@ -239,6 +297,12 @@ void vmpressure(gfp_t gfp, struct mem_cgroup *memcg, bool tree,
 	 * is why we include only movable, highmem and FS/IO pages.
 	 * Indirect reclaim (kswapd) sets sc->gfp_mask to GFP_KERNEL, so
 	 * we account it too.
+	 *
+	 * 在这里,我们只想说明压力让用户空间能够帮助我们解决.
+	 * 例如,假设DMA zone处于压力之下;如果我们将这种压力通知给用户空间,那么这将是一种浪费,因为它将触发用户空间不必要的内存释放
+	 * (因为userland更有可能具有HIGHMEM/MOVABLE页面而不是DMA fallback).
+	 * 这就是为什么我们只包括movable、highmem和FS/IO页面.
+	 * 间接回收(kswapd)将sc->gfp_mask设置为gfp_KERNEL,因此我们也对其进行了说明.
 	 */
 	if (!(gfp & (__GFP_HIGHMEM | __GFP_MOVABLE | __GFP_IO | __GFP_FS)))
 		return;
@@ -250,38 +314,60 @@ void vmpressure(gfp_t gfp, struct mem_cgroup *memcg, bool tree,
 	 * report the critical pressure, yet. If the scanning priority
 	 * (scanning depth) goes too high (deep), we will be notified
 	 * through vmpressure_prio(). But so far, keep calm.
+	 *
+	 * 如果我们在没有扫描页面的情况下到达这里,那么表明回收者在当前扫描深度下找不到任何可shrinkable的LRU.
+	 * 但这并不意味着我们应该报告critical压力.
+	 * 如果扫描优先级(扫描深度)过高(deep),我们将通过vmpressure_prio()通知.
+	 * 但到目前为止，请保持冷静。
 	 */
 	if (!scanned)
 		return;
 
+	/* 如果tree = true */
 	if (tree) {
 		spin_lock(&vmpr->sr_lock);
+		/* 将vmpr->tree_scanned + scanned */
 		scanned = vmpr->tree_scanned += scanned;
+		/* 将vmpr->tree_reclaimed + reclaimed */
 		vmpr->tree_reclaimed += reclaimed;
 		spin_unlock(&vmpr->sr_lock);
-
+		/* 如果scanned < vmpressure_win,那么直接返回
+		 * vmpressure_win见上面的注释
+		 */
 		if (scanned < vmpressure_win)
 			return;
+		/* 这边就是调用vmpressure_init的vmpressure_work_fn */
 		schedule_work(&vmpr->work);
-	} else {
+	} else { /* 如果tree = false */
 		enum vmpressure_levels level;
 
-		/* For now, no users for root-level efficiency */
+		/* For now, no users for root-level efficiency
+		 * 目前，没有用户支持根级别的效率
+		 */
+
+		/* 如果memcg为NULL,或者memcg == root_mem_cgroup直接返回 */
 		if (!memcg || memcg == root_mem_cgroup)
 			return;
 
 		spin_lock(&vmpr->sr_lock);
+		/* 将vmpr->tree_scanned + scanned */
 		scanned = vmpr->scanned += scanned;
+		/* 将vmpr->tree_reclaimed + reclaimed */
 		reclaimed = vmpr->reclaimed += reclaimed;
+		/* 如果scanned < vmpressure_win,那么直接返回
+		 * vmpressure_win见上面的注释
+		 */
 		if (scanned < vmpressure_win) {
 			spin_unlock(&vmpr->sr_lock);
 			return;
 		}
+		/* vmpr->scanned 和 vmpr->reclaimed 初始化为0 */
 		vmpr->scanned = vmpr->reclaimed = 0;
 		spin_unlock(&vmpr->sr_lock);
-
+		/* 通过reclaimed和scanned 得到vmpressure的level */
 		level = vmpressure_calc_level(scanned, reclaimed);
 
+		/* 如果level > VMPRESSURE_LOW */
 		if (level > VMPRESSURE_LOW) {
 			/*
 			 * Let the socket buffer allocator know that
@@ -290,6 +376,10 @@ void vmpressure(gfp_t gfp, struct mem_cgroup *memcg, bool tree,
 			 * For hysteresis keep the pressure state
 			 * asserted for a second in which subsequent
 			 * pressure events can occur.
+			 *
+			 * 让套接字缓冲区分配器知道我们在回收LRU页面时遇到问题.
+			 *
+			 * 对于滞后现象,将压力状态保持一秒钟,在这一秒钟内可能会发生后续的压力事件.
 			 */
 			memcg->socket_pressure = jiffies + HZ;
 		}
