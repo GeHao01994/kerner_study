@@ -3281,6 +3281,12 @@ static bool in_reclaim_compaction(struct scan_control *sc)
  * calls try_to_compact_zone() that it will have enough free pages to succeed.
  * It will give up earlier than that if there is difficulty reclaiming pages.
  */
+
+
+/* 此函数的判断逻辑是如果已经回收的页面数量sc->nr_reclaimed 小于(2 << sc->order)个页面,
+ * 且不活跃页面总数大于(2 << sc->order),那么需要继续回收页面.compaction_suitable()函数也会判断当前zone的水位,
+ * 如果水位超过WMARK_LOW，那么会停止扫描页面.
+ */
 static inline bool should_continue_reclaim(struct pglist_data *pgdat,
 					unsigned long nr_reclaimed,
 					unsigned long nr_scanned,
@@ -3409,6 +3415,10 @@ static bool shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 			 * nr_to_reclaim pages to be reclaimed and it will
 			 * retry with decreasing priority if one round over the
 			 * whole hierarchy is not sufficient.
+			 *
+			 * 直接回收和kswapd必须扫描所有内存cgroup,以实现节点的整体扫描目标.
+			 *
+			 * 另一方面,限制回收只关心要回收的nr_to_reclaim页面,如果在整个层次结构上进行一轮循环不够,它将以递减的优先级重试。
 			 */
 			if (!global_reclaim(sc) &&
 					sc->nr_reclaimed >= sc->nr_to_reclaim) {
@@ -3420,12 +3430,15 @@ static bool shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 		/*
 		 * Shrink the slab caches in the same proportion that
 		 * the eligible LRU pages were scanned.
+		 *
+		 * 按照扫描合格LRU页面的相同比例回收slab cache
 		 */
 		if (global_reclaim(sc))
 			shrink_slab(sc->gfp_mask, pgdat->node_id, NULL,
 				    sc->nr_scanned - nr_scanned,
 				    node_lru_pages);
 
+		/* 如果有reclaim_state,那么sc->nr_reclaimed += reclaim_state->reclaimed_slab之后置0 */
 		if (reclaim_state) {
 			sc->nr_reclaimed += reclaim_state->reclaimed_slab;
 			reclaim_state->reclaimed_slab = 0;
@@ -3438,7 +3451,12 @@ static bool shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 
 		if (sc->nr_reclaimed - nr_reclaimed)
 			reclaimable = true;
-
+		/* 判断是否再次此zone进行内存回收
+		 * 继续对此zone进行内存回收有两种情况:
+		 * 1. 没有回收到比目标order值多一倍的数量页框,并且非活动lru链表中的页框数量 > 目标order多一倍的页
+		 * 2. 此zone不满足内存压缩的条件,则继续对此zone进行内存回收
+		 * 而当本次内存回收完全没有回收到页框时则返回,这里大概意思就是想回收比order更多的页框
+		 */
 	} while (should_continue_reclaim(pgdat, sc->nr_reclaimed - nr_reclaimed,
 					 sc->nr_scanned - nr_scanned, sc));
 
