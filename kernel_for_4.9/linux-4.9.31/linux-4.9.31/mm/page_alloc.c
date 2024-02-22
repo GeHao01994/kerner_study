@@ -679,6 +679,7 @@ static int __init debug_guardpage_minorder_setup(char *buf)
 }
 early_param("debug_guardpage_minorder", debug_guardpage_minorder_setup);
 
+/* 这里需要打开CONFIG_DEBUG_PAGEALLOC才能生效 */
 static inline bool set_page_guard(struct zone *zone, struct page *page,
 				unsigned int order, int migratetype)
 {
@@ -690,13 +691,17 @@ static inline bool set_page_guard(struct zone *zone, struct page *page,
 	if (order >= debug_guardpage_minorder())
 		return false;
 
+	/* 找到该page的page_ext */
 	page_ext = lookup_page_ext(page);
+	/* 如果page_ext为空,那么返回false */
 	if (unlikely(!page_ext))
 		return false;
 
+	/* 将对应的page_ext->flags的bit PAGE_EXT_DEBUG_GUARD置位 */
 	__set_bit(PAGE_EXT_DEBUG_GUARD, &page_ext->flags);
-
+	/* 初始化对应的page->lru */
 	INIT_LIST_HEAD(&page->lru);
+	/* #define set_page_private(page, v)	((page)->private = (v)) */
 	set_page_private(page, order);
 	/* Guard pages are not available for any usage */
 	__mod_zone_freepage_state(zone, -(1 << order), migratetype);
@@ -1673,17 +1678,34 @@ void __init init_cma_reserved_pageblock(struct page *page)
  * This behavior is a critical factor in sglist merging's success.
  *
  * -- nyc
+ *
+ * 这里的细分order对IO子系统至关重要.
+ * 请不要在没有充分理由和回归测试的情况下更改此order.
+ * 具体来说,当大内存块被细分时,较小内存块的order被交付取决于它们在该函数中的细分的order.
+ * 根据经验测试,这是影响页面交付到IO子系统的order的主要因素,它也合理的考虑伙伴系统由大块内存分割成几块小内存
+ * 这也是合理的.这种行为是sglist合并成功的关键因素。
+ */
+
+/* expand函数就是实现“切蛋糕”的功能.
+ * 这里参数high就是current_order,通常current_order要比需求的order要大.
+ * 每比较一次,area减1,相当于退了一级order,最后通过list_add把剩下的内存块
+ * 添加到低一级的空闲链表中
  */
 static inline void expand(struct zone *zone, struct page *page,
 	int low, int high, struct free_area *area,
 	int migratetype)
 {
+	/* 算出大小，high表示高的oder,low表示低的order,也就是这里就是把高的order的切蛋糕切到低的order */
 	unsigned long size = 1 << high;
 
 	while (high > low) {
+		/* 将area --,目前area = &(zone->free_area[high]),也就是说取high--的area */
 		area--;
+		/* 把high -- */
 		high--;
+		/* 把size右移一位 */
 		size >>= 1;
+		/* 判断它是不是bad_range的,如果是,那就报个错误吧 */
 		VM_BUG_ON_PAGE(bad_range(zone, &page[size]), &page[size]);
 
 		/*
@@ -1691,12 +1713,22 @@ static inline void expand(struct zone *zone, struct page *page,
 		 * merge back to allocator when buddy will be freed.
 		 * Corresponding page table entries will not be touched,
 		 * pages will stay not present in virtual address space
+		 *
+		 * 标记为保护页(或page),这将允许当它的伙伴被freed时合并回分配器。
+		 * 相应的页面表条目将不会被接触,页面将保持不存在于虚拟地址空间中
 		 */
 		if (set_page_guard(zone, &page[size], high, migratetype))
 			continue;
-
+		/* 将切割下来的page的lru添加到下一层的free_list里面去 */
 		list_add(&page[size].lru, &area->free_list[migratetype]);
+		/* area->nr_free ++ */
 		area->nr_free++;
+		/*  static inline void set_page_order(struct page *page, unsigned int order)
+		 * {
+		 *	set_page_private(page, order);
+		 *	__SetPageBuddy(page);
+		 * }
+		 */
 		set_page_order(&page[size], high);
 	}
 }
@@ -1833,6 +1865,15 @@ static void prep_new_page(struct page *page, unsigned int order, gfp_t gfp_flags
  * Go through the free lists for the given migratetype and remove
  * the smallest available page from the freelists
  */
+/* 在__rmqueue_smallest函数中,首先从order开始查找zone中空闲链表.
+ * 如果zone的当前order对应的空闲区free_area中相应migratetype类型的链表里
+ * 没有空闲对象,那么就会查找下一级order.
+ *
+ * 为什么会这样？因为在系统启动时,空闲页面会尽可能地都分配到MAX_ORDER-1的链表中,这个可以在系统刚起来之后,
+ * 通过“cat /proc/pagetypeinfo”命令看出端倪.
+ * 当找到某一个order的空闲区中对应的migratetype类型的空闲链表中有空闲内存块时,就会从中把一个内存块摘下来,然后调用expand函数来“切蛋糕”.
+ * 因为通常摘下来的内存块要比需要的内存大,切完之后需要把剩下的内存块重新放回到伙伴系统中.
+ */
 static inline
 struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 						int migratetype)
@@ -1844,14 +1885,29 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	/* Find a page of the appropriate size in the preferred list */
 	for (current_order = order; current_order < MAX_ORDER; ++current_order) {
 		area = &(zone->free_area[current_order]);
+		/* 在这个order的free_list中的migratetype里面去找,看有没有page */
 		page = list_first_entry_or_null(&area->free_list[migratetype],
 							struct page, lru);
+		/* 如果没有page,那么就到order + 1中去找 */
 		if (!page)
 			continue;
+		/* 把该page从lru里面删除 */
 		list_del(&page->lru);
+		/* static inline void rmv_page_order(struct page *page)
+		 * {
+		 *	__ClearPageBuddy(page);
+		 *	set_page_private(page, 0);
+		 * }
+		 */
 		rmv_page_order(page);
+		/* 将本area的nr_free - 1 */
 		area->nr_free--;
 		expand(zone, page, order, current_order, area, migratetype);
+		/*  static inline void set_pcppage_migratetype(struct page *page, int migratetype)
+		 * {
+		 *	page->index = migratetype;
+		 * }
+		 */
 		set_pcppage_migratetype(page, migratetype);
 		return page;
 	}
@@ -1891,6 +1947,14 @@ static inline struct page *__rmqueue_cma_fallback(struct zone *zone,
  * Move the free pages in a range to the free lists of the requested type.
  * Note that start_page and end_pages are not aligned on a pageblock
  * boundary. If alignment is required, use move_freepages_block()
+ *
+ * 将范围内的free pages移动到请求类型的free lists里面去.
+ * 请注意,start_page和end_page未在页面块边界上对齐.
+ * 如果需要对齐，请使用move_freepages_block（）
+ */
+/*
+ * 它将一段页框范围(不需要pageblock对齐)的空闲页框从原来的迁移类型移动到新的迁移类型.
+ * 移动的总空闲页框数保存作为函数返回值.
  */
 int move_freepages(struct zone *zone,
 			  struct page *start_page, struct page *end_page,
@@ -1907,31 +1971,45 @@ int move_freepages(struct zone *zone,
 	 * anyway as we check zone boundaries in move_freepages_block().
 	 * Remove at a later date when no bug reports exist related to
 	 * grouping pages by mobility
+	 *
+	 * 设置CONFIG_HOLES_IN_ZONE时,在此上下文中调用page_zone是不安全的.
+	 * 无论如何,当我们在move_freepages_block()中检查zone边界时,这种bug检查可能是多余的.
+	 * 以后如果不存在与按移动性分组页面相关的bug报告，请删除
 	 */
+
+	/* 如果start_page所在的zone和end_page所在的zone不一样,那么报个BUG */
 	VM_BUG_ON(page_zone(start_page) != page_zone(end_page));
 #endif
 
+	/* 对page的操作开始了,从start_page到end_page */
 	for (page = start_page; page <= end_page;) {
 		/* Make sure we are not inadvertently changing nodes */
+		/* 确保我们不会无意中更改节点 */
 		VM_BUG_ON_PAGE(page_to_nid(page) != zone_to_nid(zone), page);
 
+		/* pfn_valid,也就是说是黑洞,那么跳过该page */
 		if (!pfn_valid_within(page_to_pfn(page))) {
 			page++;
 			continue;
 		}
 
+		/* 如果page没有PG_buddy,也跳过 */
 		if (!PageBuddy(page)) {
 			page++;
 			continue;
 		}
-
+		/* 得到该page的order */
 		order = page_order(page);
+		/* 把它添加到相关的zone->free_area的新的migratetype里面去 */
 		list_move(&page->lru,
 			  &zone->free_area[order].free_list[migratetype]);
+		/* 然后移动下一位 */
 		page += 1 << order;
+		/* pages_moved(已经移动的pages) + 1 << order */
 		pages_moved += 1 << order;
 	}
 
+	/* 返回pages_moved */
 	return pages_moved;
 }
 
@@ -1940,27 +2018,42 @@ int move_freepages_block(struct zone *zone, struct page *page,
 {
 	unsigned long start_pfn, end_pfn;
 	struct page *start_page, *end_page;
-
+	/* 获得这个起始页帧 */
 	start_pfn = page_to_pfn(page);
+	/* 起始页帧按pageblock对齐 */
 	start_pfn = start_pfn & ~(pageblock_nr_pages-1);
+	/* 获得对齐之后的struct page */
 	start_page = pfn_to_page(start_pfn);
+	/* 获得该pageblock的end_page */
 	end_page = start_page + pageblock_nr_pages - 1;
+	/* 获得结束页帧 */
 	end_pfn = start_pfn + pageblock_nr_pages - 1;
 
 	/* Do not cross zone boundaries */
+	/*  static inline bool zone_spans_pfn(const struct zone *zone, unsigned long pfn)
+	 * {
+	 *	return zone->zone_start_pfn <= pfn && pfn < zone_end_pfn(zone);
+	 * }
+	 */
+	/* 如果start_pfn没有在这个zone里面,那么start_page = page,
+	 * 可能的是按边界对齐的它没有在这个zone里面,但是它自己在这个zone里面
+	 */
 	if (!zone_spans_pfn(zone, start_pfn))
 		start_page = page;
+	/* 如果end_pfn没有在这个zone里面,返回0 */
 	if (!zone_spans_pfn(zone, end_pfn))
 		return 0;
 
+	/* 将这个pageblock内的free page从旧迁移类型移动到新的类型链表free_list中，order不变，正在使用的页会被跳过 */
 	return move_freepages(zone, start_page, end_page, migratetype);
 }
 
 static void change_pageblock_range(struct page *pageblock_page,
 					int start_order, int migratetype)
 {
+	/* 算他有多少pageblocks */
 	int nr_pageblocks = 1 << (start_order - pageblock_order);
-
+	/* 通过pageblocks来划分 最后page变成了剩余的为成为pageblock的块部分 */
 	while (nr_pageblocks--) {
 		set_pageblock_migratetype(pageblock_page, migratetype);
 		pageblock_page += pageblock_nr_pages;
@@ -1978,6 +2071,13 @@ static void change_pageblock_range(struct page *pageblock_page,
  * as fragmentation caused by those allocations polluting movable pageblocks
  * is worse than movable allocations stealing from unmovable and reclaimable
  * pageblocks.
+ *
+ * 当我们在分配过程中falling back到另外一个migrateype时,
+ * 请尝试从相同的页面块中窃取额外的free pages以满足进一步的分配,而不是污染多个页面块.
+ *
+ * 如果我们正在窃取一个相对较大的buddy页面,那么页面块中可能会有更多的空闲页面,所以请尝试将它们全部窃取.
+ * 对于reclaimable和unmovable分配,无论页面大小,我们都会进行窃取,
+ * 因为这些分配污染可移动页面块所造成的碎片比从不可回收和可回收页面块窃取可移动分配更糟糕.
  */
 static bool can_steal_fallback(unsigned int order, int start_mt)
 {
@@ -1987,10 +2087,20 @@ static bool can_steal_fallback(unsigned int order, int start_mt)
 	 * we can actually steal whole pageblock if this condition met,
 	 * but, below check doesn't guarantee it and that is just heuristic
 	 * so could be changed anytime.
+	 *
+	 * 虽然在下一次检查中有轻松的order检查,但离开本次order检查是有意的.
+	 * 原因是,如果满足这个条件,我们实际上可以窃取整个页面块,
+	 * 但是,下面的检查并不能保证这一点,这只是启发式的
+	 * 因此可以随时更改。
 	 */
+	/* 如果order >= pageblock_order,那么直接返回true吧,整个pageblock都给你多好啊 */
 	if (order >= pageblock_order)
 		return true;
 
+	/* 如果order >= pageblock_order / 2 或者 start_mt == MIGRATE_RECLAIMABLE 或者
+	 * start_mt == MIGRATE_UNMOVABLE 或者page_group_by_mobility_disabled
+	 * 那么也返回true
+	 */
 	if (order >= pageblock_order / 2 ||
 		start_mt == MIGRATE_RECLAIMABLE ||
 		start_mt == MIGRATE_UNMOVABLE ||
@@ -2006,22 +2116,35 @@ static bool can_steal_fallback(unsigned int order, int start_mt)
  * pageblock and check whether half of pages are moved or not. If half of
  * pages are moved, we can change migratetype of pageblock and permanently
  * use it's pages as requested migratetype in the future.
+ *
+ * 此功能实现实际的盗窃行为.
+ * 如果order足够大,我们可以偷走整个页面块.
+ * 如果没有,我们首先移动这个pageblock里面的freepages,并检查是否移动了一半的页面.
+ * 如果移动了一半的页面,我们可以更改页面块的migrateype,并在未来永久当做请求的migratetype
+ * 永久使用它
  */
 static void steal_suitable_fallback(struct zone *zone, struct page *page,
 							  int start_type)
 {
+	/* 通过page,拿到自己的order */
 	unsigned int current_order = page_order(page);
 	int pages;
 
 	/* Take ownership for orders >= pageblock_order */
+	/* 如果current_order >= pageblock_order
+	 */
 	if (current_order >= pageblock_order) {
+		/* 因为它已经大于pageblock_order了,那么就把它切成剩余的pageblock部分 */
 		change_pageblock_range(page, current_order, start_type);
 		return;
 	}
 
+	/* move_freepages_block函数负责对一个给定page,按照pageblock size对齐,移动到新的迁移类型的free_list中,order不变 */
 	pages = move_freepages_block(zone, page, start_type);
 
-	/* Claim the whole block if over half of it is free */
+	/* Claim the whole block if over half of it is free
+	 * 如果超过一半的块是free的,则声明整个块
+	 */
 	if (pages >= (1 << (pageblock_order-1)) ||
 			page_group_by_mobility_disabled)
 		set_pageblock_migratetype(page, start_type);
@@ -2032,28 +2155,48 @@ static void steal_suitable_fallback(struct zone *zone, struct page *page,
  * If only_stealable is true, this function returns fallback_mt only if
  * we can steal other freepages all together. This would help to reduce
  * fragmentation due to mixed migratetype pages in one pageblock.
+ *
+ * 检查是否有一个对于请求order合适的后备freepage.
+ * 如果only_steallable为true,只要当我们能窃取其他的freepages时,这个函数就返回fallback_mt,
+ * 这将有助于减少因为在一个页面块中混入migrateype页面而导致的碎片。
  */
 int find_suitable_fallback(struct free_area *area, unsigned int order,
 			int migratetype, bool only_stealable, bool *can_steal)
 {
 	int i;
 	int fallback_mt;
-
+	/* 如果当前area没有空闲的了,那么返回-1 */
 	if (area->nr_free == 0)
 		return -1;
 
+	/* can_steal 赋值为false */
 	*can_steal = false;
+	/* 这里就是对fallbacks 一个一个来借
+	 * static int fallbacks[MIGRATE_TYPES][4] = {
+	 *	[MIGRATE_UNMOVABLE]   = { MIGRATE_RECLAIMABLE, MIGRATE_MOVABLE,   MIGRATE_TYPES },
+	 *	[MIGRATE_RECLAIMABLE] = { MIGRATE_UNMOVABLE,   MIGRATE_MOVABLE,   MIGRATE_TYPES },
+	 *	[MIGRATE_MOVABLE]     = { MIGRATE_RECLAIMABLE, MIGRATE_UNMOVABLE, MIGRATE_TYPES },
+	 * #ifdef CONFIG_CMA
+	 *	[MIGRATE_CMA]         = { MIGRATE_TYPES }, Never used
+	 * #endif
+	 * #ifdef CONFIG_MEMORY_ISOLATION
+	 *	[MIGRATE_ISOLATE]     = { MIGRATE_TYPES }, Never used
+	 * #endif
+	 * };
+	 */
 	for (i = 0;; i++) {
+		/* 这里就是按顺序去借 */
 		fallback_mt = fallbacks[migratetype][i];
+		/* 如果fallback_mt == MIGRATE_TYPES,说明无人可借给你了 */
 		if (fallback_mt == MIGRATE_TYPES)
 			break;
-
+		/* 如果说对应的free_list里面是空的,那么就下一个吧 */
 		if (list_empty(&area->free_list[fallback_mt]))
 			continue;
-
+		/* 这边会去检查,因为要考虑到后面的碎片化 */
 		if (can_steal_fallback(order, migratetype))
 			*can_steal = true;
-
+		/* only_stealable 表示只要我们能够窃取,就返回,不管can_steal了 */
 		if (!only_stealable)
 			return fallback_mt;
 
@@ -2169,26 +2312,42 @@ __rmqueue_fallback(struct zone *zone, unsigned int order, int start_migratetype)
 	int fallback_mt;
 	bool can_steal;
 
-	/* Find the largest possible block of pages in the other list */
+	/* Find the largest possible block of pages in the other list
+	 * 在其他列表中查找尽可能大的页面块
+	 */
+
+	/* 从MAX_ORDER - 1 到 order开始 */
 	for (current_order = MAX_ORDER-1;
 				current_order >= order && current_order <= MAX_ORDER-1;
 				--current_order) {
+		/* 得到当前order的zone的free_area */
 		area = &(zone->free_area[current_order]);
+		/* 在fallbacks找到合适的migratetype去要 */
 		fallback_mt = find_suitable_fallback(area, current_order,
 				start_migratetype, false, &can_steal);
+		/* 如果fallback_mt == -1,说明在此order下没有找到合适的,那么就降一个order再去分 */
 		if (fallback_mt == -1)
 			continue;
 
+		/* 找到这个area->free_list里面的第一个page */
 		page = list_first_entry(&area->free_list[fallback_mt],
 						struct page, lru);
+		/* can_steal主要是在find_suitable_fallback里面考虑到碎片化的情况 */
 		if (can_steal)
 			steal_suitable_fallback(zone, page, start_migratetype);
 
 		/* Remove the page from the freelists */
+		/* area->nr_free--,然后再把该page从lru里面删除掉 */
 		area->nr_free--;
 		list_del(&page->lru);
+		/*  static inline void rmv_page_order(struct page *page)
+		 * {
+		 *	__ClearPageBuddy(page);
+		 *	set_page_private(page, 0);
+		 * }
+		 */
 		rmv_page_order(page);
-
+		/* 又开始切这块蛋糕了 */
 		expand(zone, page, order, current_order, area,
 					start_migratetype);
 		/*
@@ -2197,6 +2356,16 @@ __rmqueue_fallback(struct zone *zone, unsigned int order, int start_migratetype)
 		 * find_suitable_fallback(). This is OK as long as it does not
 		 * differ for MIGRATE_CMA pageblocks. Those can be used as
 		 * fallback only via special __rmqueue_cma_fallback() function
+		 *
+		 * pcppage_migratetype可能与pageblock的migratetype不同.
+		 * 具体取决于find_suitable_fallback()中的决定.
+		 * 只要MIGRATE_CMA页面块没有差异，这就可以了.
+		 * 这些可以用作仅通过特殊的__rmqueue_cma_fallback函数作为fallback
+		 */
+		/*  static inline void set_pcppage_migratetype(struct page *page, int migratetype)
+		 * {
+		 *	page->index = migratetype;
+		 * }
 		 */
 		set_pcppage_migratetype(page, start_migratetype);
 
@@ -2212,17 +2381,32 @@ __rmqueue_fallback(struct zone *zone, unsigned int order, int start_migratetype)
 /*
  * Do the hard work of removing an element from the buddy allocator.
  * Call me with the zone->lock already held.
+ *
+ * 完成从伙伴系统中删除一个元素的艰巨工作.
+ * 在zone->lock的held下调用我
  */
 static struct page *__rmqueue(struct zone *zone, unsigned int order,
 				int migratetype)
 {
 	struct page *page;
-
+	/* 找到相关order的page */
 	page = __rmqueue_smallest(zone, order, migratetype);
+	/* 如果没有,且切蛋糕也出不来 */
 	if (unlikely(!page)) {
+		/* 如果migrate == MIGRATE_MOVABLE
+		 * 那我们可以用CMA作为fallback啊
+		 *
+		 * 去cma里面要page,
+		 * static struct page *__rmqueue_cma_fallback(struct zone *zone,
+		 *		unsigned int order)
+		 * {
+		 *	return __rmqueue_smallest(zone, order, MIGRATE_CMA);
+		 * }
+		 */
 		if (migratetype == MIGRATE_MOVABLE)
 			page = __rmqueue_cma_fallback(zone, order);
 
+		/* 如果page还为NULL,那么找其他的fallback开始借 */
 		if (!page)
 			page = __rmqueue_fallback(zone, order, migratetype);
 	}
@@ -2235,6 +2419,10 @@ static struct page *__rmqueue(struct zone *zone, unsigned int order,
  * Obtain a specified number of elements from the buddy allocator, all under
  * a single hold of the lock, for efficiency.  Add them to the supplied list.
  * Returns the number of new pages which were placed at *list.
+ *
+ * 为了提高效率,从伙伴分配器获得指定数量的元素,所有元素都在锁的一次持有下.
+ * 将它们添加到提供的列表中.
+ * 返回放置在 *list中的新页数.
  */
 static int rmqueue_bulk(struct zone *zone, unsigned int order,
 			unsigned long count, struct list_head *list,
@@ -2243,8 +2431,11 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
 	int i, alloced = 0;
 
 	spin_lock(&zone->lock);
+	/* 这里从0开始,到如果是pcp,那么count就等于pcp->batch结束 */
 	for (i = 0; i < count; ++i) {
+		/* 去找到或者借相关的zone的order的页面 */
 		struct page *page = __rmqueue(zone, order, migratetype);
+		/* 如果page为NULL,那么直接break */
 		if (unlikely(page == NULL))
 			break;
 
@@ -2259,13 +2450,23 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
 		 * some conditions. This is useful for IO devices that can
 		 * merge IO requests if the physical pages are ordered
 		 * properly.
+		 *
+		 * expand()返回的拆分buddy页面在物理页面order在此次被接受.
+		 * 页面被添加到呼叫者和列表中,然后列表头向前移动.
+		 * 从调用者的角度来看,在某些情况下,相关的链表是按如果页面数量排序的,
+		 * 如果物理页面的顺序正确,这对于可以合并IO请求的IO设备非常有用.
 		 */
+
+		/* cold为0,那么就把page加入链表的头部 */
 		if (likely(!cold))
 			list_add(&page->lru, list);
-		else
+		else	/* 如果cold为1,那么就把它加入到链表的尾部 */
 			list_add_tail(&page->lru, list);
+		/* 让list指向最后一个page->lru */
 		list = &page->lru;
+		/* alloced ++ */
 		alloced++;
+		/* 如果是CMA,那么NR_FREE_CMA_PAGES - 1<< order */
 		if (is_migrate_cma(get_pcppage_migratetype(page)))
 			__mod_zone_page_state(zone, NR_FREE_CMA_PAGES,
 					      -(1 << order));
@@ -2276,6 +2477,9 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
 	 * to check_pcp_refill failing so adjust NR_FREE_PAGES based
 	 * on i. Do not confuse with 'alloced' which is the number of
 	 * pages added to the pcp list.
+	 *
+	 * 即使由于check_pcp_refill失败而导致某些泄漏,也会从好友列表中删除i个页面,因此请根据i调整NR_FREE_pages.
+	 * 不要与添加到pcp列表的页面数“allocated”混淆.
 	 */
 	__mod_zone_page_state(zone, NR_FREE_PAGES, -(i << order));
 	spin_unlock(&zone->lock);
@@ -2654,6 +2858,11 @@ static inline void zone_statistics(struct zone *preferred_zone, struct zone *z,
 /*
  * Allocate a page from the given zone. Use pcplists for order-0 allocations.
  */
+
+/* 这里根据order数值兵分两路: 一路是order等于0的情况,也就是分配一个物理页面时，
+ * 从zone->per_cpu_pageset列表中分配;
+ * 另一路order大于0的情况,就从伙伴系统中分配.
+ */
 static inline
 struct page *buffered_rmqueue(struct zone *preferred_zone,
 			struct zone *zone, unsigned int order,
@@ -2662,6 +2871,7 @@ struct page *buffered_rmqueue(struct zone *preferred_zone,
 {
 	unsigned long flags;
 	struct page *page;
+	/* __GFP_COLD表示调用者不希望在不久的将来被使用。在可能的情况下，将返回一个缓存冷页面 */
 	bool cold = ((gfp_flags & __GFP_COLD) != 0);
 
 	if (likely(order == 0)) {
@@ -2670,8 +2880,11 @@ struct page *buffered_rmqueue(struct zone *preferred_zone,
 
 		local_irq_save(flags);
 		do {
+			/* 拿到这个CPU的pcp指针 */
 			pcp = &this_cpu_ptr(zone->pageset)->pcp;
+			/* 拿到这个pcp里面对应的migratetype的list */
 			list = &pcp->lists[migratetype];
+			/* 如果是空的 */
 			if (list_empty(list)) {
 				pcp->count += rmqueue_bulk(zone, 0,
 						pcp->batch, list,
@@ -3106,6 +3319,7 @@ get_page_from_freelist(gfp_t gfp_mask, unsigned int order, int alloc_flags,
 				/* scanned but unreclaimable */
 				continue;
 			default:
+				/* 如果说回收已经把水位拉回来了,那么我们就可以试试在这个zone里面去分配页面 */
 				/* did we reclaim enough */
 				if (zone_watermark_ok(zone, order, mark,
 						ac_classzone_idx(ac), alloc_flags))
