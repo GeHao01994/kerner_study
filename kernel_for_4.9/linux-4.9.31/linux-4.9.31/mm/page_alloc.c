@@ -1738,10 +1738,16 @@ static void check_new_page_bad(struct page *page)
 	const char *bad_reason = NULL;
 	unsigned long bad_flags = 0;
 
+	/* 新分配的页面struct page的_mapcount计数应该为 -1,因为
+	 * -1 表示没有pte映射到页面中
+	 */
 	if (unlikely(atomic_read(&page->_mapcount) != -1))
 		bad_reason = "nonzero mapcount";
-	if (unlikely(page->mapping != NULL))
+	if (unlikely(page->mapping != NULL)) /* 这时page->mapping应该为NULL*/
 		bad_reason = "non-NULL mapping";
+	/* 判断这是page的refcount是否为0.
+	 * 注意alloc_pages分配的page的count应该为1,但是这里是0,因为这个函数之后还调用set_page_refcounted()把refcount设置为1
+	 */
 	if (unlikely(page_ref_count(page) != 0))
 		bad_reason = "nonzero _count";
 	if (unlikely(page->flags & __PG_HWPOISON)) {
@@ -1751,6 +1757,8 @@ static void check_new_page_bad(struct page *page)
 		page_mapcount_reset(page); /* remove PageBuddy */
 		return;
 	}
+	/* 检查PAGE_FLAGS_CHECK_AT_PREP标志位,这个flag在free_page时已经清除了,而这时该flag被设置,说明分配过程中有问题
+	 */
 	if (unlikely(page->flags & PAGE_FLAGS_CHECK_AT_PREP)) {
 		bad_reason = "PAGE_FLAGS_CHECK_AT_PREP flag set";
 		bad_flags = PAGE_FLAGS_CHECK_AT_PREP;
