@@ -2832,23 +2832,40 @@ int __isolate_free_page(struct page *page, unsigned int order)
  * When __GFP_OTHER_NODE is set assume the node of the preferred
  * zone is the local node. This is useful for daemons who allocate
  * memory on behalf of other processes.
+ *
+ * 更新NUMA 命中/未命中 统计信息
+ * 必须在禁用中断的情况下调用.
+ * 当设置了__GFP_OTHER_NODE时,假设首选区域的节点是本地节点.
+ * 这对于代表其他进程分配内存的守护进程非常有用。
  */
 static inline void zone_statistics(struct zone *preferred_zone, struct zone *z,
 								gfp_t flags)
 {
 #ifdef CONFIG_NUMA
+	/* 得到本地节点的node_id */
 	int local_nid = numa_node_id();
 	enum zone_stat_item local_stat = NUMA_LOCAL;
 
+	/* 如果flags & __GFP_OTHER_NODE
+	 *
+	 * local_stat = NUMA_OTHER
+	 * local_nid = preferred_zone->node
+	 */
 	if (unlikely(flags & __GFP_OTHER_NODE)) {
 		local_stat = NUMA_OTHER;
 		local_nid = preferred_zone->node;
 	}
 
+	/* 如果zone的node和本次node一样
+	 * 那么zone的NUMA_HIT local_stat都计数
+	 */
 	if (z->node == local_nid) {
 		__inc_zone_state(z, NUMA_HIT);
 		__inc_zone_state(z, local_stat);
 	} else {
+		/* 如果zone的node和本次node不一致
+		 * 那么zone的miss以及preferred_zone的NUMA_FOREIGN计数 ++
+		 */
 		__inc_zone_state(z, NUMA_MISS);
 		__inc_zone_state(preferred_zone, NUMA_FOREIGN);
 	}
@@ -2886,19 +2903,22 @@ struct page *buffered_rmqueue(struct zone *preferred_zone,
 			list = &pcp->lists[migratetype];
 			/* 如果是空的 */
 			if (list_empty(list)) {
+				/* 让pcp->count加上我们刚刚分配到的page */
 				pcp->count += rmqueue_bulk(zone, 0,
 						pcp->batch, list,
 						migratetype, cold);
+				/* 如果list还是空的,那么可以报fail了 */
 				if (unlikely(list_empty(list)))
 					goto failed;
 			}
-
+			/* 如果cold为true,那么就从尾巴上拿一个出来 */
 			if (cold)
 				page = list_last_entry(list, struct page, lru);
-			else
+			else	/* 否则就从头部拿一个出来 */
 				page = list_first_entry(list, struct page, lru);
-
+			/* 然后把它从list里面删除 */
 			list_del(&page->lru);
+			/* 让pcp的count -- */
 			pcp->count--;
 
 		} while (check_new_pcp(page));
@@ -2906,27 +2926,34 @@ struct page *buffered_rmqueue(struct zone *preferred_zone,
 		/*
 		 * We most definitely don't want callers attempting to
 		 * allocate greater than order-1 page units with __GFP_NOFAIL.
+		 *
+		 * 我们绝对不希望调用者试图用__GFP_NOFAIL分配超过order为大于1的页面单元
 		 */
 		WARN_ON_ONCE((gfp_flags & __GFP_NOFAIL) && (order > 1));
 		spin_lock_irqsave(&zone->lock, flags);
 
 		do {
 			page = NULL;
+			/* ALLOC_HARDER 宏定义表示试图更努力的分配内存
+			 * 看能不能从MIGRATE_HIGHATOMIC 分配出来
+			 */
 			if (alloc_flags & ALLOC_HARDER) {
 				page = __rmqueue_smallest(zone, order, MIGRATE_HIGHATOMIC);
 				if (page)
 					trace_mm_page_alloc_zone_locked(page, order, migratetype);
 			}
+			/* 如果没要到页面,那么就从原本的migrate以及相关的fallback里面借 */
 			if (!page)
 				page = __rmqueue(zone, order, migratetype);
 		} while (page && check_new_pages(page, order));
 		spin_unlock(&zone->lock);
+		/* 如果还是没有,那么就报fail吧 */
 		if (!page)
 			goto failed;
 		__mod_zone_freepage_state(zone, -(1 << order),
 					  get_pcppage_migratetype(page));
 	}
-
+	/* 将本zone的PGALLOC + 1 << order */
 	__count_zid_vm_events(PGALLOC, page_zonenum(page), 1 << order);
 	zone_statistics(preferred_zone, zone, gfp_flags);
 	local_irq_restore(flags);
