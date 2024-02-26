@@ -2309,6 +2309,8 @@ int find_suitable_fallback(struct free_area *area, unsigned int order,
 /*
  * Reserve a pageblock for exclusive use of high-order atomic allocations if
  * there are no empty page blocks that contain a page with a suitable order
+ *
+ * 如果没有空闲页面块包含一个合适order的page,那么保留此pageblock对于高阶原子分配独占使用
  */
 static void reserve_highatomic_pageblock(struct page *page, struct zone *zone,
 				unsigned int alloc_order)
@@ -2319,19 +2321,32 @@ static void reserve_highatomic_pageblock(struct page *page, struct zone *zone,
 	/*
 	 * Limit the number reserved to 1 pageblock or roughly 1% of a zone.
 	 * Check is race-prone but harmless.
+	 *
+	 * 将保留的数量限制为1个页面块加上大约为区域的1%.
+	 * Check很容易引发竞争，但无害。
 	 */
+
+	/* 设置max_managed为zone->managed_pages的1% 然后加上pageblock_nr_pages */
 	max_managed = (zone->managed_pages / 100) + pageblock_nr_pages;
+	/* 如果zone的nr_reserved_highatomic 大于等于最大的max_managed,那么直接返回 */
 	if (zone->nr_reserved_highatomic >= max_managed)
 		return;
 
 	spin_lock_irqsave(&zone->lock, flags);
 
 	/* Recheck the nr_reserved_highatomic limit under the lock */
+	/* 在锁下,重复检查 */
 	if (zone->nr_reserved_highatomic >= max_managed)
 		goto out_unlock;
 
 	/* Yoink! */
+	/* 得到该pageblock的migratetype */
 	mt = get_pageblock_migratetype(page);
+	/* 如果mt不是MIGRATE_HIGHATOMIC,并且不是CMA,不是MIGRATE_ISOLATE,不是CMA
+	 * MIGRATE_ISOLATE是一个特殊的虚拟区域,用于跨越NUMA结点移动物理内存页.
+	 * 在大型系统上,它有益于将物理内存页移动到接近于使用该页最频繁的CPU.
+	 */
+	/* 那么就把该页面块移动到MIGRATE_HIGHATOMIC的area->free_list里面去 */
 	if (mt != MIGRATE_HIGHATOMIC &&
 			!is_migrate_isolate(mt) && !is_migrate_cma(mt)) {
 		zone->nr_reserved_highatomic += pageblock_nr_pages;
@@ -3460,12 +3475,14 @@ try_this_zone:
 		page = buffered_rmqueue(ac->preferred_zoneref->zone, zone, order,
 				gfp_mask, alloc_flags, ac->migratetype);
 		/* 如果要到了page */
-		if (page) {
+		if (page) { /*这里要进行做一些page出厂前的检查 */
 			prep_new_page(page, order, gfp_mask, alloc_flags);
 
 			/*
 			 * If this is a high-order atomic allocation then check
 			 * if the pageblock should be reserved for the future
+			 *
+			 * 如果这是一个高阶原子分配,则检查是否为了将来,这个pageblock应该被保留
 			 */
 			if (unlikely(order && (alloc_flags & ALLOC_HARDER)))
 				reserve_highatomic_pageblock(page, zone, order);
