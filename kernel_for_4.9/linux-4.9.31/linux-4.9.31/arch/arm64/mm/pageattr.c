@@ -30,6 +30,18 @@ static int change_page_range(pte_t *ptep, pgtable_t token, unsigned long addr,
 	struct page_change_data *cdata = data;
 	pte_t pte = *ptep;
 
+	/*  static inline pte_t clear_pte_bit(pte_t pte, pgprot_t prot)
+	 * {
+	 *	pte_val(pte) &= ~pgprot_val(prot);
+	 *	return pte;
+	 * }
+	 *
+	 *  static inline pte_t set_pte_bit(pte_t pte, pgprot_t prot)
+	 * {
+	 *	pte_val(pte) |= pgprot_val(prot);
+	 *	return pte;
+	 * }
+	 */
 	pte = clear_pte_bit(pte, cdata->clear_mask);
 	pte = set_pte_bit(pte, cdata->set_mask);
 
@@ -45,7 +57,9 @@ static int __change_memory_common(unsigned long start, unsigned long size,
 {
 	struct page_change_data data;
 	int ret;
-
+	/* 将set_mask赋值给data.set_mask
+	 * 将clear_mask赋值给data.clear_mask
+	 */
 	data.set_mask = set_mask;
 	data.clear_mask = clear_mask;
 
@@ -126,10 +140,12 @@ int set_memory_x(unsigned long addr, int numpages)
 EXPORT_SYMBOL_GPL(set_memory_x);
 
 #ifdef CONFIG_DEBUG_PAGEALLOC
+/* enable为0 free page时调用，1是alloc page时调用 */
 void __kernel_map_pages(struct page *page, int numpages, int enable)
 {
+	/* 拿到page的地址 */
 	unsigned long addr = (unsigned long) page_address(page);
-
+	/* #define PTE_VALID		(_AT(pteval_t, 1) << 0) */
 	if (enable)
 		__change_memory_common(addr, PAGE_SIZE * numpages,
 					__pgprot(PTE_VALID),

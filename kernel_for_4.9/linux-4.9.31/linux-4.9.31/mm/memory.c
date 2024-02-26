@@ -2086,15 +2086,19 @@ static int apply_to_pud_range(struct mm_struct *mm, pgd_t *pgd,
 /*
  * Scan a region of virtual memory, filling in page tables as necessary
  * and calling a provided function on each leaf page table.
+ *
+ * 扫描虚拟内存的一个区域,根据需要填写页表,并在每个层页表上调用提供的函数
  */
 int apply_to_page_range(struct mm_struct *mm, unsigned long addr,
 			unsigned long size, pte_fn_t fn, void *data)
 {
 	pgd_t *pgd;
 	unsigned long next;
+	/* 算出结束地址 */
 	unsigned long end = addr + size;
 	int err;
 
+	/* 如果起始地址大于结束地址,返回-EINVAL */
 	if (WARN_ON(addr >= end))
 		return -EINVAL;
 

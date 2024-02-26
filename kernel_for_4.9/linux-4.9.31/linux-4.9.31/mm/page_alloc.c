@@ -598,8 +598,18 @@ out:
  *
  * The first tail page's ->compound_order holds the order of allocation.
  * This usage means that zero-order pages may not be compound.
+ *
+ * 高阶页面称为"复合页面".它们的结构是这样的:
+ * 第一个PAGE_SIZE页面称为“head page”,并设置了PG_head.
+ *
+ * 剩下的PAGE_SIZE页面称为“尾页”.PageTail()编码在page->compound_head的第0位.
+ * 其余的位是指向首页的指针。
+ *
+ * 第一个尾页的->compound_dor保存复合页析构函数数组中的偏移量.请参见compound_page_dors。
+ *
+ * 第一个尾页的->compound_order分配的order.
+ * 这种用法意味着zero-order 页面可能不是复合的.
  */
-
 void free_compound_page(struct page *page)
 {
 	__free_pages_ok(page, compound_order(page));
@@ -609,16 +619,48 @@ void prep_compound_page(struct page *page, unsigned int order)
 {
 	int i;
 	int nr_pages = 1 << order;
-
+	/* page[1].compound_dtor = compound_dtor;
+	 * 看起来它只是一个简单的赋值,实际上它是compound_page_dtors数组的index
+	 * 通过它来找到对应的析构函数
+	 *
+	 * compound_page_dtor * const compound_page_dtors[] = {
+	 *	NULL,
+	 *	free_compound_page,
+	 * #ifdef CONFIG_HUGETLB_PAGE
+	 *	free_huge_page,
+	 * #endif
+	 * #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+	 *	free_transhuge_page,
+	 * #endif
+	 * };
+	 */
 	set_compound_page_dtor(page, COMPOUND_PAGE_DTOR);
+	/*  static inline void set_compound_order(struct page *page, unsigned int order)
+	 * {
+	 *	page[1].compound_order = order;
+	 * }
+	 */
 	set_compound_order(page, order);
+	/* 设置首页的page->flag的PG_head */
 	__SetPageHead(page);
+	/* 对每页都进行如下操作
+	 *
+	 * 1、去除头页设置每页的_refcout为0
+	 * 2、设置page->mapping为TAIL_MAPPING
+	 * #define TAIL_MAPPING		((void *)0x400 + POISON_POINTER_DELTA)
+	 * 3、设置page->compound_head为第一个尾页
+	 *  static __always_inline void set_compound_head(struct page *page, struct page *head)
+	 * {
+	 *	WRITE_ONCE(page->compound_head, (unsigned long)head + 1);
+	 * }
+	 */
 	for (i = 1; i < nr_pages; i++) {
 		struct page *p = page + i;
 		set_page_count(p, 0);
 		p->mapping = TAIL_MAPPING;
 		set_compound_head(p, page);
 	}
+	/* 设置page[1].compound_mapcount; 为-1 */
 	atomic_set(compound_mapcount_ptr(page), -1);
 }
 
@@ -1826,13 +1868,26 @@ static bool check_new_pages(struct page *page, unsigned int order)
 inline void post_alloc_hook(struct page *page, unsigned int order,
 				gfp_t gfp_flags)
 {
+	/*  static inline void set_page_private(struct page *page, unsigned long private)
+	 * {
+	 *	page->private = private;
+	 * }
+	 */
 	set_page_private(page, 0);
+	/* set_page_count(page, 1);
+	 * 把该page的refcount设置为1
+	 */
 	set_page_refcounted(page);
-
+	/* 只有s390才有这个函数 */
 	arch_alloc_page(page, order);
+	/* 这里就是设置PTE的PTE_VALID位
+	 * 比较你这page就要给人用了
+	 */
 	kernel_map_pages(page, 1 << order, 1);
+	/* 这边去计算该page的内容有没有非PAGE_POISON,如果有,说明页面被污染了 */
 	kernel_poison_pages(page, 1 << order, 1);
 	kasan_alloc_pages(page, order);
+	/* 设置page_owner */
 	set_page_owner(page, order, gfp_flags);
 }
 
@@ -1842,6 +1897,13 @@ static void prep_new_page(struct page *page, unsigned int order, gfp_t gfp_flags
 	int i;
 	bool poisoned = true;
 
+	/* page poison,内存毒药,page free时给page填充特定字节0xaa,在page alloc时check page内容是否有非0xaa的字节,
+	 * 有的话,代表当前分配的page被其他page盖到,或者说这个page周边的page有发生内存溢出;
+	 */
+
+	/* 从0开始,到1 << order,一页一页检查
+	 * 只要有一个page不是poisoned的,那么poisoned = false
+	 */
 	for (i = 0; i < (1 << order); i++) {
 		struct page *p = page + i;
 		if (poisoned)
@@ -1850,10 +1912,20 @@ static void prep_new_page(struct page *page, unsigned int order, gfp_t gfp_flags
 
 	post_alloc_hook(page, order, gfp_flags);
 
+	/*  static inline bool free_pages_prezeroed(bool poisoned)
+	 * {
+	 *	return IS_ENABLED(CONFIG_PAGE_POISONING_ZERO) &&
+	 *		page_poisoning_enabled() && poisoned;
+	 * }
+	 * 如果没有定义这些,但是gfp_flags & __GFP_ZERO,那么需要手动把相关的地址清0
+	 */
 	if (!free_pages_prezeroed(poisoned) && (gfp_flags & __GFP_ZERO))
 		for (i = 0; i < (1 << order); i++)
 			clear_highpage(page + i);
 
+	/* 如果order不等于0,并且gfp_flags & __GFP_COMP
+	 * 那么这里准备复合页的一些东西
+	 */
 	if (order && (gfp_flags & __GFP_COMP))
 		prep_compound_page(page, order);
 
@@ -1862,6 +1934,25 @@ static void prep_new_page(struct page *page, unsigned int order, gfp_t gfp_flags
 	 * allocate the page. The expectation is that the caller is taking
 	 * steps that will free more memory. The caller should avoid the page
 	 * being used for !PFMEMALLOC purposes.
+	 *
+	 * 当需要ALLOC_NO_WATERMARKS时,页被设置为pfmemalloc分配页面.
+	 * 它期望调用者正在采取释放更多内存的步骤.
+	 * 调用者应避免使用该页面！PFMEALLOC目的。
+	 */
+
+	/*  static inline void set_page_pfmemalloc(struct page *page)
+	 * {
+	 *	page->index = -1UL;
+	 * }
+	 *
+	 *  static inline void clear_page_pfmemalloc(struct page *page)
+	 * {
+	 *	page->index = 0;
+	 * }
+	 */
+	/* 如果调用者的alloc_flags有ALLOC_NO_WATERMARKS,表明调用者需要去释放更多的内存,不希望内存用来做其他的目的
+	 * 所以设置page->index = -1UL
+	 * 否则page->index = 0
 	 */
 	if (alloc_flags & ALLOC_NO_WATERMARKS)
 		set_page_pfmemalloc(page);
@@ -3365,8 +3456,10 @@ get_page_from_freelist(gfp_t gfp_mask, unsigned int order, int alloc_flags,
 		}
 
 try_this_zone:
+		/* 尝试在这个zone里面去要page */
 		page = buffered_rmqueue(ac->preferred_zoneref->zone, zone, order,
 				gfp_mask, alloc_flags, ac->migratetype);
+		/* 如果要到了page */
 		if (page) {
 			prep_new_page(page, order, gfp_mask, alloc_flags);
 
