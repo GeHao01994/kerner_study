@@ -32,6 +32,9 @@
  * costly to service.  That is between allocation orders which should
  * coalesce naturally under reasonable reclaim pressure and those which
  * will not.
+ *
+ * PAGE_ALLOC_COSTLY_ORDER是分配器视为服务成本高昂的order.
+ * 这是在合理的回收压力下应该自然结合的分配order和不会的分配order之间。
  */
 #define PAGE_ALLOC_COSTLY_ORDER 3
 

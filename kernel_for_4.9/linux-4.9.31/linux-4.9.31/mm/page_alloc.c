@@ -3862,6 +3862,12 @@ gfp_to_alloc_flags(gfp_t gfp_mask)
 {
 	unsigned int alloc_flags = ALLOC_WMARK_MIN | ALLOC_CPUSET;
 
+	/* 对于ALLOC_HARDER来说它把watermark水位减去了1/4,而对于ALLOC_HIGH来说,它把保留水位值再减少了1/2,
+	 * 这两个标记按照不同程度来减少保留内存数量,从而达到了更容易成功申请内存的目的.
+	 * 如果单独设置,从这里也可以看出ALLOC_HIGH是比ALLOC_HARDER更加激进的内存申请方式.
+	 * 但是一般我们申请时设置的GFP_ATOMIC实际上会同时设置ALLOC_HARDER和ALLOC_HIGH 标记.
+	 */
+
 	/* __GFP_HIGH is assumed to be the same as ALLOC_HIGH to save a branch. */
 	BUILD_BUG_ON(__GFP_HIGH != (__force gfp_t) ALLOC_HIGH);
 
@@ -3870,25 +3876,37 @@ gfp_to_alloc_flags(gfp_t gfp_mask)
 	 * cannot run direct reclaim, or if the caller has realtime scheduling
 	 * policy or is asking for __GFP_HIGH memory.  GFP_ATOMIC requests will
 	 * set both ALLOC_HARDER (__GFP_ATOMIC) and ALLOC_HIGH (__GFP_HIGH).
+	 *
+	 * 如果调用方无法运行直接回收,或者调用方具有实时调度策略或要求__GFP_HIGH内存,则调用方可能会占用更多的页面预留.
+	 * GFP_ATOMIC请求将同时设置ALLOC_HARDER(__GFP_ATOMIC)和ALLOC_HIGH(__GFF_HIGH).
 	 */
 	alloc_flags |= (__force int) (gfp_mask & __GFP_HIGH);
 
+	/* 如果gfp是原子的 */
 	if (gfp_mask & __GFP_ATOMIC) {
 		/*
 		 * Not worth trying to allocate harder for __GFP_NOMEMALLOC even
 		 * if it can't schedule.
+		 * 即使无法调度,也不值得尝试为__GFP_NOMEMALLOC进行更严格的分配.
+		 */
+
+		/* __GFP_NOMEMALLOC is used to explicitly forbid access to emergency reserves.
+		 * __GFP_NOMMALLOC用于明确禁止访问紧急储备.
 		 */
 		if (!(gfp_mask & __GFP_NOMEMALLOC))
 			alloc_flags |= ALLOC_HARDER;
 		/*
 		 * Ignore cpuset mems for GFP_ATOMIC rather than fail, see the
 		 * comment for __cpuset_node_allowed().
+		 *
+		 * 忽略GFP_ATOMIC的cpuset mems而不是失败,请参阅__cpuset_node_allowed()的注释.
 		 */
 		alloc_flags &= ~ALLOC_CPUSET;
 	} else if (unlikely(rt_task(current)) && !in_interrupt())
 		alloc_flags |= ALLOC_HARDER;
 
 #ifdef CONFIG_CMA
+	/* 如果migratetype是MIGRATE_MOVABLE,那么还可以把CMA也带上 */
 	if (gfpflags_to_migratetype(gfp_mask) == MIGRATE_MOVABLE)
 		alloc_flags |= ALLOC_CMA;
 #endif
@@ -3897,13 +3915,29 @@ gfp_to_alloc_flags(gfp_t gfp_mask)
 
 bool gfp_pfmemalloc_allowed(gfp_t gfp_mask)
 {
+	/* 如果gfp_mask & __GFP_NOMEMALLOC 返回false */
 	if (unlikely(gfp_mask & __GFP_NOMEMALLOC))
 		return false;
 
+	/*  __GFP_MEMALLOC allows access to all memory. This should only be used when
+	 * the caller guarantees the allocation will allow more memory to be freed
+	 * very shortly e.g. process exiting or swapping. Users either should
+	 * be the MM or co-ordinating closely with the VM (e.g. swap over NFS).
+	 *
+	 * __GFP_MEMALLOC允许访问所有内存.只有当调用方保证分配将允许很快释放更多内存时,才应使用此选项,
+	 * 例如进程退出或交换.
+	 * 用户应该是MM或与VM密切协调(例如，通过NFS交换).
+	 */
 	if (gfp_mask & __GFP_MEMALLOC)
 		return true;
+	/* in_serving_softirq判断是否当前正在处理软中断.
+	 * 如果在处理软中断,并且current->flags & PF_MEMALLOC,返回true */
 	if (in_serving_softirq() && (current->flags & PF_MEMALLOC))
 		return true;
+	/* 如果不在中断上下文中,并且current->flags & PF_MEMALLOC
+	 * 或者进程被设置了TIF_MEMDIE(只有在线程刚好被OOM killer机制选中时，才会设置TIF_MEMDIE)
+	 * 返回true
+	 */
 	if (!in_interrupt() &&
 			((current->flags & PF_MEMALLOC) ||
 			 unlikely(test_thread_flag(TIF_MEMDIE))))
@@ -4019,6 +4053,7 @@ static inline struct page *
 __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
 						struct alloc_context *ac)
 {
+	/* 判断gfp_mask里面有没有可直接回收的bit,表示能不能直接回收 */
 	bool can_direct_reclaim = gfp_mask & __GFP_DIRECT_RECLAIM;
 	struct page *page = NULL;
 	unsigned int alloc_flags;
@@ -4036,6 +4071,9 @@ __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
 	 * reclaim >= MAX_ORDER areas which will never succeed. Callers may
 	 * be using allocators in order of preference for an area that is
 	 * too large.
+	 *
+	 * 在慢路径中,我们进行健全性检查order去避免试图回收永远不会成功的 >=MAX_order 区域.
+	 * 调用方可能按照对太大区域的偏好顺序使用分配器。
 	 */
 	if (order >= MAX_ORDER) {
 		WARN_ON_ONCE(!(gfp_mask & __GFP_NOWARN));
@@ -4045,6 +4083,8 @@ __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
 	/*
 	 * We also sanity check to catch abuse of atomic reserves being used by
 	 * callers that are not in atomic context.
+	 *
+	 * 我们还进行了健全性检查,以发现不在原子上下文中的调用方滥用atomic reserves
 	 */
 	if (WARN_ON_ONCE((gfp_mask & (__GFP_ATOMIC|__GFP_DIRECT_RECLAIM)) ==
 				(__GFP_ATOMIC|__GFP_DIRECT_RECLAIM)))
@@ -4054,15 +4094,29 @@ retry_cpuset:
 	compaction_retries = 0;
 	no_progress_loops = 0;
 	compact_priority = DEF_COMPACT_PRIORITY;
+	/* 代码中,会检查 cpuset,查看是否允许当前进程从内存节点申请物理页,
+	 * 上述判断,需要读取当前进程的mems_allowed 成员,读取时需要使用"顺序保护锁";
+	 */
 	cpuset_mems_cookie = read_mems_allowed_begin();
 	/*
 	 * We need to recalculate the starting point for the zonelist iterator
 	 * because we might have used different nodemask in the fast path, or
 	 * there was a cpuset modification and we are retrying - otherwise we
 	 * could end up iterating over non-eligible zones endlessly.
+	 *
+	 * 我们需要重新计算zonelist迭代器的起点,因为我们可能在快速路径中使用了不同的节点掩码,或者有一个cpuset修改,
+	 * 我们正在重试-否则我们可能会无休止地在不符合条件的区域上迭代。
+	 */
+
+
+	/* 获取链表中第一个管理区,preferred_zoneref指向第一个合适的管理区
+	 * 实际上这里就是去找到对应的zoneref
 	 */
 	ac->preferred_zoneref = first_zones_zonelist(ac->zonelist,
 					ac->high_zoneidx, ac->nodemask);
+	/* 如果说找到的zone为空,那么设置page = NULL,然后跳转到no_page里面去
+	 * 什么情况下为NULL?
+	 * zoneref只有在你所在的node有PAGE的时候才会填充,见build_zonerefs_node */
 	if (!ac->preferred_zoneref->zone)
 		goto nopage;
 
@@ -4071,16 +4125,24 @@ retry_cpuset:
 	 * The fast path uses conservative alloc_flags to succeed only until
 	 * kswapd needs to be woken up, and to avoid the cost of setting up
 	 * alloc_flags precisely. So we do that now.
+	 *
+	 * 快速路径使用保守的alloc_flags仅在需要唤醒kswapd之前成功,并避免精确设置alloc_flag的成本.所以我们现在就这么做.
 	 */
+
+	/* 降低水印ALLOC_WMARK_MIN重新构建分配标志 */
 	alloc_flags = gfp_to_alloc_flags(gfp_mask);
 
+	/* 如果gfp_mask 有__GFP_KSWAPD_RECLAIM,就去唤醒kswapd */
 	if (gfp_mask & __GFP_KSWAPD_RECLAIM)
 		wake_all_kswapds(order, ac);
 
 	/*
 	 * The adjusted alloc_flags might result in immediate success, so try
 	 * that first
+	 * 调整后的alloc_flags可能会立即获得成功，所以请先尝试
 	 */
+
+	/* 调整后重新利用get_page_from_freelist进行内存分配 */
 	page = get_page_from_freelist(gfp_mask, order, alloc_flags, ac);
 	if (page)
 		goto got_pg;
@@ -4090,19 +4152,38 @@ retry_cpuset:
 	 * that we have enough base pages and don't need to reclaim. Don't try
 	 * that for allocations that are allowed to ignore watermarks, as the
 	 * ALLOC_NO_WATERMARKS attempt didn't yet happen.
+	 *
+	 * 对于成本高昂的分配,请先尝试直接压缩,因为我们可能有足够的基页,不需要回收.
+	 * 对于允许忽略水印的分配,不要这样做,因为ALLOC_NO_watermarks尝试尚未发生.
+	 */
+
+	/* 如果允许直接回收,并且order > PAGE_ALLOC_COSTLY_ORDER
+	 * #define PAGE_ALLOC_COSTLY_ORDER 3
+	 * 并且gfp_pfmemalloc_allowed表示是否允许访问系统预留的内存,如果不允许,那么尝试内存规整操作，进行页的迁移
+	 */
+
+	/* 前面没有分配到内存可能是因为内存碎片原因,所以就调用__alloc_pages_direct_compact尝试内存规整操作,进行页的迁移,然后再尝试分配执行
+	 * 进行该操作需要满足以下条件
+	 * 1.分配请求允许直接回收
+	 * 2.内存分配的阶数必须要大于3,因为低阶内存块受内存碎片影响较小,内存规整不能解决问题
+	 * 3.不能访问系统预留的内存,gfp_pfmemalloc_allowed表示是否允许访问系统预留的内存
 	 */
 	if (can_direct_reclaim && order > PAGE_ALLOC_COSTLY_ORDER &&
 		!gfp_pfmemalloc_allowed(gfp_mask)) {
+		/* __alloc_pages_direct_compact尝试内存规整操作，进行页的迁移 */
 		page = __alloc_pages_direct_compact(gfp_mask, order,
 						alloc_flags, ac,
 						INIT_COMPACT_PRIORITY,
 						&compact_result);
+		/* 如果分配到了page,那么go out */
 		if (page)
 			goto got_pg;
 
 		/*
 		 * Checks for costly allocations with __GFP_NORETRY, which
 		 * includes THP page fault allocations
+		 *
+		 * 使用__GFP_NORETRY检查成本高昂的分配，其中包括THP page fault分配
 		 */
 		if (gfp_mask & __GFP_NORETRY) {
 			/*
@@ -4112,6 +4193,9 @@ retry_cpuset:
 			 * allocation, we do not want to heavily disrupt the
 			 * system, so we fail the allocation instead of entering
 			 * direct reclaim.
+			 *
+			 * 如果内存规整被推迟到高阶分配,那是因为同步压缩最近失败了.
+			 * 如果是这种情况,并且调用者请求一个THP分配,我们不想严重破坏系统,所以我们分配失败代替进入直接回收
 			 */
 			if (compact_result == COMPACT_DEFERRED)
 				goto nopage;
@@ -4120,6 +4204,8 @@ retry_cpuset:
 			 * Looks like reclaim/compaction is worth trying, but
 			 * sync compaction could be very expensive, so keep
 			 * using async compaction.
+			 *
+			 * 看起来reclaim/compaction值得一试,但同步压缩可能非常昂贵,所以请继续使用异步压缩.
 			 */
 			compact_priority = INIT_COMPACT_PRIORITY;
 		}
@@ -4127,9 +4213,11 @@ retry_cpuset:
 
 retry:
 	/* Ensure kswapd doesn't accidentally go to sleep as long as we loop */
+	/* //注释很明白,确保交换线程没有意外的睡眠,再次重新唤醒 */
 	if (gfp_mask & __GFP_KSWAPD_RECLAIM)
 		wake_all_kswapds(order, ac);
 
+	/* 对gfp_mask进行分析看是否可以不受水线进行内存分配 */
 	if (gfp_pfmemalloc_allowed(gfp_mask))
 		alloc_flags = ALLOC_NO_WATERMARKS;
 
@@ -4137,35 +4225,59 @@ retry:
 	 * Reset the zonelist iterators if memory policies can be ignored.
 	 * These allocations are high priority and system rather than user
 	 * orientated.
+	 *
+	 * 如果可以忽略内存策略,请重置区域列表迭代器.
+	 * 这些分配是高优先级和系统性的,而不是面向用户的。
 	 */
+
+	/* 调整nodemask和zonelist */
+	/* 如果alloc_flags没有设置ALLOC_CPUSET 并且alloc_flags没有设置水位检查 */
 	if (!(alloc_flags & ALLOC_CPUSET) || (alloc_flags & ALLOC_NO_WATERMARKS)) {
+		/*  static inline struct zonelist *node_zonelist(int nid, gfp_t flags)
+		 * {
+		 *	return NODE_DATA(nid)->node_zonelists + gfp_zonelist(flags);
+		 * }
+		 */
 		ac->zonelist = node_zonelist(numa_node_id(), gfp_mask);
+		/* 获取链表中第一个管理区,
+		 * preferred_zoneref指向第一个合适的管理区
+		 */
 		ac->preferred_zoneref = first_zones_zonelist(ac->zonelist,
 					ac->high_zoneidx, ac->nodemask);
 	}
 
-	/* Attempt with potentially adjusted zonelist and alloc_flags */
+	/* Attempt with potentially adjusted zonelist and alloc_flags
+	 * 尝试使用可能已调整的zonelist和alloc_flag
+	 *
+	 * 再次尝试分配
+	 */
 	page = get_page_from_freelist(gfp_mask, order, alloc_flags, ac);
 	if (page)
 		goto got_pg;
 
 	/* Caller is not willing to reclaim, we can't balance anything */
+	/* 调用者不支持直接页面回收,那么没有其他可以做的,直接跳转到nopage */
 	if (!can_direct_reclaim) {
 		/*
 		 * All existing users of the __GFP_NOFAIL are blockable, so warn
 		 * of any new users that actually allow this type of allocation
 		 * to fail.
+		 *
+		 * __GFP_NOFAIL的所有现有用户都是可阻塞的,因此警告任何实际允许此类分配失败的新用户.
 		 */
 		WARN_ON_ONCE(gfp_mask & __GFP_NOFAIL);
 		goto nopage;
 	}
 
 	/* Avoid recursion of direct reclaim */
+	/* 若当前进程的进程描述符为PF_MALLOC*/
 	if (current->flags & PF_MEMALLOC) {
 		/*
 		 * __GFP_NOFAIL request from this context is rather bizarre
 		 * because we cannot reclaim anything and only can loop waiting
 		 * for somebody to do a work for us.
+		 *
+		 * 来自这种上下文的__GFP_NOFAIL请求相当奇怪,因为我们无法回收任何东西,只能循环等待有人为我们做工作.
 		 */
 		if (WARN_ON_ONCE(gfp_mask & __GFP_NOFAIL)) {
 			cond_resched();
@@ -4174,24 +4286,34 @@ retry:
 		goto nopage;
 	}
 
-	/* Avoid allocations with no watermarks from looping endlessly */
+	/* Avoid allocations with no watermarks from looping endlessly
+	 * 避免无水位的分配无休止地循环
+	 */
+
+	/* 进程被设置了TIF_MEMDIE(只有在线程刚好被OOM killer机制选中时，才会设置TIF_MEMDIE)
+	 * 并且gfp_mask没有设置__GFP_NOFAIL的时候,goto nopage进行退出
+	 */
 	if (test_thread_flag(TIF_MEMDIE) && !(gfp_mask & __GFP_NOFAIL))
 		goto nopage;
 
 
 	/* Try direct reclaim and then allocating */
+	/* 当调用直接页面回收机制,经过一轮直接页面回收之后,尝试分配内存 */
 	page = __alloc_pages_direct_reclaim(gfp_mask, order, alloc_flags, ac,
 							&did_some_progress);
 	if (page)
 		goto got_pg;
 
+	/* 调用直接内存规整机制,经过一轮的直接内存规整之后尝试分配内存 */
 	/* Try direct compaction and then allocating */
 	page = __alloc_pages_direct_compact(gfp_mask, order, alloc_flags, ac,
 					compact_priority, &compact_result);
 	if (page)
 		goto got_pg;
 
-	/* Do not loop if specifically requested */
+	/* Do not loop if specifically requested
+	 * 如果特别要求,不要循环
+	 */
 	if (gfp_mask & __GFP_NORETRY)
 		goto nopage;
 
@@ -4199,10 +4321,12 @@ retry:
 	 * Do not retry costly high order allocations unless they are
 	 * __GFP_REPEAT
 	 */
+	/* 除非设置了__GFP_REPEAT,否则退出高阶的空闲内存的循环申请 */
 	if (order > PAGE_ALLOC_COSTLY_ORDER && !(gfp_mask & __GFP_REPEAT))
 		goto nopage;
 
 	/* Make sure we know about allocations which stall for too long */
+	/* 告知该空闲内存申请的时间已经过长 */
 	if (time_after(jiffies, alloc_start + stall_timeout)) {
 		warn_alloc(gfp_mask,
 			"page allocation stalls for %ums, order:%u",
@@ -4210,6 +4334,7 @@ retry:
 		stall_timeout += 10 * HZ;
 	}
 
+	/* 检查是否有必要重新做内存回收，尝试直接页面回收机制 */
 	if (should_reclaim_retry(gfp_mask, order, ac, alloc_flags,
 				 did_some_progress > 0, &no_progress_loops))
 		goto retry;
@@ -4219,7 +4344,11 @@ retry:
 	 * reclaim is not able to make any progress because the current
 	 * implementation of the compaction depends on the sufficient amount
 	 * of free memory (see __compaction_suitable)
+	 *
+	 * 如果order-0回收无法取得任何进展,则重试规整没有任何意义,
+	 * 因为规整的当前实现取决于足够的可用内存量(请参加__compaction_suitable)
 	 */
+	/* 判断是否需要重新做内存规整 */
 	if (did_some_progress > 0 &&
 			should_compact_retry(ac, order, alloc_flags,
 				compact_result, &compact_priority,
@@ -4229,16 +4358,21 @@ retry:
 	/*
 	 * It's possible we raced with cpuset update so the OOM would be
 	 * premature (see below the nopage: label for full explanation).
+	 *
+	 * 我们可能使用了cpuset更新,因此OOM为时过早(请参阅下面的nopage:label 以获得完整解释).
 	 */
 	if (read_mems_allowed_retry(cpuset_mems_cookie))
 		goto retry_cpuset;
 
 	/* Reclaim has failed us, start killing things */
+	/* 前面一系列工作，都没有成功分配到需要的空闲内存，开启oom杀死一些进程，并重新获取页面中直接进行空闲页面分配 */
 	page = __alloc_pages_may_oom(gfp_mask, order, ac, &did_some_progress);
 	if (page)
 		goto got_pg;
 
-	/* Retry as long as the OOM killer is making progress */
+	/* Retry as long as the OOM killer is making progress
+	 * 当直接从oom获取到内存分配内存失败,且oom已经杀死了一些低优先级的进程,此时将no_progress_loop设置为0,跳转到retry再一次进行内存分配操作
+	 */
 	if (did_some_progress) {
 		no_progress_loops = 0;
 		goto retry;
@@ -4251,6 +4385,10 @@ nopage:
 	 * allocation can fail while the mask is being updated. If we are about
 	 * to fail, check if the cpuset changed during allocation and if so,
 	 * retry.
+	 *
+	 * 当更新进程的mems_allowed或mempolicy nodemask时,可以与并行线程竞争,
+	 * 这样在mask被更新时,我们的分配可能会失败.
+	 * 如果我们即将失败,请检查cpuset在分配过程中是否发生了更改,如果发生更改,请重试.
 	 */
 	if (read_mems_allowed_retry(cpuset_mems_cookie))
 		goto retry_cpuset;
@@ -4361,6 +4499,18 @@ no_zone:
 	/*
 	 * Runtime PM, block IO and its error handling path can deadlock
 	 * because I/O on the device might not complete.
+	 *
+	 * 运行时PM、块IO及其错误处理路径可能会死锁,因为设备上的I/O可能未完成.
+	 */
+
+	/* __GFP_IO isn't allowed if PF_MEMALLOC_NOIO is set in current->flags
+	 * __GFP_FS is also cleared as it implies __GFP_IO.
+	 *  static inline gfp_t memalloc_noio_flags(gfp_t flags)
+	 * {
+	 *	if (unlikely(current->flags & PF_MEMALLOC_NOIO))
+	 *		flags &= ~(__GFP_IO | __GFP_FS);
+	 *	return flags;
+	 * }
 	 */
 	alloc_mask = memalloc_noio_flags(gfp_mask);
 	ac.spread_dirty_pages = false;
@@ -4368,6 +4518,8 @@ no_zone:
 	/*
 	 * Restore the original nodemask if it was potentially replaced with
 	 * &cpuset_current_mems_allowed to optimize the fast-path attempt.
+	 *
+	 * 如果原始节点掩码可能被&cpuset_current_mems_allow替换以优化快速路径尝试,则恢复该节点掩码.
 	 */
 	if (unlikely(ac.nodemask != nodemask))
 		ac.nodemask = nodemask;
