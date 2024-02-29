@@ -6,11 +6,14 @@
  * Lower value means higher priority, analogically to reclaim priority.
  */
 enum compact_priority {
+	/* 完全同步模式,允许阻塞,允许将脏页写回到存储设备上,直到等待完成 */
 	COMPACT_PRIO_SYNC_FULL,
 	MIN_COMPACT_PRIORITY = COMPACT_PRIO_SYNC_FULL,
+	/* 轻量级同步模式,允许绝大多数阻塞,但是不允许将脏页写回到存储设备上,因为等待时间比较长 */
 	COMPACT_PRIO_SYNC_LIGHT,
 	MIN_COMPACT_COSTLY_PRIORITY = COMPACT_PRIO_SYNC_LIGHT,
 	DEF_COMPACT_PRIORITY = COMPACT_PRIO_SYNC_LIGHT,
+	/* 异步模式,不允许阻塞 */
 	COMPACT_PRIO_ASYNC,
 	INIT_COMPACT_PRIORITY = COMPACT_PRIO_ASYNC
 };
@@ -18,41 +21,61 @@ enum compact_priority {
 /* Return values for compact_zone() and try_to_compact_pages() */
 /* When adding new states, please adjust include/trace/events/compaction.h */
 enum compact_result {
-	/* For more detailed tracepoint output - internal to compaction */
+	/* For more detailed tracepoint output - internal to compaction
+	 * 对于更详细的跟踪点输出 - 内部规整
+	 */
 	COMPACT_NOT_SUITABLE_ZONE,
 	/*
 	 * compaction didn't start as it was not possible or direct reclaim
 	 * was more suitable
+	 *
+	 * 规整没有开始,因为它不能或者直接回收更合适
 	 */
 	COMPACT_SKIPPED,
-	/* compaction didn't start as it was deferred due to past failures */
+	/* compaction didn't start as it was deferred due to past failures
+	 * 规整没有开始因为它由过去的失败导致了延迟 */
+	 /
 	COMPACT_DEFERRED,
 
-	/* compaction not active last round */
+	/* compaction not active last round
+	 * 上一轮压缩未激活
+	 */
 	COMPACT_INACTIVE = COMPACT_DEFERRED,
 
-	/* For more detailed tracepoint output - internal to compaction */
+	/* For more detailed tracepoint output - internal to compaction
+	 * 对于更详细的tracepoint输出 - 内部规整
+	 */
 	COMPACT_NO_SUITABLE_PAGE,
-	/* compaction should continue to another pageblock */
+	/* compaction should continue to another pageblock
+	 * 规整应该继续到另一个页面块
+	 */
 	COMPACT_CONTINUE,
 
 	/*
 	 * The full zone was compacted scanned but wasn't successfull to compact
 	 * suitable pages.
+	 *
+	 * 对整个zone都进行了规整扫描,但未能成功规整合适的页面.
 	 */
 	COMPACT_COMPLETE,
 	/*
 	 * direct compaction has scanned part of the zone but wasn't successfull
 	 * to compact suitable pages.
+	 *
+	 * 直接规整扫描了zone的一部分,但没有成功规整合适的页面。
 	 */
 	COMPACT_PARTIAL_SKIPPED,
 
-	/* compaction terminated prematurely due to lock contentions */
+	/* compaction terminated prematurely due to lock contentions
+	 * 由于锁争用，压缩提前终止
+	 */
 	COMPACT_CONTENDED,
 
 	/*
 	 * direct compaction terminated after concluding that the allocation
 	 * should now succeed
+	 *
+	 * 在分配应该的成功的结论之后直接规整终止
 	 */
 	COMPACT_SUCCESS,
 };
@@ -63,6 +86,8 @@ struct alloc_context; /* in mm/internal.h */
  * Number of free order-0 pages that should be available above given watermark
  * to make sure compaction has reasonable chance of not running out of free
  * pages that it needs to isolate as migration target during its work.
+ *
+ * 在给定的水印之上,空闲的order-0的页面的数量应该是可用的,以确保规整有合理的机会不会耗尽它在工作过程中需要隔离为迁移目标的可用页面
  */
 static inline unsigned long compact_gap(unsigned int order)
 {
@@ -78,6 +103,12 @@ static inline unsigned long compact_gap(unsigned int order)
 	 * lower than that. But it's not worth to complicate the formula here
 	 * as a bigger gap for higher orders than strictly necessary can also
 	 * improve chances of compaction success.
+	 *
+	 * 尽管迁移的所有隔离都是临时的,规整扫描程序的列表中可能最多有1个<<order,然后尝试拆分一个(order-1)空闲页.
+	 * 在这一点上,1个<<order可能不够,所以需要两倍的数量更安全.
+	 * 请注意,列表上的页数也受到COMPACT_CLUSTER_MAX的有效限制,因为这是迁移扫描程序在迁移列表上可以隔离的最大值,
+	 * 并且只有当隔离的可用页数低于此值时,才会调用空闲扫描程序.
+	 * 但不值得在这里将公式复杂化,因为对于更高阶数比严格必要的gap更大也可以提高压实成功的机会
 	 */
 	return 2UL << order;
 }

@@ -819,8 +819,11 @@ unsigned long node_page_state(struct pglist_data *pgdat,
 #ifdef CONFIG_COMPACTION
 
 struct contig_page_info {
+	/* 空闲页面 */
 	unsigned long free_pages;
+	/* 该zone中所有的free_area中空闲的块数 */
 	unsigned long free_blocks_total;
+	/* 该zone能够分配到我们order阶free_blocks的块数 */
 	unsigned long free_blocks_suitable;
 };
 
@@ -831,6 +834,14 @@ struct contig_page_info {
  * how many suitable free blocks there *might* be if MOVABLE pages were
  * migrated. Calculating that is possible, but expensive and can be
  * figured out from userspace
+ *
+ * 计算一个zone中的可用页面数,有多少连续的可用页面以及有多少足够大以满足目标大小的分配.
+ * 请注意,如果迁移了MOVABLE页面,此函数不会试图估计有多少合适的空闲块.
+ * 计算是可能的,但代价高昂,可以从用户空间中计算出来
+ */
+
+/* fill_contig_page_info函数用于获取当前zone空闲页、多少个COMPACTION_HPAGE_ORDER阶内存块等等,
+ * 此函数将会遍历当前zone上所有order的空闲链表进行累加计算
  */
 static void fill_contig_page_info(struct zone *zone,
 				unsigned int suitable_order,
@@ -846,13 +857,23 @@ static void fill_contig_page_info(struct zone *zone,
 		unsigned long blocks;
 
 		/* Count number of free blocks */
+		/* 计算空闲块的数量 */
 		blocks = zone->free_area[order].nr_free;
+		/* info->free_blocks_total 将加上这个数量,代表zone中整个free blocks的数量 */
 		info->free_blocks_total += blocks;
 
 		/* Count free base pages */
+		/* info->free_pages表示整个zone里面的空闲页面 */
 		info->free_pages += blocks << order;
 
-		/* Count the suitable free blocks */
+		/* Count the suitable free blocks
+		 * 计数合适的空闲块
+		 */
+		/* 如果order大于等于合适的order
+		 * 说明这块free_area里面能分配我们需要的order阶页面
+		 * 那么就计算空闲的适合我们的块大小
+		 * 注意这里计算是假定高阶order都切割成我们我们需求的order之后的块数
+		 */
 		if (order >= suitable_order)
 			info->free_blocks_suitable += blocks <<
 						(order - suitable_order);
@@ -865,11 +886,16 @@ static void fill_contig_page_info(struct zone *zone,
  * whether external fragmentation or a lack of memory was the problem.
  * The value can be used to determine if page reclaim or compaction
  * should be used
+ *
+ * 只有当请求的大小分配失败时,碎片索引才有意义.
+ * 如果这是真的,则碎片索引指示问题是外部碎片还是内存不足.
+ * 该值可用于确定是否应使用页面回收或压缩
  */
 static int __fragmentation_index(unsigned int order, struct contig_page_info *info)
 {
 	unsigned long requested = 1UL << order;
 
+	/* 如果free_blocks_total为0,那么直接返回0 */
 	if (!info->free_blocks_total)
 		return 0;
 
@@ -882,6 +908,19 @@ static int __fragmentation_index(unsigned int order, struct contig_page_info *in
 	 *
 	 * 0 => allocation would fail due to lack of memory
 	 * 1 => allocation would fail due to fragmentation
+	 */
+
+	/* 先简化公示 1000 * (1 - (1 + info->free_pages / requested ) / info->free_block_total )
+	 * 实际上info->free_pages / requested 表示如果不考虑碎片的话,这些free_pages能够分出多少个满足我们order的块
+	 * 我们暂且叫他target_order_blocks
+	 * 所以公示简化为1000 *( 1 - (1 + target_order_blocks) ) / info->free_block_total )
+	 * 去除1000,那么就近视等于 1 - target_order_blocks / info->free_block_total
+	 *
+	 * __fragmentation_index函数引入1000这个数值参与运算是为了避免小数,导致返回值不易判断,现在引入此值后,使函数返回值落入[-10000 ~ 1000]范围中,
+	 * 其中-1000场景较为特殊,其代表当前zone满足内存分配需求,但是在此之前却通过了上文中__compaction_suitable函数的判断,当前-1000返回值实际在代码中似乎并未被使用.
+	 * 重点还是回到0~1000返回值,那么数值越大代表对于当前order阶内存块而言碎片程度越高,难以分配.
+	 *
+	 * 极限状态info->free_blocks_total非常大时,意味着严重的内存碎片问题,上述值趋近于1,反之0代表内存不足问题.
 	 */
 	return 1000 - div_u64( (1000+(div_u64(info->free_pages * 1000ULL, requested))), info->free_blocks_total);
 }

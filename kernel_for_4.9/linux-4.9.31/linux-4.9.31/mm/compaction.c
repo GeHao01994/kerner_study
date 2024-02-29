@@ -158,15 +158,30 @@ void defer_compaction(struct zone *zone, int order)
 /* Returns true if compaction should be skipped this time */
 bool compaction_deferred(struct zone *zone, int order)
 {
+	/* 成员compact_defer_shift是推迟的最大次数以2为底的对数,当推迟的次数达到(1 << compact_defer_shift)时,不能推迟 */
+	/* 拿到这个defer_limit */
 	unsigned long defer_limit = 1UL << zone->compact_defer_shift;
 
+	/* 成员compact_order_failed记录内存碎片整理失败时的申请阶数.
+	 * 内存碎片整理执行成功的时候,如果申请阶数order大于或等于成员compact_order_failed,那么把成员compact_order_failed设置为(order+1).
+	 * 内存碎片整理执行失败的时候,如果申请阶数order小于成员compact_order_failed,那么把成员compact_order_failed设置为order.
+	 *
+	 */
+
+	/* 如果order小于zone->compact_order_failed,则返回false */
 	if (order < zone->compact_order_failed)
 		return false;
 
 	/* Avoid possible overflow */
+
+	/* 成员compact_considered记录推迟的次数
+	 * 如果该zone的推迟次数+1之后比defer_limit还要大,
+	 * 那么重新赋值回来
+	 */
 	if (++zone->compact_considered > defer_limit)
 		zone->compact_considered = defer_limit;
 
+	/* 如果大于等于了defer_limit,那么返回false,否则返回true */
 	if (zone->compact_considered >= defer_limit)
 		return false;
 
@@ -196,9 +211,24 @@ void compaction_defer_reset(struct zone *zone, int order,
 /* Returns true if restarting compaction after many failures */
 bool compaction_restarting(struct zone *zone, int order)
 {
+	/* 成员compact_order_failed记录内存碎片整理失败时的申请阶数.
+	 * 内存碎片整理执行成功的时候,如果申请阶数order大于或等于成员compact_order_failed,那么把成员compact_order_failed设置为(order + 1).
+	 * 内存碎片整理执行失败的时候,如果申请阶数order小于成员compact_order_failed,那么把成员compact_order_failed设置为order.
+	 *
+	 * 如果现在的order比之前内存规整失败时的order要小,那么返回false
+	 */
 	if (order < zone->compact_order_failed)
 		return false;
 
+	/* 到这里说明现在的order比之前内存规整失败时的order要大
+	 * 成员compact_considered记录推迟的次数
+	 * 成员compact_defer_shift是推迟的最大次数以2为底的对数,当推迟的次数达到(1 << compact_defer_shift)时,不能推迟
+	 *
+	 * 每次内存碎片整理执行失败,把成员compact_defer_shift加1,不允许超过COMPACT_MAX_DEFER_SHIFT(值为6),即把推迟的最大次数翻倍,但是不能超过64.
+	 * 如果已经等于最大的DEFER_SHIFT了
+	 * 并且推迟次数已经大于了1UL << zone->compact_defer_shift
+	 * 才返回true
+	 */
 	return zone->compact_defer_shift == COMPACT_MAX_DEFER_SHIFT &&
 		zone->compact_considered >= 1UL << zone->compact_defer_shift;
 }
@@ -215,8 +245,10 @@ static inline bool isolation_suitable(struct compact_control *cc,
 
 static void reset_cached_positions(struct zone *zone)
 {
+	/* 该数组用于控制异步和同步两种memory compact场景所从头部开始扫描的页迁移位置 */
 	zone->compact_cached_migrate_pfn[0] = zone->zone_start_pfn;
 	zone->compact_cached_migrate_pfn[1] = zone->zone_start_pfn;
+	/* compact_cached_free_pfn 用于记录从尾部开始扫描的空闲page的位置 */
 	zone->compact_cached_free_pfn =
 				pageblock_start_pfn(zone_end_pfn(zone) - 1);
 }
@@ -225,6 +257,9 @@ static void reset_cached_positions(struct zone *zone)
  * This function is called to clear all cached information on pageblocks that
  * should be skipped for page isolation when the migrate and free page scanner
  * meet.
+ *
+ * 调用此函数是为了清除页面块上的所有缓存信息,当migrate和free page扫描程序相遇时,
+ * 这些信息应该被跳过以进行页面隔离。
  */
 static void __reset_isolation_suitable(struct zone *zone)
 {
@@ -232,21 +267,25 @@ static void __reset_isolation_suitable(struct zone *zone)
 	unsigned long end_pfn = zone_end_pfn(zone);
 	unsigned long pfn;
 
+	/* compact_blockskip_flush: Set to true when the PG_migrate_skip bits should be cleared */
 	zone->compact_blockskip_flush = false;
 
+	/* 将zone中所有pageblock的PB_migrate_skip清空 */
 	/* Walk the zone and mark every pageblock as suitable for isolation */
 	for (pfn = start_pfn; pfn < end_pfn; pfn += pageblock_nr_pages) {
 		struct page *page;
 
 		cond_resched();
-
+		/* 如果pfn不是valid,那么skip掉 */
 		if (!pfn_valid(pfn))
 			continue;
 
+		/* 得到page结构体 */
 		page = pfn_to_page(pfn);
+		/* 如果page不在这个zone里面,那么也continue */
 		if (zone != page_zone(page))
 			continue;
-
+		/* 清除该pageblock的PB_migrate_skip bit */
 		clear_pageblock_skip(page);
 	}
 
@@ -1262,24 +1301,39 @@ static isolate_migrate_t isolate_migratepages(struct zone *zone,
 /*
  * order == -1 is expected when compacting via
  * /proc/sys/vm/compact_memory
+ *
+ * 通过/proc/sys/vm/compact_memory进行压缩时,需要order==-1
  */
 static inline bool is_via_compact_memory(int order)
 {
 	return order == -1;
 }
 
+/* 结束的条件有两个,一是cc->migrate_pfn和cc->free_pfn两个指针相遇,它们从
+ * zone的一头一尾向中间运行.
+ * 二是以order为条件判断当前zone的水位在低水位WMARK_LOW之上.
+ * 如果当前zone在低水位WMARK_LOW之上,那么需要判断伙伴系统中order对应的free_area链表正好有空闲页面,
+ * 或者大于order的空闲链表里有空闲页面,再或者大于pageblock_order的空闲链表有空闲页面.
+ */
 static enum compact_result __compact_finished(struct zone *zone, struct compact_control *cc,
 			    const int migratetype)
 {
 	unsigned int order;
 	unsigned long watermark;
 
+	/* cc->contended表示被锁争用
+	 * 如果被锁争用了或者说收到了一个致命的信号
+	 * 那么返回COMPACT_CONTENDED
+	 */
 	if (cc->contended || fatal_signal_pending(current))
 		return COMPACT_CONTENDED;
 
-	/* Compaction run completes if the migrate and free scanner meet */
+	/* Compaction run completes if the migrate and free scanner meet
+	 * 如果migrate和free扫描者相遇了,那么规整运行完成了
+	 */
 	if (compact_scanners_met(cc)) {
 		/* Let the next compaction start anew. */
+		/* 如果这次规整完成了,那么重置zone里面的compact_cached_migrate_pfn和compact_cached_free_pfn */
 		reset_cached_positions(zone);
 
 		/*
@@ -1287,36 +1341,54 @@ static enum compact_result __compact_finished(struct zone *zone, struct compact_
 		 * by kswapd when it goes to sleep. kcompactd does not set the
 		 * flag itself as the decision to be clear should be directly
 		 * based on an allocation request.
+		 *
+		 * 标记PG_migrate_skip信息应在kswapd进入睡眠状态时由其清除。
+		 * kcompactd本身不设置标志,因为要清除的决定应该直接基于分配请求.
 		 */
 		if (cc->direct_compaction)
 			zone->compact_blockskip_flush = true;
 
+		/* 如果是整个zone就返回COMPACT_COMPLETE */
 		if (cc->whole_zone)
 			return COMPACT_COMPLETE;
-		else
+		else	/* 否则返回COMPACT_PARTIAL_SKIPPED */
 			return COMPACT_PARTIAL_SKIPPED;
 	}
 
+	/* 如果通过/proc/sys/vm/compact_memory进行压缩,那么返回COMPACT_CONTINUE */
 	if (is_via_compact_memory(cc->order))
 		return COMPACT_CONTINUE;
 
-	/* Compaction run is not finished if the watermark is not met */
+	/* Compaction run is not finished if the watermark is not met
+	 * 如果水位还是不足,那么规整的运行还没完成
+	 */
 	watermark = zone->watermark[cc->alloc_flags & ALLOC_WMARK_MASK];
 
 	if (!zone_watermark_ok(zone, cc->order, watermark, cc->classzone_idx,
 							cc->alloc_flags))
 		return COMPACT_CONTINUE;
 
-	/* Direct compactor: Is a suitable page free? */
+
+	/* Direct compactor: Is a suitable page free?
+	 * 直接规整: 有一个合适的页面空闲吗
+	 */
+
+	/* 这里就是从我们需要分配的order到MAX_ORDER去检查有没有一个可以满足我们分配的空闲页面 */
 	for (order = cc->order; order < MAX_ORDER; order++) {
+		/* 得到free_area */
 		struct free_area *area = &zone->free_area[order];
 		bool can_steal;
 
-		/* Job done if page is free of the right migratetype */
+		/* Job done if page is free of the right migratetype
+		 * 如果有正确的migratetype空闲,则完成作业
+		 */
 		if (!list_empty(&area->free_list[migratetype]))
 			return COMPACT_SUCCESS;
 
 #ifdef CONFIG_CMA
+		/* 因为MIGRATE_CMA是MIGRATE_MOVABLE的fallback
+		 * 所以如果MIGRATE_CMA里面有空闲的可以满足要求,那么也返回成功
+		 */
 		/* MIGRATE_MOVABLE can fallback on MIGRATE_CMA */
 		if (migratetype == MIGRATE_MOVABLE &&
 			!list_empty(&area->free_list[MIGRATE_CMA]))
@@ -1325,6 +1397,8 @@ static enum compact_result __compact_finished(struct zone *zone, struct compact_
 		/*
 		 * Job done if allocation would steal freepages from
 		 * other migratetype buddy lists.
+		 *
+		 * 如果分配能从其他migrateype伙伴列表中窃取空闲页面,那么工作就完成了.
 		 */
 		if (find_suitable_fallback(area, order, migratetype,
 						true, &can_steal) != -1)
@@ -1342,6 +1416,7 @@ static enum compact_result compact_finished(struct zone *zone,
 
 	ret = __compact_finished(zone, cc, migratetype);
 	trace_mm_compaction_finished(zone, cc->order, ret);
+	/* 如果ret = COMPACT_NO_SUITABLE_PAGE,那么返回COMPACT_CONTINUE */
 	if (ret == COMPACT_NO_SUITABLE_PAGE)
 		ret = COMPACT_CONTINUE;
 
@@ -1354,6 +1429,12 @@ static enum compact_result compact_finished(struct zone *zone,
  *   COMPACT_SKIPPED  - If there are too few free pages for compaction
  *   COMPACT_SUCCESS  - If the allocation would succeed without compaction
  *   COMPACT_CONTINUE - If compaction should run now
+ *
+ * compaction_suitable: 现在整个zone适合运行内存规整吗?
+ * 返回
+ *	COMPACT_SKIPPED - 如果可规整的free pages页面太少
+ *	COMPACT_SUCCESS - 如果在没有规整的情况下分配可以成功
+ *	COMPACT_CONTINUE - 如果规整现在可以运行
  */
 static enum compact_result __compaction_suitable(struct zone *zone, int order,
 					unsigned int alloc_flags,
@@ -1362,13 +1443,17 @@ static enum compact_result __compaction_suitable(struct zone *zone, int order,
 {
 	unsigned long watermark;
 
+	/* 如果是通过/proc/sys/vm/compact_memory,那么直接返回COMPACT_CONTINUE */
 	if (is_via_compact_memory(order))
 		return COMPACT_CONTINUE;
 
+	/* 拿到zone对应我们alloc_flags的水位 */
 	watermark = zone->watermark[alloc_flags & ALLOC_WMARK_MASK];
 	/*
 	 * If watermarks for high-order allocation are already met, there
 	 * should be no need for compaction at all.
+	 *
+	 * 如果high-order 分配的水位已经满足,则根本不需要压缩.
 	 */
 	if (zone_watermark_ok(zone, order, watermark, classzone_idx,
 								alloc_flags))
@@ -1387,9 +1472,18 @@ static enum compact_result __compaction_suitable(struct zone *zone, int order,
 	 * compaction to proceed to increase its chances.
 	 * ALLOC_CMA is used, as pages in CMA pageblocks are considered
 	 * suitable migration targets
+	 *
+	 * 为了能够隔离迁移目标的free pages页面,必须满足order-0 的水位才能进行规整.
+	 * 这意味着水位和alloc_flags必须匹配,或者比__isolate_free_page()中的检查更悲观.
+	 * 我们不使用直接规整程序的alloc_flags,因为它们与freepage页面隔离无关.
+	 * 然而,我们确实使用直接规整的classzone_idx来跳过lowmem reserves会阻止分配的zone,即使规整成功
+	 * 对于高昂的orders,我们需要低水位而不是min 水位来进行规整,以增加其机会.
+	 * 使用ALLOC_CMA,因为CMA页面块中的页面被认为是合适的迁移目标
 	 */
+	/* 如果order > PAGE_ALLOC_COSTLY_ORDER,则用low水位来进行确认水位是否安全 */
 	watermark = (order > PAGE_ALLOC_COSTLY_ORDER) ?
 				low_wmark_pages(zone) : min_wmark_pages(zone);
+	/* 接下来以oder为0来判断zone是否在上诉水位 + 2 << order之上,如果达不到这个条件,说明zone中只有很少的空闲页面,不适合做内存规整,返回COMPACT_SKIPPED表示跳过这个zone */
 	watermark += compact_gap(order);
 	if (!__zone_watermark_ok(zone, 0, watermark, classzone_idx,
 						ALLOC_CMA, wmark_target))
@@ -1404,7 +1498,7 @@ enum compact_result compaction_suitable(struct zone *zone, int order,
 {
 	enum compact_result ret;
 	int fragindex;
-
+	/* 判断它适不适合做规整 */
 	ret = __compaction_suitable(zone, order, alloc_flags, classzone_idx,
 				    zone_page_state(zone, NR_FREE_PAGES));
 	/*
@@ -1422,9 +1516,20 @@ enum compact_result compaction_suitable(struct zone *zone, int order,
 	 * vm.extfrag_threshold sysctl is meant as a heuristic to prevent
 	 * excessive compaction for costly orders, but it should not be at the
 	 * expense of system stability.
+	 *
+	 * 碎片索引确定分配失败是由于内存不足,还是外部碎片索引
+	 *
+	 * index为-1000意味着分配可能会成功取决于水位，但我们已经失败了高阶水印检查.
+	 * index接近0意味着失败是由于缺乏内存
+	 * index接近1000意味着失败由于碎片
+	 *
+	 * 只有当failure是由于碎片造成时才进行规整.对于不是昂贵的orders替代成功回收和规整的是OOM.
+	 * Fragindex和vm.extfrag_threshold sysctl旨在作为一种启发式方法,防止对昂贵的order进行过度压缩,但不应以牺牲系统稳定性为代价.
 	 */
 	if (ret == COMPACT_CONTINUE && (order > PAGE_ALLOC_COSTLY_ORDER)) {
+	/* 通过fragmentation_index函数获取当前zone对于order阶内存块碎片程度评估,如果认为碎片程度不高则不进行规整 */
 		fragindex = fragmentation_index(zone, order);
+		/* fragmentation_index返回值需要和sysctl_extfrag_threshold阈值进行比较，如果小于阈值，则不进行规整，此值通过/proc/sys/vm/extfrag_threshold进行设置. */
 		if (fragindex >= 0 && fragindex <= sysctl_extfrag_threshold)
 			ret = COMPACT_NOT_SUITABLE_ZONE;
 	}
@@ -1471,23 +1576,36 @@ bool compaction_zonelist_suitable(struct alloc_context *ac, int order,
 static enum compact_result compact_zone(struct zone *zone, struct compact_control *cc)
 {
 	enum compact_result ret;
+	/* 拿到该zone的起始pfn */
 	unsigned long start_pfn = zone->zone_start_pfn;
+	/* 拿到该zone的结束pfn */
 	unsigned long end_pfn = zone_end_pfn(zone);
+	/* 拿到gfp_mask的migratetype部分 */
 	const int migratetype = gfpflags_to_migratetype(cc->gfp_mask);
+	/* sync表示是同步还是异步 */
 	const bool sync = cc->mode != MIGRATE_ASYNC;
 
+	/* 根据当前的zone水位来判断是否进行内存规整 */
 	ret = compaction_suitable(zone, cc->order, cc->alloc_flags,
 							cc->classzone_idx);
 	/* Compaction is likely to fail */
+	/* 如果说ret == COMPACT_SUCCESS,说明可以不用规整就可以分配到order的内存了
+	 * 如果ret == COMPACT_SKIPPED,说明可规整的页面太少
+	 * 这两种情况都直接返回算了
+	 */
 	if (ret == COMPACT_SUCCESS || ret == COMPACT_SKIPPED)
 		return ret;
 
-	/* huh, compaction_suitable is returning something unexpected */
+	/* huh, compaction_suitable is returning something unexpected
+	 * compaction_suitable返回了一些意想不到的东西
+	 */
 	VM_BUG_ON(ret != COMPACT_CONTINUE);
 
 	/*
 	 * Clear pageblock skip if there were failures recently and compaction
 	 * is about to be retried after being deferred.
+	 *
+	 * 如果最近有失败清除pageblock skip,在延迟后即将重试规整
 	 */
 	if (compaction_restarting(zone, cc->order))
 		__reset_isolation_suitable(zone);
@@ -1497,34 +1615,53 @@ static enum compact_result compact_zone(struct zone *zone, struct compact_contro
 	 * information on where the scanners should start (unless we explicitly
 	 * want to compact the whole zone), but check that it is initialised
 	 * by ensuring the values are within zone boundaries.
+	 *
+	 * 设置将所有可移动页面移动到区域的末尾.使用了关于scanner应该从哪里开始的缓存信息(除非我们明确希望规整整个区域),但通过确保值在zone边界内来检查它是否已初始化
 	 */
+
+	/* 如果是整个zone */
 	if (cc->whole_zone) {
+		/* 那么迁移起始pfh就是该zone的startr_pfn */
 		cc->migrate_pfn = start_pfn;
+		/* free_pfn就是最后一块pageblock的起始pfn */
 		cc->free_pfn = pageblock_start_pfn(end_pfn - 1);
 	} else {
+		/* 如果不是,那么起始迁移帧就是zone里面缓存的migrate pfn,就看是同步还是异步了 */
 		cc->migrate_pfn = zone->compact_cached_migrate_pfn[sync];
+		/* free_pfn就是zone里面缓存的free_pfn */
 		cc->free_pfn = zone->compact_cached_free_pfn;
+		/* 如果free_pfn比start还要小 或者说比end_pfn还要大,说明没有在这个zone的区域里面 */
 		if (cc->free_pfn < start_pfn || cc->free_pfn >= end_pfn) {
+			/* 那么还是把free_pfn设置为该zone的最后一个pageblock的pfn */
 			cc->free_pfn = pageblock_start_pfn(end_pfn - 1);
+			/* 然后把compact_cache_free_pfn给替换掉 */
 			zone->compact_cached_free_pfn = cc->free_pfn;
 		}
+		/* 如果cc->migrate_pfn比start_pfn要小,大于等于end_pfn,也说明migrate_pfn也没有落在这个zone里面 */
 		if (cc->migrate_pfn < start_pfn || cc->migrate_pfn >= end_pfn) {
+			/* 把它重新赋值为start_pfn之后,更新compact_cached_migrate_pfn */
 			cc->migrate_pfn = start_pfn;
 			zone->compact_cached_migrate_pfn[0] = cc->migrate_pfn;
 			zone->compact_cached_migrate_pfn[1] = cc->migrate_pfn;
 		}
-
+		/* 如果cc->migrate_pfn为起始,那么这是为whole_zone */
 		if (cc->migrate_pfn == start_pfn)
 			cc->whole_zone = true;
 	}
 
+	/* 设置last_migrate_pfn为0 */
 	cc->last_migrated_pfn = 0;
 
 	trace_mm_compaction_begin(start_pfn, cc->migrate_pfn,
 				cc->free_pfn, end_pfn, sync);
 
+	/* 清理cpu的pagevec的页面,后续我要占用 */
 	migrate_prep_local();
 
+	/* while循坏从zone的开头处去扫描和查找合适的迁移页面,然后尝试迁移到
+	 * zone末端的空闲页面中,直到zone处于低水位WMARK_LOW之上
+	 */
+	/* compact_finished 判断compact过程是否可以结束 */
 	while ((ret = compact_finished(zone, cc, migratetype)) ==
 						COMPACT_CONTINUE) {
 		int err;
@@ -1641,11 +1778,13 @@ static enum compact_result compact_zone_order(struct zone *zone, int order,
 		.order = order,
 		.gfp_mask = gfp_mask,
 		.zone = zone,
+		/* 看是同步模式还是异步模式 */
 		.mode = (prio == COMPACT_PRIO_ASYNC) ?
 					MIGRATE_ASYNC :	MIGRATE_SYNC_LIGHT,
 		.alloc_flags = alloc_flags,
 		.classzone_idx = classzone_idx,
 		.direct_compaction = true,
+		/* 看是不是规整整个zone */
 		.whole_zone = (prio == MIN_COMPACT_PRIORITY),
 		.ignore_skip_hint = (prio == MIN_COMPACT_PRIORITY),
 		.ignore_block_suitable = (prio == MIN_COMPACT_PRIORITY)
@@ -1672,6 +1811,15 @@ int sysctl_extfrag_threshold = 500;
  * @mode: The migration mode for async, sync light, or sync migration
  *
  * This is the main entry point for direct page compaction.
+ *
+ * try_to_compact_pages - 直接规整以满足高阶分配
+ * @gfp_mask: 当前分配的gfp掩码
+ * @order: 当前分配的order
+ * @alloc_flags: 当前分配的分配标志
+ * @ac: 当前分配的上下文
+ * @mode: async、sync light或sync migration的迁移模式
+ *
+ * 这是直接页面规整的主要入口点
  */
 enum compact_result try_to_compact_pages(gfp_t gfp_mask, unsigned int order,
 		unsigned int alloc_flags, const struct alloc_context *ac,
@@ -1683,23 +1831,29 @@ enum compact_result try_to_compact_pages(gfp_t gfp_mask, unsigned int order,
 	struct zone *zone;
 	enum compact_result rc = COMPACT_SKIPPED;
 
-	/* Check if the GFP flags allow compaction */
+	/* Check if the GFP flags allow compaction
+	 *
+	 * 如果gfp_mask没有__GFP_FS,或者没有__GFP_IO,那么返回COMPACT_SKIPPED
+	 */
 	if (!may_enter_fs || !may_perform_io)
 		return COMPACT_SKIPPED;
 
 	trace_mm_compaction_try_to_compact_pages(order, gfp_mask, prio);
 
 	/* Compact each zone in the list */
+	/* for_each_zone_zonelist_nodemask 会根据分配掩码来确定需要扫描和遍历哪些zone */
 	for_each_zone_zonelist_nodemask(zone, z, ac->zonelist, ac->high_zoneidx,
 								ac->nodemask) {
 		enum compact_result status;
 
+		/* 如果优先级大于MIN_COMPACT_PRIORITY,并且因为前面的失败规整需要延迟 */
 		if (prio > MIN_COMPACT_PRIORITY
 					&& compaction_deferred(zone, order)) {
+			/* 取rc和COMPACT_DEFERRED的最大值,然后continue,进行下一个zone的处理 */
 			rc = max_t(enum compact_result, COMPACT_DEFERRED, rc);
 			continue;
 		}
-
+		/* 对特定的zone执行内存规整 */
 		status = compact_zone_order(zone, order, gfp_mask, prio,
 					alloc_flags, ac_classzone_idx(ac));
 		rc = max(status, rc);

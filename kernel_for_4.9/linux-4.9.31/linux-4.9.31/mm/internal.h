@@ -170,25 +170,49 @@ extern int user_min_free_kbytes;
  * at the end of a zone and migrate_pfn begins at the start. Movable pages
  * are moved to the end of a zone during a compaction run and the run
  * completes when free_pfn <= migrate_pfn
+ *
+ * compact_control用于跟踪正在迁移的页面和它们在内存压缩过程中被迁移到的空闲页面.
+ * free_pfn开始于区域的末尾,migrate_pfn在开始.
+ * 可移动页面在规整运行时被移动到zone的末尾,当free_pfn <= migrate_pfn完成
  */
 struct compact_control {
+	/* struct list_head freepages:空闲页链表,表明页面要迁移到目的页即空闲页链表,处于该链表中的空闲页,被isolate孤立出来,防止同时被buddy给其他进程使用 */
 	struct list_head freepages;	/* List of free pages to migrate to */
+	/* 所要迁移的页面链表,用于记录本次所需要迁移的页面,处于该链表中的空闲页,被isolate孤立出来,防止页面被swap out到磁盘或者page cache被释放等场景. */
 	struct list_head migratepages;	/* List of pages being migrated */
+	/* 记录freepages中有多少个空闲页 被isolate孤立出来 */
 	unsigned long nr_freepages;	/* Number of isolated free pages */
+	/* 记录migratepages中有多少个页面要进行迁移，并被isolate孤立出来 */
 	unsigned long nr_migratepages;	/* Number of pages to migrate */
+	/* 从尾部开始扫描的空闲起始页帧号,即本次扫描zone,从尾部开始扫描寻找空闲页的起始位置 */
 	unsigned long free_pfn;		/* isolate_freepages search base */
+	/* 本次扫描,从头部往尾部开始扫描的起始位置,从该位置开始寻找符合要求的页进行迁移. */
 	unsigned long migrate_pfn;	/* isolate_migratepages search base */
+	/* */
 	unsigned long last_migrated_pfn;/* Not yet flushed page being freed */
+	/* 是同步还是异步模式,即是通过kcompact线程进行内存规整,还是通过直接方式进行内存规整 */
 	enum migrate_mode mode;		/* Async or sync migration mode */
+	/* 若为true,代表扫描器在扫描pageblock过程中,不再根据PG_migrate_sip来判断是否跳过处理,这将会借助历史信息避免重复扫描处理过的pageblock块 */
 	bool ignore_skip_hint;		/* Scan blocks even if marked skip */
+	/* 若为true,空闲页扫描器将不会对空闲页pageblock的迁移类型进行判断;
+	 * 若为false,代表扫描出来的空闲页必须是MIGRATE_MOVEABLE或MIGRATE_CMA可移动迁移类型
+	 */
 	bool ignore_block_suitable;	/* Scan blocks considered unsuitable */
+	/* 如果为false,则是通过kscompact线程或者/proc手动触发触发 */
 	bool direct_compaction;		/* False from kcompactd or /proc/... */
+	/* 是否一次性扫描整个zone */
 	bool whole_zone;		/* Whole zone should/has been scanned */
+	/* 直接内存规整需要的order */
 	int order;			/* order a direct compactor needs */
+	/* 直接内存规整的gfp mask */
 	const gfp_t gfp_mask;		/* gfp mask of a direct compactor */
+	/* 直接内存规整的alloc flags */
 	const unsigned int alloc_flags;	/* alloc flags of a direct compactor */
+	/* 直接内存规整的zone index */
 	const int classzone_idx;	/* zone index of a direct compactor */
+	/* 内存规整的zone */
 	struct zone *zone;
+	/* 单个锁或者调度竞争 */
 	bool contended;			/* Signal lock or sched contention */
 };
 

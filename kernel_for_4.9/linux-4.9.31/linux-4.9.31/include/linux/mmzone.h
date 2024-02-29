@@ -595,9 +595,28 @@ struct zone {
 	 * On compaction failure, 1<<compact_defer_shift compactions
 	 * are skipped before trying again. The number attempted since
 	 * last failure is tracked with compact_considered.
+	 *
+	 * 在规整失败时,在重试之前将跳过 1<<compact_defer_shift规整.
+	 * 使用compact_conidered来跟踪自上次失败以来尝试的次数.
+	 */
+
+	/* 内存碎片整理成功的标准是: (空闲页数 − 申请页数)大于或等于水线,并且申请或备用的迁移类型至少有一个足够大的空闲页块.
+	 * 执行完全同步模式或轻量级同步模式的内存碎片整理,当迁移扫描器和空闲扫描器相遇的时候,没有达到成功标准,以后试图执行轻量级同步或异步模式的内存碎片整理,
+	 * 如果申请阶数大于或等于内存碎片整理失败时的申请阶数,需要推迟若干次.
+	 * 内核在内存区域中增加了3个成员用来记录内存碎片整理推迟的信息:
+	 *
+	 * 成员compact_considered记录推迟的次数
+	 * 成员compact_defer_shift是推迟的最大次数以2为底的对数,当推迟的次数达到(1 << compact_defer_shift)时,不能推迟
+	 *
+	 * 每次内存碎片整理执行失败,把成员compact_defer_shift加1,不允许超过COMPACT_MAX_DEFER_SHIFT(值为6),即把推迟的最大次数翻倍,但是不能超过64.
+	 * 页分配器在执行内存碎片整理以后,如果分配页成功,那么把成员compact_defer_shift设置为0.
 	 */
 	unsigned int		compact_considered;
 	unsigned int		compact_defer_shift;
+	/* 成员compact_order_failed记录内存碎片整理失败时的申请阶数.
+	 * 内存碎片整理执行成功的时候,如果申请阶数order大于或等于成员compact_order_failed,那么把成员compact_order_failed设置为(order + 1).
+	 * 内存碎片整理执行失败的时候,如果申请阶数order小于成员compact_order_failed,那么把成员compact_order_failed设置为order.
+	 */
 	int			compact_order_failed;
 #endif
 

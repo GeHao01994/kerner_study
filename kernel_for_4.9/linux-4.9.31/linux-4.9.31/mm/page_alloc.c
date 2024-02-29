@@ -3639,6 +3639,19 @@ out:
 
 #ifdef CONFIG_COMPACTION
 /* Try memory compaction for high-order allocations before reclaim */
+/* 伙伴系统以页为单位来管理内存,内存碎片也是基于页面的,即由大量离散且不连续的页面导致的.
+ * 从内核角度来看,内存碎片不是好事情,有些情况下物理设备需要大段的连续的物理内存,如果内核无法满足,
+ * 则会发生内核panic.内存碎片化好比军训中带队,行走时间长了,队列乱了,需要重新规整一下,
+ * 因此本章称为内存规整,一些文献中称为内存紧凑,它是为了解决内核碎片化而出现的一个功能.
+ * 内核中去碎片化的基本原理是安装页的可移动性将页面分组.
+ * 迁移内核本身使用的物理内存的实现难度和复杂度都很大,因此目前的内核是不迁移内核本身使用的物理页面.
+ * 对于用户进程使用的页面,实际上通过用户页表的映射来访问.
+ * 用户页表可以移动和修改映射关系,不影响用户进程,因此内存规整是基于页面迁移实现的.
+ */
+
+/* 内存规整的一个重要的应用场景是在分配大块内存时(order > 1),在WMARK_LOW低水位情况下分配失败,
+ * 唤醒kswapd内核线程后依然无法分配出内存,这时调用__alloc_pages_direct_compact来压缩内存尝试分配出所需要的内存.
+ */
 static struct page *
 __alloc_pages_direct_compact(gfp_t gfp_mask, unsigned int order,
 		unsigned int alloc_flags, const struct alloc_context *ac,
@@ -3646,10 +3659,10 @@ __alloc_pages_direct_compact(gfp_t gfp_mask, unsigned int order,
 {
 	struct page *page;
 	unsigned int noreclaim_flag = current->flags & PF_MEMALLOC;
-
+	/* 内存规整是针对high-order的内存分配,所以order等于0的情况不需要出发内存规整. */
 	if (!order)
 		return NULL;
-
+	/* try_to_compact_pages函数执行时需要设置当前进程的PF_MEMALLOC标志位,该标志位会在页迁移时使用,避免页面锁(PG_locked)发生死锁. */
 	current->flags |= PF_MEMALLOC;
 	*compact_result = try_to_compact_pages(gfp_mask, order, alloc_flags, ac,
 									prio);
@@ -3663,7 +3676,7 @@ __alloc_pages_direct_compact(gfp_t gfp_mask, unsigned int order,
 	 * count a compaction stall
 	 */
 	count_vm_event(COMPACTSTALL);
-
+	/* 当内存规整执行完毕后,调用get_page_from_freelist来尝试分配内存,如果分配成功将返回首页page的数据结构 */
 	page = get_page_from_freelist(gfp_mask, order, alloc_flags, ac);
 
 	if (page) {
