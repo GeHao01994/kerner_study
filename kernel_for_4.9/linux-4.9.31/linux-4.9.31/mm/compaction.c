@@ -237,9 +237,12 @@ bool compaction_restarting(struct zone *zone, int order)
 static inline bool isolation_suitable(struct compact_control *cc,
 					struct page *page)
 {
+	/*ignore_skip_hint: 若为true,代表扫描器在扫描pageblock过程中,不再根据PG_migrate_sip来判断是否跳过处理 */
+	bool ignore_skip_hint;
 	if (cc->ignore_skip_hint)
 		return true;
 
+	/* 否则得到(1 << (PB_migrate_skip)位,如果为1,则表示需要跳过 */
 	return !get_pageblock_skip(page);
 }
 
@@ -394,25 +397,41 @@ static bool compact_trylock_irqsave(spinlock_t *lock, unsigned long *flags,
  *		async compaction due to need_resched()
  * Returns false when compaction can continue (sync compaction might have
  *		scheduled)
+ *
+ * 压缩需要拿到一些粗鲁的潜在的非常激烈的竞争锁.这个锁应该定期去解锁以避免
+ * 长时间禁用IRQ,即使没有人等待锁.
+ * 也可能是因为允许IRQ会导致need_resched()变为true.
+ * 如果需要调度,异步规整将中止。同步规整调度.
+ * 如果挂起致命信号,则任一压缩类型也将中止.
+ * 在任何一种情况下,如果锁被锁定,它都会被丢弃而无法重新获得.
+ *
+ * 如果规整因致命信号挂起而中止,或者异步规整因need_sched而中止,则返回true
+ *
+ * 当规整可以继续时返回false(同步规整可能会调度)
+ *
  */
 static bool compact_unlock_should_abort(spinlock_t *lock,
 		unsigned long flags, bool *locked, struct compact_control *cc)
 {
+	/* 如果被lock了,那么解锁之后把lock设置为false */
 	if (*locked) {
 		spin_unlock_irqrestore(lock, flags);
 		*locked = false;
 	}
 
+	/* 如果有致命的信号,那么cc->contended设置为true */
 	if (fatal_signal_pending(current)) {
 		cc->contended = true;
 		return true;
 	}
 
 	if (need_resched()) {
+		/* 如果是异步模式,那么cc->contended = true之后返回true */
 		if (cc->mode == MIGRATE_ASYNC) {
 			cc->contended = true;
 			return true;
 		}
+		/* 如果是同步,那么调度出去之后返回false */
 		cond_resched();
 	}
 
@@ -427,16 +446,24 @@ static bool compact_unlock_should_abort(spinlock_t *lock,
  *
  * Returns false when no scheduling was needed, or sync compaction scheduled.
  * Returns true when async compaction should abort.
+ *
+ * 除了避免锁争用之外,规整还定期进行检查need_sched()无论同步规整的调度还是终止异步规整.
+ * 这与compact_unlock_should_abort()的操作类似，但是在不涉及锁的情况下使用。
+ *
+ * 当不需要调度或同步规整调度时,返回false.
+ * 当异步规整应该中止时,返回true.
  */
 static inline bool compact_should_abort(struct compact_control *cc)
 {
 	/* async compaction aborts if contended */
+	/* 如果需要重新调度 */
 	if (need_resched()) {
+		/* 如果是异步模式,那么cc->contended = true之后返回true */
 		if (cc->mode == MIGRATE_ASYNC) {
 			cc->contended = true;
 			return true;
 		}
-
+		/* 如果是同步,那么调度出去之后返回false */
 		cond_resched();
 	}
 
@@ -447,6 +474,10 @@ static inline bool compact_should_abort(struct compact_control *cc)
  * Isolate free pages onto a private freelist. If @strict is true, will abort
  * returning 0 on any invalid PFNs or non-free pages inside of the pageblock
  * (even though it may still end up isolating some pages).
+ *
+ * 将free页面隔离到私有freelist中.
+ * 如果@strict为true,则将终止
+ * 在页面块内的任何无效PFN或non-free页面上返回0(即使最终可能仍会隔离某些页面)
  */
 static unsigned long isolate_freepages_block(struct compact_control *cc,
 				unsigned long *start_pfn,
@@ -460,7 +491,7 @@ static unsigned long isolate_freepages_block(struct compact_control *cc,
 	bool locked = false;
 	unsigned long blockpfn = *start_pfn;
 	unsigned int order;
-
+	/* 得到blockpfn对应的struct page */
 	cursor = pfn_to_page(blockpfn);
 
 	/* Isolate free pages. */
@@ -685,6 +716,7 @@ static bool too_many_isolated(struct zone *zone)
 	isolated = node_page_state(zone->zone_pgdat, NR_ISOLATED_FILE) +
 			node_page_state(zone->zone_pgdat, NR_ISOLATED_ANON);
 
+	/* 这里主要是判断隔离的页面是不是大于(inactive + active) / 2 */
 	return isolated > (inactive + active) / 2;
 }
 
@@ -705,6 +737,19 @@ static bool too_many_isolated(struct zone *zone)
  * The pages are isolated on cc->migratepages list (not required to be empty),
  * and cc->nr_migratepages is updated accordingly. The cc->migrate_pfn field
  * is neither read nor updated.
+ *
+ * isolate_migratepages_block（）-在单个页面块中隔离所有可迁移的页面
+ * @cc: 规整控制结构体
+ * @low_pfn: 隔离的第一个PFN
+ * @end_pfn：在同一页面块内要隔离的倒数第一个的PFN
+ * isolate_mode：要使用的隔离模式.
+ *
+ * 将指定的[low_pfn,end_pfn]范围内的所有能够迁移的页面隔离出来.
+ * 该范围应在同一个页面块内.
+ * 如果有致命信号挂起,则返回零,否则返回未扫描的第一个页面(可能小于、等于或大于end_pfn).
+ *
+ * 页面在cc->migratepages列表中被隔离(不要求为空),cc->nr_migratepages会相应更新.
+ * cc->migrate_pfn字段既不读取也不更新。
  */
 static unsigned long
 isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
@@ -724,6 +769,14 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 	 * Ensure that there are not too many pages isolated from the LRU
 	 * list by either parallel reclaimers or compaction. If there are,
 	 * delay for some time until fewer pages are isolated
+	 *
+	 * 确保没有太多页面通过并行回收或规整从LRU列表中隔离出来.
+	 * 如果有,请延迟一段时间,直到隔离出较少的页面
+	 */
+
+	/* too_many_isolated如果判断当前临时从LRU链表分离出来的页面比较多,
+	 * 则最好睡眠等待100毫秒(congestion_wait).
+	 * 如果迁移模式是异步(MIGRATE_ASYNC)的,则直接退出
 	 */
 	while (unlikely(too_many_isolated(zone))) {
 		/* async migration should just abort */
@@ -736,23 +789,38 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 			return 0;
 	}
 
+	/* 判断规整是不是要终止 */
 	if (compact_should_abort(cc))
 		return 0;
 
+	/* 如果是异步直接规整,设置skip_on_failure为true,next_skip_pfn为
+	 * #define block_end_pfn(pfn, order)	ALIGN((pfn) + 1, 1UL << (order))
+	 * 为该pfn的结束pfn
+	 */
 	if (cc->direct_compaction && (cc->mode == MIGRATE_ASYNC)) {
 		skip_on_failure = true;
 		next_skip_pfn = block_end_pfn(low_pfn, cc->order);
 	}
 
+	/* 执行完隔离，将low_pfn到end_pfn中正在使用的页框从zone->lru中取出来,返回的是可移动页扫描扫描到的页框号
+	 * 而UNMOVABLE类型的页框是不会处于lru链表中的，所以所有不在lru链表中的页都会被跳过
+	 * 返回的是扫描到的最后的页
+	 *
+	 * for循环扫描pageblock去寻觅可以迁移的页
+	 */
 	/* Time to isolate some pages for migration */
 	for (; low_pfn < end_pfn; low_pfn++) {
-
+		/* 如果skip_on_failure等于true,并且low_pfn大于next_skip_pfn */
 		if (skip_on_failure && low_pfn >= next_skip_pfn) {
 			/*
 			 * We have isolated all migration candidates in the
 			 * previous order-aligned block, and did not skip it due
 			 * to failure. We should migrate the pages now and
 			 * hopefully succeed compaction.
+			 *
+			 * 我们已经在上一个order-aligned的块中隔离了所有候选迁移,
+			 * 并且没有因为失败而跳过它.
+			 * 我们现在应该迁移这些页面,希望规整成功。
 			 */
 			if (nr_isolated)
 				break;
@@ -766,6 +834,12 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 			 * a compound or a high-order buddy page in the
 			 * previous loop iteration.
 			 */
+			/*
+			 * 我们未能在上一个order-aligned的块中进行隔离.
+			 * 将新边界设置为当前块的结束.
+			 * 注意,我们不能简单地通过1 << order增加next_skip_pfn,因为low_pfn可能由于在上一次循环迭代中
+			 * 跳过复合或高阶伙伴页面而增加了更高的数字
+			 */
 			next_skip_pfn = block_end_pfn(low_pfn, cc->order);
 		}
 
@@ -773,18 +847,29 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 		 * Periodically drop the lock (if held) regardless of its
 		 * contention, to give chance to IRQs. Abort async compaction
 		 * if contended.
+		 *
+		 * 无论锁的争用如何,都要定期丢弃锁(如果已持有),以便为IRQs提供机会.
+		 * 如果有争用，则中止异步规整
+		 */
+
+		/* 如果low_pfn / SWAP_CLUSTER_MAX (#define SWAP_CLUSTER_MAX 32UL)
+		 * 余数为0,并且compact_unlock_should_abort
+		 * 那么break出去
 		 */
 		if (!(low_pfn % SWAP_CLUSTER_MAX)
 		    && compact_unlock_should_abort(zone_lru_lock(zone), flags,
 								&locked, cc))
 			break;
 
+		/* 如果pfn不是valid的,那么goto isolate_fail */
 		if (!pfn_valid_within(low_pfn))
 			goto isolate_fail;
+		/* nr_scanned ++ */
 		nr_scanned++;
 
 		page = pfn_to_page(low_pfn);
 
+		/* 如果valid_page为NULL,那么把该page设置为valid_page */
 		if (!valid_page)
 			valid_page = page;
 
@@ -793,14 +878,30 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 		 * which is generally unsafe, but the race window is small and
 		 * the worst thing that can happen is that we skip some
 		 * potential isolation targets.
+		 *
+		 * 如果是空闲的,那么skip掉.
+		 * 我们在这里在没有zone lock下去读的page order,
+		 * 这通常是不安全的,但竞争机会很小,最糟糕的情况是我们跳过了一些潜在的隔离目标
 		 */
+
+		/* 如果该页还在伙伴系统中,那么该页不适合迁移,略过该页. */
 		if (PageBuddy(page)) {
+			/* 通过page_order_unsafe读取该页的order值 */
 			unsigned long freepage_order = page_order_unsafe(page);
 
 			/*
 			 * Without lock, we cannot be sure that what we got is
 			 * a valid page order. Consider only values in the
 			 * valid order range to prevent low_pfn overflow.
+			 *
+			 * 没有锁,我们无法确定我们得到的是有效的page order.
+			 * 只考虑有效的order范围内的值,以防止低_pfn溢出.
+			 */
+
+			/* 如果0 < freepage_order < MAX_ORDER
+			 * 那么low_pfn = low_pfn + 1 << order - 1
+			 *
+			 * 这里肯定会-1啦,因为你到下一个循环的时候会 + 1就是下一块的起始地址了
 			 */
 			if (freepage_order > 0 && freepage_order < MAX_ORDER)
 				low_pfn += (1UL << freepage_order) - 1;
@@ -813,10 +914,20 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 		 * a lot of iterations if we skip them at once. The check is
 		 * racy, but we can consider only valid values and the only
 		 * danger is skipping too much.
+		 *
+		 * 无论是否在LRU上,都不会规整像THP和hugetlbfs等复合页.
+		 * 如果我们一次跳过它们,我们可能会节省很多迭代.
+		 * 这个检查是活泼的,但我们只能考虑有效的值,唯一的危险是跳过太多.
 		 */
+
+		/* 如果是复合页 */
 		if (PageCompound(page)) {
+			/* 得到复合页的order */
 			unsigned int comp_order = compound_order(page);
 
+			/* 如果复合页 < MAX_ORDER
+			 * 那么low_pfn = low_pfn + 1 << comp_order - 1
+			 */
 			if (likely(comp_order < MAX_ORDER))
 				low_pfn += (1UL << comp_order) - 1;
 
@@ -827,20 +938,45 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 		 * Check may be lockless but that's ok as we recheck later.
 		 * It's possible to migrate LRU and non-lru movable pages.
 		 * Skip any other type of page
+		 *
+		 * 检查可能是无锁的,但我们稍后再检查时也可以.
+		 * 迁移LRU和非LRU可移动页面是可能的.
+		 * 跳过任何其他类型的页面
+		 */
+
+		/* 如果page不在LRU页面里面 */
+		/* 这个很有意思,上文谈到大部分可移动页应该都是用户态的匿名页,这里怎么还会有不再LRU上的物理页呢,
+		 * 实际这涉及到页迁移特性的一种功能,有兴趣的朋友可以阅读一下"Documentation/vm/page_migration.rst"文章中"Non-LRU page migration"这一小节.
+		 * 内核中申请的内存通常都是non-LRU上并且不可移动,但是内核提供了定制能力,开发者可以在内核驱动中将自己申请的内存标记为可移动,
+		 * 为此内核为page添加了两个新的flag即PG_movable和PG_isolated用于标识这种non-LRU并且可迁移的页.
+		 * 开发者通常使用__SetPageMovable接口主动设置这些内存页PG_movable标记,而PG_isolated标识此页已经被隔离,开发者不需要主动设置此标记
+		 * 现在我们应该可以理解上述代码中对于__PageMovable(page)判断,如果一个non-LRU页被设置了PG_movable并且PG_isolated还未被设置,
+		 * 那么代表这个页也是可以进行迁移，随后将会调用isolate_movable_page函数进行隔离操作
 		 */
 		if (!PageLRU(page)) {
 			/*
 			 * __PageMovable can return false positive so we need
 			 * to verify it under page_lock.
+			 *
+			 * __PageMovable可能返回false,所以我们需要在page_lock下进行验证.
 			 */
+
+			/* 对于非LRU可移动页面的测试,VM支持__PageMovable()函数.
+			 * 然而,它并不能保证识别非LRU可移动页面,因为page->mapping字段与struct page中的其他变量是统一的.
+			 */
+			/* 如果page是movable并且是没有在隔离链表里面的 */
 			if (unlikely(__PageMovable(page)) &&
 					!PageIsolated(page)) {
+				/* 如果有锁就解锁之后把locked设置为false */
 				if (locked) {
 					spin_unlock_irqrestore(zone_lru_lock(zone),
 									flags);
 					locked = false;
 				}
-
+				/* 问题还没有结束,实际想要让这些在内核中直接申请的页变为可迁移,光设置标记还不行,开发人员需要自定义这些页如何隔离以及如何迁移,
+				 * 因此内核要求,开发者需要在address_space_operations结构体里面实现isolate_page、migratepage及putback_page函数.
+				 * 现在回到isolate_movable_page函数,此函数将会调用开发人员注册的isolate_page函数完成这些页隔离操作
+				 */
 				if (isolate_movable_page(page, isolate_mode))
 					goto isolate_success;
 			}
@@ -852,6 +988,14 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 		 * Migration will fail if an anonymous page is pinned in memory,
 		 * so avoid taking lru_lock and isolating it unnecessarily in an
 		 * admittedly racy check.
+		 *
+		 * 如果一个匿名页面被固定在内存中,迁移将失败,因此避免使用lru_lock,隔离它不必在公认的
+		 * 活跃检查
+		 */
+		/* 如果匿名页已经被mlock等接口pin住,那么将会略过
+		 * 一方面,通过page_mapping判断当前页是否为文件页;
+		 * 另一方面,通过page_count(page) > page_mapcount(page)判断是否被pin住,
+		 * 匿名页被pin住时会增加_refcount数值。
 		 */
 		if (!page_mapping(page) &&
 		    page_count(page) > page_mapcount(page))
@@ -979,6 +1123,15 @@ isolate_fail:
  * Returns zero if isolation fails fatally due to e.g. pending signal.
  * Otherwise, function returns one-past-the-last PFN of isolated page
  * (which may be greater than end_pfn if end fell in a middle of a THP page).
+ *
+ * isolate_migratepages_range（）- 隔离PFN范围内的可迁移页面
+ * @cc：规整控制结构体
+ * @start_pfn: 第一个开始隔离的pfn
+ * @end_pfn：倒数第一个pfn
+ *
+ * 如果规整由于例如挂起的信号而不幸失败了则返回零.
+ * 否则,函数返回隔离页的最后一页(如果end落在THP页的中间,则该值可能大于end_PFN).
+ *
  */
 unsigned long
 isolate_migratepages_range(struct compact_control *cc, unsigned long start_pfn,
@@ -986,13 +1139,22 @@ isolate_migratepages_range(struct compact_control *cc, unsigned long start_pfn,
 {
 	unsigned long pfn, block_start_pfn, block_end_pfn;
 
-	/* Scan block by block. First and last block may be incomplete */
+	/* Scan block by block. First and last block may be incomplete
+	 * 一块一块的扫描.第一块或者最后一块可能不完整
+	 */
+
+	/* 拿到起始的pfn,拿到该起始pfn所在块的起始pfn */
 	pfn = start_pfn;
 	block_start_pfn = pageblock_start_pfn(pfn);
+	/* 如果起始块pfn < zone的起始pfn
+	 * 那么把zone的起始块pfn赋值给block_start_pfn
+	 */
 	if (block_start_pfn < cc->zone->zone_start_pfn)
 		block_start_pfn = cc->zone->zone_start_pfn;
+	/* 拿到页面块的结束pfn */
 	block_end_pfn = pageblock_end_pfn(pfn);
 
+	/* 一块一块去检查并做isolate_migratepages_block的操作 */
 	for (; pfn < end_pfn; pfn = block_end_pfn,
 				block_start_pfn = block_end_pfn,
 				block_end_pfn += pageblock_nr_pages) {
@@ -1113,11 +1275,15 @@ static void isolate_freepages(struct compact_control *cc)
 		if (!suitable_migration_target(cc, page))
 			continue;
 
-		/* If isolation recently failed, do not retry */
+		/* If isolation recently failed, do not retry
+		 * 如果设置了ignore_skip_hint,那么就不用理PB_migrate_skip了
+		 * 否则获取页框的PB_migrate_skip标志，如果设置了则跳过这个pageblock
+		 */
 		if (!isolation_suitable(cc, page))
 			continue;
 
 		/* Found a block suitable for isolating free pages from. */
+		/* 去扫描和分离pageblock中的页面是否适合迁移 */
 		isolate_freepages_block(cc, &isolate_start_pfn, block_end_pfn,
 					freelist, false);
 
@@ -1218,6 +1384,11 @@ int sysctl_compact_unevictable_allowed __read_mostly = 1;
  * starting at the block pointed to by the migrate scanner pfn within
  * compact_control.
  */
+
+/* isolate_migratepages函数用于扫描和查找合适迁移的页,从zone的头部开始.
+ * 查找的步长以pageblock_nr_pages为单位.
+ * Linux内核以pageblock为单位来管理页的迁移属性.
+ */
 static isolate_migrate_t isolate_migratepages(struct zone *zone,
 					struct compact_control *cc)
 {
@@ -1225,6 +1396,15 @@ static isolate_migrate_t isolate_migratepages(struct zone *zone,
 	unsigned long block_end_pfn;
 	unsigned long low_pfn;
 	struct page *page;
+	/* compact_unevictable_allowed
+	 * 仅在设置了CONFIG_COMPACTION 时可用.
+	 * 当设置为1时,允许规整检查不可回收的lru(锁定页面)以查找要规整的页面.
+	 * 这应该在系统中使用,因为较小的页面错误的停顿对于大的连续空闲内存是可接受的交易.
+	 * 设置为0以防止规整移动不可回收的页面,默认值为1.
+	 * CONFIG_PREEMPT_RT上,默认值为0,以避免由于规整导致的页面错误,这将阻止任务变为活动状态,直到错误解决
+	 */
+
+	/* 确定分离类型 */
 	const isolate_mode_t isolate_mode =
 		(sysctl_compact_unevictable_allowed ? ISOLATE_UNEVICTABLE : 0) |
 		(cc->mode != MIGRATE_SYNC ? ISOLATE_ASYNC_MIGRATE : 0);
@@ -1232,18 +1412,36 @@ static isolate_migrate_t isolate_migratepages(struct zone *zone,
 	/*
 	 * Start at where we last stopped, or beginning of the zone as
 	 * initialized by compact_zone()
+	 *
+	 * 从上次停止的位置开始,或者因为compact_zone的初始化从zone的起始位置开始
 	 */
+
+	/* 将low_pfn设置为cc->migrate_pfn(表示从上次停止的位置开始) */
 	low_pfn = cc->migrate_pfn;
+	/* 得到你这个low_pfn的起始块 */
 	block_start_pfn = pageblock_start_pfn(low_pfn);
+	/* 如果起始block_start_pfn要小于zone->zone_start_pfn
+	 * 那么赋值为起始块以保证在这个zone的区域里面
+	 */
 	if (block_start_pfn < zone->zone_start_pfn)
 		block_start_pfn = zone->zone_start_pfn;
 
-	/* Only scan within a pageblock boundary */
+	/* Only scan within a pageblock boundary
+	 * Only scan within a pageblock boundary
+	 */
+	/* 或者这个pageblock的结束pfn */
 	block_end_pfn = pageblock_end_pfn(low_pfn);
 
 	/*
 	 * Iterate over whole pageblocks until we find the first suitable.
 	 * Do not cross the free scanner.
+	 *
+	 * 在整个页面块上迭代,直到找到第一个合适的页面块.
+	 * 不要超过free scanner
+	 */
+
+	/* 从zone的头部cc->migrate_pfn开始以pageblock_nr_pages为单位向zone尾部扫描
+	 * 但是不能超过free->pfn
 	 */
 	for (; block_end_pfn <= cc->free_pfn;
 			low_pfn = block_end_pfn,
@@ -1254,17 +1452,32 @@ static isolate_migrate_t isolate_migratepages(struct zone *zone,
 		 * This can potentially iterate a massively long zone with
 		 * many pageblocks unsuitable, so periodically check if we
 		 * need to schedule, or even abort async compaction.
+		 *
+		 * 这可能会迭代一个非常长并且其中有许多页面块不合适的区域,所以定期检查是否需要调度,甚至中止异步规整
+		 */
+
+		/* !(low_pfn % (SWAP_CLUSTER_MAX(#define SWAP_CLUSTER_MAX 32UL) * pageblock_nr_pages)
+		 * 如果为0表示我scan到了32个pageblock块
+		 * compact_should_abort用于判断compact是不是要终止
+		 *
+		 * 所以这里指的是如果我scan到了32个pageblock块处并且规整需要终止,那么退出
 		 */
 		if (!(low_pfn % (SWAP_CLUSTER_MAX * pageblock_nr_pages))
 						&& compact_should_abort(cc))
 			break;
 
+		/* 获取第一个页框，需要检查是否属于此zone */
 		page = pageblock_pfn_to_page(block_start_pfn, block_end_pfn,
 									zone);
 		if (!page)
 			continue;
 
 		/* If isolation recently failed, do not retry */
+
+		/*
+		 * 如果设置了ignore_skip_hint,那么就不用理PB_migrate_skip了
+		 * 否则获取页框的PB_migrate_skip标志，如果设置了则跳过这个pageblock
+		 */
 		if (!isolation_suitable(cc, page))
 			continue;
 
@@ -1272,12 +1485,23 @@ static isolate_migrate_t isolate_migratepages(struct zone *zone,
 		 * For async compaction, also only scan in MOVABLE blocks.
 		 * Async compaction is optimistic to see if the minimum amount
 		 * of work satisfies the allocation.
+		 *
+		 * 对于异步压缩,也只扫描MOVABLE块.
+		 * 异步压缩是乐观地去查看最小工作量是否满足分配。
 		 */
+
+		/* 异步情况,如果不是MIGRATE_MOVABLE或MIGRATE_CMA类型则跳过这段页框块 */
+		/* 异步不处理RECLAIMABLE的页 */
 		if (cc->mode == MIGRATE_ASYNC &&
 		    !migrate_async_suitable(get_pageblock_migratetype(page)))
 			continue;
 
 		/* Perform the isolation */
+
+		/* 执行完隔离,将low_pfn到end_pfn中正在使用的页框从zone->lru中取出来,返回的是可移动页扫描扫描到的页框号
+		 * 而UNMOVABLE类型的页框是不会处于lru链表中的,所以所有不在lru链表中的页都会被跳过
+		 * 返回的是扫描到的最后的页
+		 */
 		low_pfn = isolate_migratepages_block(cc, low_pfn,
 						block_end_pfn, isolate_mode);
 
