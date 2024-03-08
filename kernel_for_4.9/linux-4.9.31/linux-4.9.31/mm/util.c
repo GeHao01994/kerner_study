@@ -394,7 +394,7 @@ struct address_space *page_mapping(struct page *page)
 	/* 如果这个页用于SLAB */
 	if (unlikely(PageSlab(page)))
 		return NULL;
-	/* swapcache表示匿名页面已经交换(swap)到磁盘 */
+	/* swapcache表示匿名页面已经交换(swap)到磁盘,那么返回它的swap_address_space空间 */
 	if (unlikely(PageSwapCache(page))) {
 		swp_entry_t entry;
 

@@ -188,7 +188,7 @@ struct compact_control {
 	unsigned long free_pfn;		/* isolate_freepages search base */
 	/* 本次扫描,从头部往尾部开始扫描的起始位置,从该位置开始寻找符合要求的页进行迁移. */
 	unsigned long migrate_pfn;	/* isolate_migratepages search base */
-	/* */
+	/* 这是能被迁移的隔离的最低位置,在isolate_migratepages_block赋值 */
 	unsigned long last_migrated_pfn;/* Not yet flushed page being freed */
 	/* 是同步还是异步模式,即是通过kcompact线程进行内存规整,还是通过直接方式进行内存规整 */
 	enum migrate_mode mode;		/* Async or sync migration mode */

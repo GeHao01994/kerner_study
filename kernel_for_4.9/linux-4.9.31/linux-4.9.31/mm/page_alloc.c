@@ -2867,12 +2867,19 @@ void free_hot_cold_page_list(struct list_head *list, bool cold)
  *
  * Note: this is probably too low level an operation for use in drivers.
  * Please consult with lkml before using this in your driver.
+ *
+ * split_page采用非复合高阶页面,并将其拆分为n（1<<order）个子页面: page[0..n]
+ * 每个子页面必须单独释放。
+ *
+ * 注意: 对于驱动程序来说,这可能是一个级别太低的操作.
+ * 在驱动程序中使用此功能之前，请咨询lkml。
  */
 void split_page(struct page *page, unsigned int order)
 {
 	int i;
-
+	/* 如果该page是个复合页面,那么报个BUG */
 	VM_BUG_ON_PAGE(PageCompound(page), page);
+	/* 如果page的__refcount为0,那么也报个bug */
 	VM_BUG_ON_PAGE(!page_count(page), page);
 
 #ifdef CONFIG_KMEMCHECK
@@ -2884,8 +2891,10 @@ void split_page(struct page *page, unsigned int order)
 		split_page(virt_to_page(page[0].shadow), order);
 #endif
 
+	/* 对每个子page的__refcount都设置为1 */
 	for (i = 1; i < (1 << order); i++)
 		set_page_refcounted(page + i);
+	/* 分离page_owner,实际上就是把首页的page_owner给拷贝到每一页 */
 	split_page_owner(page, order);
 }
 EXPORT_SYMBOL_GPL(split_page);
@@ -2896,36 +2905,68 @@ int __isolate_free_page(struct page *page, unsigned int order)
 	struct zone *zone;
 	int mt;
 
+	/* 如果page不在buddy system里面,那么说明被分配出去了,报个BUG吧 */
 	BUG_ON(!PageBuddy(page));
 
+	/* 拿到该page所在的zone */
 	zone = page_zone(page);
+	/* 拿到对应的migratetype */
 	mt = get_pageblock_migratetype(page);
 
+	/* static inline bool is_migrate_isolate_page(struct page *page)
+	 * {
+	 *	return get_pageblock_migratetype(page) == MIGRATE_ISOLATE;
+	 * }
+	 */
+	/* 如果mt不等于MIGRATE_ISOLATE,
+	 * MIGRATE_ISOLATE 是一个特殊的虚拟区域,用于跨越NUMA结点移动物理内存页.
+	 * 在大型系统上,它有益于将物理内存页移动到接近于使用该页最频繁的CPU.
+	 * 对于不在MIGRATE_ISOLATE页,当前如果要隔离,将会判断隔离后水位是否OK,这里隔离的空闲页相当于空闲页被分配出去,如果水位不OK则隔离将会失败
+	 */
 	if (!is_migrate_isolate(mt)) {
 		/*
 		 * Obey watermarks as if the page was being allocated. We can
 		 * emulate a high-order watermark check with a raised order-0
 		 * watermark, because we already know our high-order page
 		 * exists.
+		 *
+		 * 遵守水位,就像正在分配页面一样.
+		 * 我们可以使用升高的0阶水位来模拟高阶水位检查,因为我们已经假设我们的高阶页面存在.
+		 */
+		/* 这里就是用order-0,来模拟
+		 * 如果水位不够,那么直接返回false
 		 */
 		watermark = min_wmark_pages(zone) + (1UL << order);
 		if (!zone_watermark_ok(zone, 0, watermark, 0, ALLOC_CMA))
 			return 0;
-
+		/* 然后让zone的NR_FREE_PAGES减去1UL << order */
 		__mod_zone_freepage_state(zone, -(1UL << order), mt);
 	}
 
 	/* Remove page from free list */
+	/* 把page从free list中删除 */
 	list_del(&page->lru);
+	/* 然后对应的free_area的order块.nr_free -1 */
 	zone->free_area[order].nr_free--;
+	/* static inline void rmv_page_order(struct page *page)
+	 * {
+	 *	__ClearPageBuddy(page);
+	 *	set_page_private(page, 0);
+	 * }
+	 */
 	rmv_page_order(page);
 
 	/*
 	 * Set the pageblock if the isolated page is at least half of a
 	 * pageblock
+	 *
+	 * 如果隔离页面至少是页面块的一半,则设置页面块
 	 */
+	/* 如果隔离的页面数量是页面块的一半 */
 	if (order >= pageblock_order - 1) {
+		/* 那么先算出endpage */
 		struct page *endpage = page + (1 << order) - 1;
+		/* 设置pageblock为MIGRATE_MOVABLE */
 		for (; page < endpage; page += pageblock_nr_pages) {
 			int mt = get_pageblock_migratetype(page);
 			if (!is_migrate_isolate(mt) && !is_migrate_cma(mt))
@@ -2934,7 +2975,7 @@ int __isolate_free_page(struct page *page, unsigned int order)
 		}
 	}
 
-
+	/* 返回order对应的页面数 */
 	return 1UL << order;
 }
 
