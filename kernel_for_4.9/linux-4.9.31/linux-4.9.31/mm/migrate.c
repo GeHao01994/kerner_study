@@ -196,49 +196,79 @@ void putback_movable_pages(struct list_head *l)
 static int remove_migration_pte(struct page *new, struct vm_area_struct *vma,
 				 unsigned long addr, void *old)
 {
+	/* 获得vma对应的mm_struct */
 	struct mm_struct *mm = vma->vm_mm;
 	swp_entry_t entry;
  	pmd_t *pmd;
 	pte_t *ptep, pte;
  	spinlock_t *ptl;
 
+	/* 新的页是大页(新的页与旧的页大小一样，说明旧的页也是大页) */
 	if (unlikely(PageHuge(new))) {
 		ptep = huge_pte_offset(mm, addr);
 		if (!ptep)
 			goto out;
 		ptl = huge_pte_lockptr(hstate_vma(vma), mm, ptep);
 	} else {
+		/* 通过mm找到pmd */
 		pmd = mm_find_pmd(mm, addr);
+		/* 如果pmd为NULL,那么go out */
 		if (!pmd)
 			goto out;
 
+		/* 获得该地址的pte_t的指针 rmap_walk*/
 		ptep = pte_offset_map(pmd, addr);
 
 		/*
 		 * Peek to check is_swap_pte() before taking ptlock?  No, we
 		 * can race mremap's move_ptes(), which skips anon_vma lock.
+		 *
+		 * 在获取ptlock之前,是否窥视以检查is_swap_pte()?
+		 * 不,我们可以竞争mremap的move_ptes(),它跳过anon_vma锁。
 		 */
 
+		/* 获取页中间目录项的锁 */
 		ptl = pte_lockptr(mm, pmd);
 	}
 
+	/* 上锁 */
  	spin_lock(ptl);
+	/* 获取页表项内容 */
 	pte = *ptep;
+	/* 页表项内容不是swap类型的页表项内容(页迁移页表项属于swap类型的页表项)，则准备跳出
+	 *  static inline int is_swap_pte(pte_t pte)
+	 * {
+	 *	return !pte_none(pte) && !pte_present(pte);
+	 * }
+	 */
 	if (!is_swap_pte(pte))
 		goto unlock;
 
+	/* 根据页表项内存转为swp_entry_t类型 */
 	entry = pte_to_swp_entry(pte);
 
+	/* 如果这个entry不是页迁移类型的entry,或者此entry指向的页不是旧页,那就说明有问题,准备跳出 */
 	if (!is_migration_entry(entry) ||
 	    migration_entry_to_page(entry) != old)
 		goto unlock;
 
+	/* 新页的page->_count++ */
 	get_page(new);
+	/* 根据新页new创建一个新的页表项内容 */
 	pte = pte_mkold(mk_pte(new, READ_ONCE(vma->vm_page_prot)));
+	/* 这里应该说的是软件的drity位,如果有的话,那么设置到新的里面 */
 	if (pte_swp_soft_dirty(*ptep))
 		pte = pte_mksoft_dirty(pte);
 
-	/* Recheck VMA as permissions can change since migration started  */
+	/* Recheck VMA as permissions can change since migration started
+	 * 重新检查VMA,因为自迁移开始以来权限可能会更改
+	 */
+
+	/*  static inline int is_write_migration_entry(swp_entry_t entry)
+	 * {
+	 *	return unlikely(swp_type(entry) == SWP_MIGRATION_WRITE);
+	 * }
+	 */
 	if (is_write_migration_entry(entry))
 		pte = maybe_mkwrite(pte, vma);
 
@@ -248,7 +278,9 @@ static int remove_migration_pte(struct page *new, struct vm_area_struct *vma,
 		pte = arch_make_huge_pte(pte, vma, new, 0);
 	}
 #endif
+	/* 刷新dcache */
 	flush_dcache_page(new);
+	/* 将新的pte设置到地址空间里面去 */
 	set_pte_at(mm, addr, ptep, pte);
 
 	if (PageHuge(new)) {
@@ -275,10 +307,13 @@ out:
 /*
  * Get rid of all migration entries and replace them by
  * references to the indicated page.
+ *
+ * 删除所有迁移条目,并将其替换为对所示页面的引用.
  */
 void remove_migration_ptes(struct page *old, struct page *new, bool locked)
 {
 	struct rmap_walk_control rwc = {
+		/* remove_migration_pte是典型地利用RMAP反向映射系统找到的旧页面的每个pte */
 		.rmap_one = remove_migration_pte,
 		.arg = old,
 	};
@@ -705,9 +740,13 @@ void migrate_page_copy(struct page *newpage, struct page *page)
 
 	if (PageHuge(page) || PageTransHuge(page))
 		copy_huge_page(newpage, page);
-	else
+	else /* 复制旧页面的内容到新页面中,使用kmap_atomic函数来映射页面以便读取页面的内容 */
 		copy_highpage(newpage, page);
 
+	/* 根据旧页面中的flag的比特位来设置newpage相应的标志位
+	 * 例如PG_error、PG_referenced、PG_uptodate、PG_active、
+	 * PG_unevictable、PG_checked、PG_mappedtodisk
+	 */
 	if (PageError(page))
 		SetPageError(newpage);
 	if (PageReferenced(page))
@@ -736,23 +775,34 @@ void migrate_page_copy(struct page *newpage, struct page *page)
 	/*
 	 * Copy NUMA information to the new page, to prevent over-eager
 	 * future migrations of this same page.
+	 *
+	 * 将NUMA信息复制到新页面,以防止该页面在未来过度迁移。
 	 */
 	cpupid = page_cpupid_xchg_last(page, -1);
 	page_cpupid_xchg_last(newpage, cpupid);
 
+	/* 处理旧页面是ksm页面的情况 */
 	ksm_migrate_page(newpage, page);
 	/*
 	 * Please do not reorder this without considering how mm/ksm.c's
 	 * get_ksm_page() depends upon ksm_migrate_page() and PageSwapCache().
+	 *
+	 * 如果不考虑mm/ksm.c的get_ksm_page()依赖于ksm_migrate_page()PageSwapCache()请不要对此进行重新排序.
 	 */
-	if (PageSwapCache(page))
+
+	/* PG_swapcache,Swap page: swp_entry_t in private */
+	if (PageSwapCache(page)) /* 清除PG_swapcache这个flag */
 		ClearPageSwapCache(page);
+	/* 清除PG_priveta */
 	ClearPagePrivate(page);
+	/* #define set_page_private(page, v)	((page)->private = (v)) */
 	set_page_private(page, 0);
 
 	/*
 	 * If any waiters have accumulated on the new page then
 	 * wake them up.
+	 *
+	 * 如果有任何等待者在新页面上积累了东西,那就叫醒他们。
 	 */
 	if (PageWriteback(newpage))
 		end_page_writeback(newpage);
@@ -791,7 +841,7 @@ int migrate_page(struct address_space *mapping,
 
 	if (rc != MIGRATEPAGE_SUCCESS)
 		return rc;
-
+	/* migrate_page_copy会把旧页面的一些信息复制到新页面中 */
 	migrate_page_copy(newpage, page);
 	return MIGRATEPAGE_SUCCESS;
 }
@@ -904,21 +954,29 @@ static int writeout(struct address_space *mapping, struct page *page)
 static int fallback_migrate_page(struct address_space *mapping,
 	struct page *newpage, struct page *page, enum migrate_mode mode)
 {
+	/* 如果page是drity的 */
 	if (PageDirty(page)) {
-		/* Only writeback pages in full synchronous migration */
+		/* Only writeback pages in full synchronous migration
+		 * 只有在完全同步迁移中才写回
+		 */
 		if (mode != MIGRATE_SYNC)
 			return -EBUSY;
+		/* 写回page */
 		return writeout(mapping, page);
 	}
 
 	/*
 	 * Buffers may be managed in a filesystem specific way.
 	 * We must have no buffers or drop them.
+	 *
+	 * 缓冲区可以以特定于文件系统的方式进行管理.
+	 * 我们决不能没有缓冲区,否则就释放它们.
 	 */
 	if (page_has_private(page) &&
 	    !try_to_release_page(page, GFP_KERNEL))
 		return -EAGAIN;
 
+	/* 调用migrate_page */
 	return migrate_page(mapping, newpage, page, mode);
 }
 
@@ -967,6 +1025,10 @@ static int move_to_new_page(struct page *newpage, struct page *page,
 			 * are part of swap space which also has its own
 			 * migratepage callback. This is the most common path
 			 * for page migration.
+			 *
+			 * 大多数页面都有映射,大多数文件系统都提供migratepage回调.
+			 * 匿名页面是交换空间的一部分，交换空间也有自己的migratepage回调.
+			 * 这是页面迁移最常见的路径。
 			 */
 			rc = mapping->a_ops->migratepage(mapping, newpage,
 							page, mode);
@@ -977,14 +1039,21 @@ static int move_to_new_page(struct page *newpage, struct page *page,
 		/*
 		 * In case of non-lru page, it could be released after
 		 * isolation step. In that case, we shouldn't try migration.
+		 *
+		 * 在非lru页面的情况下，可以在隔离步骤后将其释放.
+		 * 在这种情况下，我们不应该尝试迁移。
 		 */
+		/* 如果page不是隔离的,那么报个BUG吧 */
 		VM_BUG_ON_PAGE(!PageIsolated(page), page);
+		/* 如果不是PageMovable,也就是说它没有相关的操作函数 */
 		if (!PageMovable(page)) {
 			rc = MIGRATEPAGE_SUCCESS;
+			/* 清除隔离的标志 */
 			__ClearPageIsolated(page);
 			goto out;
 		}
 
+		/* 调用它的mapping->a_ops->migratepage */
 		rc = mapping->a_ops->migratepage(mapping, newpage,
 						page, mode);
 		WARN_ON_ONCE(rc == MIGRATEPAGE_SUCCESS &&
@@ -994,14 +1063,26 @@ static int move_to_new_page(struct page *newpage, struct page *page,
 	/*
 	 * When successful, old pagecache page->mapping must be cleared before
 	 * page is freed; but stats require that PageAnon be left as PageAnon.
+	 *
+	 * 如果成功,必须在 old page释放之前清除old pagecache的page-mapping.
+	 * 但是stats要求将PageAnon保留为PageAnon。
 	 */
 	if (rc == MIGRATEPAGE_SUCCESS) {
+		/*  static __always_inline int __PageMovable(struct page *page)
+		 * {
+		 *	return ((unsigned long)page->mapping & PAGE_MAPPING_FLAGS) ==
+		 *		PAGE_MAPPING_MOVABLE;
+		 * }
+		 */
 		if (__PageMovable(page)) {
+			/* 如果该page的PG_isolated还在,那么报个BUG吧 */
 			VM_BUG_ON_PAGE(!PageIsolated(page), page);
 
 			/*
 			 * We clear PG_movable under page_lock so any compactor
 			 * cannot try to migrate this page.
+			 *
+			 * 我们在page_lock下清除PG_movable,这样任何规整程序都无法尝试迁移此页面
 			 */
 			__ClearPageIsolated(page);
 		}
@@ -1010,6 +1091,14 @@ static int move_to_new_page(struct page *newpage, struct page *page,
 		 * Anonymous and movable page->mapping will be cleard by
 		 * free_pages_prepare so don't reset it here for keeping
 		 * the type to work PageAnon, for example.
+		 *
+		 * 匿名和可移动的mage->mapping将被free_pages_prepare清除,因此不要在这里重置它,以保持PageAnon类型的工作
+		 */
+
+		/*  static __always_inline int PageMappingFlags(struct page *page)
+		 * {
+		 *	return ((unsigned long)page->mapping & PAGE_MAPPING_FLAGS) != 0;
+		 * }
 		 */
 		if (!PageMappingFlags(page))
 			page->mapping = NULL;
@@ -1169,6 +1258,7 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 	 * 因此page->mapping = NULL,接下来要进行try_to_unmap函数处理这种页面会触发BUG
 	 */
 	if (!page->mapping) {
+		/* 如果page是匿名页面,那么就报个BUG吧 */
 		VM_BUG_ON_PAGE(PageAnon(page), page);
 		if (page_has_private(page)) {
 			try_to_free_buffers(page);
@@ -1204,6 +1294,9 @@ out:
 	 * which will not free the page because new page owner increased
 	 * refcounter. As well, if it is LRU page, add the page to LRU
 	 * list in here.
+	 *
+	 * 如果迁移成功,请减少新页面的refcount,这将不会释放页面,因为new page onwer增加了refcounter.
+	 * 同样,如果是LRU页面,请将该页面添加到此处的LRU列表中
 	 */
 	if (rc == MIGRATEPAGE_SUCCESS) {
 		if (unlikely(__PageMovable(newpage)))
@@ -1285,6 +1378,9 @@ static ICE_noinline int unmap_and_move(new_page_t get_new_page,
 	}
 	/* 调用__unmap_and_move()去尝试迁移页面page到新分配的页面newpage中 */
 	rc = __unmap_and_move(page, newpage, force, mode);
+	/* 如果迁移成功了 */
+
+	/* 设置page_owner->last_migrate_reason = reason */
 	if (rc == MIGRATEPAGE_SUCCESS)
 		set_page_owner_migrate_reason(newpage, reason);
 
@@ -1296,13 +1392,24 @@ out:
 		 * removed and will be freed. A page that has not been
 		 * migrated will have kepts its references and be
 		 * restored.
+		 *
+		 * 已迁移的页面删除所有引用,并将被释放.
+		 * 未迁移的页面将拥有kepts引用,并且恢复
 		 */
+
+		/* 把page从isolated链表里面删除*/
 		list_del(&page->lru);
 
 		/*
 		 * Compaction can migrate also non-LRU pages which are
 		 * not accounted to NR_ISOLATED_*. They can be recognized
 		 * as __PageMovable
+		 *
+		 * 规整也可以迁移non-LRU页面,该页面没有被NR_ISOLATED_*计数.
+		 * 它们可以被识别为__PageMovable
+		 */
+		/* 因为non-LRU页面没有被计数,所以这里只有当页面为LRU页面时
+		 * 将NR_ISOLATED_ANON + page_is_file_cache(page)计数-1
 		 */
 		if (likely(!__PageMovable(page)))
 			dec_node_page_state(page, NR_ISOLATED_ANON +
@@ -1313,46 +1420,63 @@ out:
 	 * If migration is successful, releases reference grabbed during
 	 * isolation. Otherwise, restore the page to right list unless
 	 * we want to retry.
+	 *
+	 * 如果迁移成功,则释放隔离期间捕获的引用.
+	 * 否则,除非我们想重试,否则请将页面恢复到正确的列表。
 	 */
 	if (rc == MIGRATEPAGE_SUCCESS) {
+		/* 将page的_refcount -1 */
 		put_page(page);
+		/* 如果reason == MR_MEMORY_FAILURE(当内存出现硬件问题(ECC校验失败等)时触发的页面迁移) */
 		if (reason == MR_MEMORY_FAILURE) {
 			/*
 			 * Set PG_HWPoison on just freed page
 			 * intentionally. Although it's rather weird,
 			 * it's how HWPoison flag works at the moment.
+			 *
+			 * 故意在刚刚释放的页面上设置PG_HWPoison.
+			 * 虽然这很奇怪,这就是HWPoison flag目前的工作原理
+			 *
+			 * 然后设置atomic_long_inc(&num_poisoned_pages);
 			 */
 			if (!test_set_page_hwpoison(page))
 				num_poisoned_pages_inc();
 		}
 	} else {
+		/* 如果不等于-EAGAIN */
 		if (rc != -EAGAIN) {
+			/* 如果它是lru链表里面的page */
 			if (likely(!__PageMovable(page))) {
+				/* 将它放回到对应的lru list里面 */
 				putback_lru_page(page);
 				goto put_new;
 			}
-
 			lock_page(page);
+			/* 如果它不是LRU链表里面的page,那么把它移动到自己的movable page里面 */
 			if (PageMovable(page))
 				putback_movable_page(page);
-			else
+			else	/* 否则,清除PG_isolated */
 				__ClearPageIsolated(page);
 			unlock_page(page);
+			/* page的计数 -1 */
 			put_page(page);
 		}
 put_new:
+		/* 如果有put_new_pag,那么就调用(这里主要是和get_new_page一致) */
 		if (put_new_page)
 			put_new_page(newpage, private);
-		else
+		else	/* 没有的话,那么就调用put_page */
 			put_page(newpage);
 	}
 
 	if (result) {
+		/* 如果rc!=0,说明迁移失败了,那么把result赋值为rc */
 		if (rc)
 			*result = rc;
-		else
+		else	/* 否则就把newpage的node id给result */
 			*result = page_to_nid(newpage);
 	}
+	/* 返回rc */
 	return rc;
 }
 

@@ -2142,13 +2142,20 @@ static enum compact_result compact_zone(struct zone *zone, struct compact_contro
 		trace_mm_compaction_migratepages(cc->nr_migratepages, err,
 							&cc->migratepages);
 
-		/* All pages were either migrated or will be released */
+		/* All pages were either migrated or will be released
+		 * 所有页面要么已迁移,要么将被释放
+		 */
+		/* 设置cc->nr_migratepages为0 */
 		cc->nr_migratepages = 0;
+		/* 如果有error */
 		if (err) {
+			/* 将这些个页面都还回去 */
 			putback_movable_pages(&cc->migratepages);
 			/*
 			 * migrate_pages() may return -ENOMEM when scanners meet
 			 * and we want compact_finished() to detect it
+			 *
+			 * migrate_pages()可能会在scanner相遇时返回-ENOMM,并且我们希望compact_finished()检测到它
 			 */
 			if (err == -ENOMEM && !compact_scanners_met(cc)) {
 				ret = COMPACT_CONTENDED;
@@ -2157,12 +2164,21 @@ static enum compact_result compact_zone(struct zone *zone, struct compact_contro
 			/*
 			 * We failed to migrate at least one page in the current
 			 * order-aligned block, so skip the rest of it.
+			 *
+			 * 我们在当前order-aligned块中迁移至少失败了一页,因此跳过其余部分
 			 */
+
+			/* 如果cc是直接规整并且mode是异步的 */
 			if (cc->direct_compaction &&
 						(cc->mode == MIGRATE_ASYNC)) {
+				/* #define block_end_pfn(pfn, order)	ALIGN((pfn) + 1, 1UL << (order)) */
+				/* 那么cc-migrate_pfn就变成了下一个cc->order对齐的pfn */
 				cc->migrate_pfn = block_end_pfn(
 						cc->migrate_pfn - 1, cc->order);
-				/* Draining pcplists is useless in this case */
+				/* Draining pcplists is useless in this case
+				 *
+				 * 在这种情况下，排空pcplists是无用的
+				 */
 				cc->last_migrated_pfn = 0;
 
 			}
@@ -2175,12 +2191,18 @@ check_drain:
 		 * flush the pages that were freed, so that they can merge and
 		 * compact_finished() can detect immediately if allocation
 		 * would succeed.
+		 *
+		 * 迁移扫描程序是否已从我们迁移的前一个cc->order对齐块移开?
+		 * 如果是,则刷新释放的页面,以便它们可以合并,compact_finished可以立即检测是否分配成功
 		 */
+		 /* 如果cc->order大于0,并且中间没有失败的块 */
 		if (cc->order > 0 && cc->last_migrated_pfn) {
 			int cpu;
+			/* 拿到当前migrate按cc->order开始的起始块号 */
 			unsigned long current_block_start =
 				block_start_pfn(cc->migrate_pfn, cc->order);
 
+			/* 如果last_migrated_pfn 比 current_block_start 小 */
 			if (cc->last_migrated_pfn < current_block_start) {
 				cpu = get_cpu();
 				lru_add_drain_cpu(cpu);
@@ -2197,18 +2219,31 @@ out:
 	/*
 	 * Release free pages and update where the free scanner should restart,
 	 * so we don't leave any returned pages behind in the next attempt.
+	 *
+	 * 释放freepages并更新free scanner应重新启动的位置,
+	 * 所以我们在下次尝试时不会留下任何返回的页面。
 	 */
+	/* 如果cc->nr_freepages大于0,说明freepages里面还有东西 */
 	if (cc->nr_freepages > 0) {
+		/* 把这些页面给释放掉,这里返回的是这个链表最大的pfn的值 */
 		unsigned long free_pfn = release_freepages(&cc->freepages);
-
+		/* 然后设置nr_freepages为0 */
 		cc->nr_freepages = 0;
+		/* 如果free_pfn等于0,那么就报个BUG吧 */
 		VM_BUG_ON(free_pfn == 0);
-		/* The cached pfn is always the first in a pageblock */
+		/* The cached pfn is always the first in a pageblock
+		 * 缓存的pfn总是页面块中的第一个
+		 */
+		/* block_start_pfn(pfn, pageblock_order) */
 		free_pfn = pageblock_start_pfn(free_pfn);
 		/*
 		 * Only go back, not forward. The cached pfn might have been
 		 * already reset to zone end in compact_finished()
+		 *
+		 * 只后退,不前进. cached的pfn可能已在compact_finished()中重置为区域结束
 		 */
+
+		/* 如果free_pfn大于compact_cached_free_pfn,那么设置compact_cached_free_pfn为free_pfn */
 		if (free_pfn > zone->compact_cached_free_pfn)
 			zone->compact_cached_free_pfn = free_pfn;
 	}

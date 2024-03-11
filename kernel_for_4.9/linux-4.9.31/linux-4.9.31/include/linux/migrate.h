@@ -15,13 +15,18 @@ typedef void free_page_t(struct page *page, unsigned long private);
  * - zero on page migration success;
  */
 #define MIGRATEPAGE_SUCCESS		0
-
 enum migrate_reason {
+	/* 内存规整导致的迁移 */
 	MR_COMPACTION,
+	/* 当内存出现硬件问题(ECC校验失败等)时触发的页面迁移 */
 	MR_MEMORY_FAILURE,
+	/* 内存热插拔导致的迁移 */
 	MR_MEMORY_HOTPLUG,
+	/* 应用层主动调用migrate_pages()或move_pages()触发的迁移 */
 	MR_SYSCALL,		/* also applies to cpusets */
+	/* 调用mbind系统调用设置memory policy时触发的迁移 */
 	MR_MEMPOLICY_MBIND,
+	/* numa balance触发的页面迁移(node之间) */
 	MR_NUMA_MISPLACED,
 	MR_CMA,
 	MR_TYPES
