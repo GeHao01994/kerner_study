@@ -409,13 +409,43 @@ static __always_inline unsigned long __get_pfnblock_flags_mask(struct page *page
 	unsigned long bitidx, word_bitidx;
 	unsigned long word;
 
+	/*
+	 * 这里是去拿到zone的pageblock_flags的地址
+	 * static inline unsigned long *get_pageblock_bitmap(struct page *page,
+	 *							unsigned long pfn)
+	 * {
+	 * #ifdef CONFIG_SPARSEMEM
+	 * 	return __pfn_to_section(pfn)->pageblock_flags;
+	 * #else
+	 *	return page_zone(page)->pageblock_flags;
+	 * #endif
+	 * }
+	 */
 	bitmap = get_pageblock_bitmap(page, pfn);
+	/*
+	 *  static inline int pfn_to_bitidx(struct page *page, unsigned long pfn)
+	 * {
+	 * #ifdef CONFIG_SPARSEMEM
+	 * 	pfn &= (PAGES_PER_SECTION-1);
+	 * 	return (pfn >> pageblock_order) * NR_PAGEBLOCK_BITS;
+	 * #else
+	 *	pfn = pfn - round_down(page_zone(page)->zone_start_pfn, pageblock_nr_pages);
+	 *	return (pfn >> pageblock_order) * NR_PAGEBLOCK_BITS;
+	 * #endif
+	 *
+	 * }
+	 */
+	/* 得到page所在pageblock的idx */
 	bitidx = pfn_to_bitidx(page, pfn);
+	/* 看它在哪个long 里面 */
 	word_bitidx = bitidx / BITS_PER_LONG;
+	/* 算出它在的long的偏移 */
 	bitidx &= (BITS_PER_LONG-1);
-
+	/* 拿到这个long所在的bitmap */
 	word = bitmap[word_bitidx];
+	/* 算出结尾 */
 	bitidx += end_bitidx;
+	/* 获得mask对应的值 */
 	return (word >> (BITS_PER_LONG - bitidx - 1)) & mask;
 }
 
@@ -756,16 +786,24 @@ static inline void clear_page_guard(struct zone *zone, struct page *page,
 {
 	struct page_ext *page_ext;
 
+	/* 如果_debug_guardpage_enabled是false,那么返回 */
 	if (!debug_guardpage_enabled())
 		return;
-
+	/* 拿到page_ext */
 	page_ext = lookup_page_ext(page);
+	/* 如果page_ext为NULL,那么返回 */
 	if (unlikely(!page_ext))
 		return;
 
+	/* 否则清除page_ext->flags中的PAGE_EXT_DEBUG_GUARD bit位 */
 	__clear_bit(PAGE_EXT_DEBUG_GUARD, &page_ext->flags);
 
+	/* 设置(page)->private = 0 */
 	set_page_private(page, 0);
+	/* 如果migratetype != MIGRATE_ISOLATE
+	 *
+	 * 那么zone的freepage计数要增加1<< order个
+	 */
 	if (!is_migrate_isolate(migratetype))
 		__mod_zone_freepage_state(zone, (1 << order), migratetype);
 }
@@ -803,33 +841,57 @@ static inline void rmv_page_order(struct page *page)
  * serialized by zone->lock.
  *
  * For recording page's order, we use page_private(page).
+ *
+ * 此功能检查页面是否空闲&&是buddy 如果
+ * (a) buddy 不在hole &&
+ * (b) buddy在伙伴系统中 &&
+ * (c) 页面及其buddy的order相同 &&
+ * (d) 页面及其buddy位于同一zone中
+ *
+ * 为了记录页面是否在好友系统中,我们设置->_mapcount为PAGE_BUDDY_MAPCOUNT_VALUE
+ * 设置、清除和测试_mapcount PAGE_BUDDY_MACCOUNT_VALUE在zone->lock之下的
+ *
+ * 为了记录页面的order,我们使用page_private（page）。
  */
 static inline int page_is_buddy(struct page *page, struct page *buddy,
 							unsigned int order)
 {
+	/* 如果page不是valid,那么退出,主要是看是不是黑洞 */
 	if (!pfn_valid_within(page_to_pfn(buddy)))
 		return 0;
 
+	/* 设置"debug_guardpage_minorder"后,申请expand()时候,会将后面固定的页设置为guard页,防止越界写功能
+	 *
+	 * 一般情况下debug_guardpage_minorder设置为1,这个时候当order=1的page分割成两个order=0的page时候,一个page将被设定为guard page;
+	 * 如果debug_guardpage_minorder设置为2的时候,order=1/2在分割的时候,会有更多的页被设置为guard page.
+	 */
+	/* 所以说如果这个page是guard page,并且order相同 */
 	if (page_is_guard(buddy) && page_order(buddy) == order) {
+		/* 如果page的zone不相同,那么就不是伙伴了,return 0 */
 		if (page_zone_id(page) != page_zone_id(buddy))
 			return 0;
 
+		/* 如果page的_refcount不等于0,那么说明他不是空闲的,那报个BUG吧 */
 		VM_BUG_ON_PAGE(page_count(buddy) != 0, buddy);
-
+		/* 除此之外返回1 */
 		return 1;
 	}
 
+	/* PageBuddy(buddy)说明他在伙伴系统中,并且order相等 */
 	if (PageBuddy(buddy) && page_order(buddy) == order) {
 		/*
 		 * zone check is done late to avoid uselessly
 		 * calculating zone/node ids for pages that could
 		 * never merge.
+		 *
+		 * zone检查执行较晚,以避免为永远无法合并的页面无用地计算zone/node id
 		 */
+		/* 如果两个page的zone id不相等,那么不是伙伴,返回0 */
 		if (page_zone_id(page) != page_zone_id(buddy))
 			return 0;
-
+		 /* 如果page的_refcount不等于0,那么说明他不是空闲的,那报个BUG吧 */
 		VM_BUG_ON_PAGE(page_count(buddy) != 0, buddy);
-
+		 /* 除此之外返回1 */
 		return 1;
 	}
 	return 0;
@@ -858,8 +920,55 @@ static inline int page_is_buddy(struct page *page, struct page *buddy,
  * triggers coalescing into a block of larger size.
  *
  * -- nyc
+ *
+ * 伙伴系统分配器的释放功能
+ *
+ * 伙伴系统的概念是为各种“orders”的存储块维护直接映射表（包含位值）。
+ *
+ * 底层表包含最小可分配内存单元(此处为页面)的映射,其上面的每个级别都描述了下面级别的单元对,因此称为“伙伴”.
+ * 在高层,这里所发生的一切都是在底层标记表条目可用,并在必要时向上传播更改,再加上与VM系统的其他部分配合良好所需的一些核算.
+ * 在每个级别上,我们都有一个页面列表,这些页面是连续的长度为(1<<order)的头并标有_mapcount PAGE_BUDDY_MAPCOUNT_VALUE.
+ *
+ * 页面的order记录在page_private(page)字段中.
+ * 因此,当我们分配或释放一个时,我们可以得到另外一个的状态.
+ * 也就是说,如果我们分配一个小块,并且两者都是空闲的,那么该区域的其余部分必须被分割成块.
+ * 如果一个区块被释放,而它的伙伴也被释放,那么这会触发合并成一个更大的区块。
  */
 
+/* __free_one_page不仅可以释放内存页面到伙伴系统,还会处理空闲页面的合并工作.
+ * 释放内存页面的核心功能是把页面添加到伙伴系统中恰当的free_area链表中.
+ * 在释放内存块时,放置到高一阶的空闲链表free_area中.
+ * 如果还能继续合并邻近的内存块,那么就会继续合并,转移到更高阶的空闲链表中,这个过程会一直重复下去,直至所有可能合并的内存块都已经合并
+ */
+
+/* 这段代码是合并相邻伙伴块的核心代码.我们以一个实际例子来说明这段代码的逻辑,假设现在要释放一个内存块A,大小为2个page,
+ * 内核块的page的开始页帧号是0x8e010,order为1
+ *  _________________________________________________
+ * |      |  A   |  B  |   C	 |		     |
+ * |______|______|_____|_________|___________________|
+ *0x0   0x10   0x12  0x14
+ *
+ * 首先计算得出page_idx等于0x10(page_idx = pfn & ((1 << MAX_ORDER) - 1)),也就是说,这个内存块位于pageblock的ox10
+ *
+ * 在第一次循环中,计算buddy_index
+ *  static inline unsigned long __find_buddy_index(unsigned long page_idx, unsigned int order)
+ * {
+ *	return page_idx ^ (1 << order);
+ * }
+ * page_idx为0x10,order为1,最后计算结果为0x12
+ * 那么buddy就是内存块A的临近内存块B了,内存块B在pageblock的起始地址为0x12.
+ *
+ * 接下来通过page_is_buddy函数来检查内存块B是不是空闲内存块
+ * 内存块在buddy中并且order也相同,page_is_buddy函数返回1.
+ *
+ * 如果发现内存块B也是空闲内存,并且order也等于1,那么我们找到了一块志同道合的空闲伙伴块,把它从空闲链表中摘下来,以便和内存块A合并到高一阶的空闲链表中
+ * 这时combined_idx指向内存块A的起始地址.order++表示继续在附近寻找有没有可能合并的相邻的内存块,这次要查找的order等于2,也就是4个page大小的内存块.
+ * 重复循环的步骤,查找附近有没有志同道合的order为2的块
+ *
+ * 如果在0x14位置的内存块C不满足合并条件,例如内存块C不是空闲内存,或者内存块C的order不等于2.如上图,内存块C的order等于3,显然不符合我们的条件.
+ *
+ * 如果没找到order为2的内存块,那么只能合并内存块A和B了,然后把这个内存块添加到空闲页表中
+ */
 static inline void __free_one_page(struct page *page,
 		unsigned long pfn,
 		struct zone *zone, unsigned int order,
@@ -871,42 +980,83 @@ static inline void __free_one_page(struct page *page,
 	struct page *buddy;
 	unsigned int max_order;
 
+	/* 拿到我们最大的order */
 	max_order = min_t(unsigned int, MAX_ORDER, pageblock_order + 1);
-
+	/* 如果zone还没初始化,报个BUG */
 	VM_BUG_ON(!zone_is_initialized(zone));
+	/* 如果page->flags还有PAGE_FLAGS_CHECK_AT_PREP这里面的flag中的一个,说明page不是free的
+	 * 那么也报个BUG
+	 */
 	VM_BUG_ON_PAGE(page->flags & PAGE_FLAGS_CHECK_AT_PREP, page);
 
+	/* 如果migratetype == -1,说明migratetype不正常,那么也报个BUG */
 	VM_BUG_ON(migratetype == -1);
+	/* 如果migratetype不是MIGRATE_ISOLATE类型
+	 * 那么给对应的zone的freepage加上对应的页数
+	 *
+	 * static inline void __mod_zone_freepage_state(struct zone *zone, int nr_pages,
+	 *					int migratetype)
+	 * {
+	 *	__mod_zone_page_state(zone, NR_FREE_PAGES, nr_pages);
+	 *	if (is_migrate_cma(migratetype))
+	 *		__mod_zone_page_state(zone, NR_FREE_CMA_PAGES, nr_pages);
+	 * }
+	 */
 	if (likely(!is_migrate_isolate(migratetype)))
 		__mod_zone_freepage_state(zone, 1 << order, migratetype);
-
+	/* 算出该pfn在相应的pageblock的位置,再怎么合并伙伴也不可能超过pageblock大
+	 * 所以这里取出它为位置
+	 */
 	page_idx = pfn & ((1 << MAX_ORDER) - 1);
-
+	/* 如果说page_idx不是按照(1 << order)对齐的,那么也报个BUG吧 */
 	VM_BUG_ON_PAGE(page_idx & ((1 << order) - 1), page);
+	/* 如果是bad_rang,那么也报个错 */
 	VM_BUG_ON_PAGE(bad_range(zone, page), page);
 
 continue_merging:
+	/* 这里为什么-1呢,因为你都到最大了,那怎么可能还合并呢 */
 	while (order < max_order - 1) {
+		/* 找到你的伙伴的idx */
 		buddy_idx = __find_buddy_index(page_idx, order);
+		/* 得到你伙伴的伙伴的page struct */
 		buddy = page + (buddy_idx - page_idx);
+		/* 这里判断这个伙伴是不是在伙伴系统里面,如果不是说明被用了,那么就不能合并了 */
 		if (!page_is_buddy(page, buddy, order))
 			goto done_merging;
 		/*
 		 * Our buddy is free or it is CONFIG_DEBUG_PAGEALLOC guard page,
 		 * merge with it and move up one order.
+		 *
+		 * 我们的伙伴是free的,或者它是CONFIG_DEBUG_PAGEALLOC guard page,与它合并并且向上移动一个order
+		 *
 		 */
+
+		/* 如果page是guard page */
 		if (page_is_guard(buddy)) {
 			clear_page_guard(zone, buddy, order, migratetype);
 		} else {
+			/* 把这个page从lru list删除 */
 			list_del(&buddy->lru);
+			/* 删除了对应的order里面的free_area[order].nr_free-- */
 			zone->free_area[order].nr_free--;
+			/*  static inline void rmv_page_order(struct page *page)
+			 * {
+			 *	__ClearPageBuddy(page);
+			 *	set_page_private(page, 0);
+			 * }
+			 */
 			rmv_page_order(buddy);
 		}
+		/* 算出combined_idx组合出来的页面的id 譬如上面的例子中的0x10 & 0x12 = 0x10 */
 		combined_idx = buddy_idx & page_idx;
+		/* page = page + (0x10 - 0x10) */
 		page = page + (combined_idx - page_idx);
+		/* 把combined_idx给page_idx之后把order++之后看看还能不能找到伙伴 */
 		page_idx = combined_idx;
+		/* order ++ */
 		order++;
 	}
+	/* 如果max_order < MAX_ORDER */
 	if (max_order < MAX_ORDER) {
 		/* If we are here, it means order is >= pageblock_order.
 		 * We want to prevent merge between freepages on isolate
@@ -915,24 +1065,47 @@ continue_merging:
 		 *
 		 * We don't want to hit this code for the more frequent
 		 * low-order merging.
+		 *
+		 * 如果我们在这里,这意味着 order >=pageblock_order.
+		 * 我们希望防止隔离页面块和正常页面块上的自由页面合并.
+		 * 否则,页面块隔离可能会导致不正确的freepage或CMA计数
+		 *
+		 * 我们不想为了更频繁的低阶合并而使用此代码。
 		 */
+
+		/* 如果zone->nr_isolate_pageblock不为NULL,那说明它有隔离块 */
 		if (unlikely(has_isolate_pageblock(zone))) {
 			int buddy_mt;
-
+			/* 找到你的伙伴 */
 			buddy_idx = __find_buddy_index(page_idx, order);
+			/* 拿到你伙伴的struct page */
 			buddy = page + (buddy_idx - page_idx);
+			/* 得到你伙伴的migratetype */
 			buddy_mt = get_pageblock_migratetype(buddy);
-
+			/* 如果你伙伴的migratetype和你的不一样,并且你的migratetype是migratetype == MIGRATE_ISOLATE
+			 * 或者说你伙伴的migratetype == MIGRATE_ISOLATE,那么done
+			 */
 			if (migratetype != buddy_mt
 					&& (is_migrate_isolate(migratetype) ||
 						is_migrate_isolate(buddy_mt)))
 				goto done_merging;
 		}
+		/* 否则max_order++
+		 * 接着合并
+		 */
 		max_order++;
 		goto continue_merging;
 	}
 
 done_merging:
+	/*
+	 * 设置order和PG_buddy
+	 * static inline void set_page_order(struct page *page, unsigned int order)
+	 * {
+	 *	set_page_private(page, order);
+	 *	__SetPageBuddy(page);
+	 * }
+	 */
 	set_page_order(page, order);
 
 	/*
@@ -942,12 +1115,24 @@ done_merging:
 	 * that is happening, add the free page to the tail of the list
 	 * so it's less likely to be used soon and more likely to be merged
 	 * as a higher order page
+	 *
+	 * 如果这不是最大的页面,请检查下一个next-highest order是否free.
+	 * 如果是这样的话,页面可能正在释放,很快就会合并.
+	 * 如果发生这种情况,请将空闲页面添加到列表的尾部.
+	 * 因此它不太可能很快被使用,更有可能被合并为更高阶的页面
 	 */
+
+	/* 这里就是预判,假设page被释放,但是buddy还没有,但是它两合并完之后的buddy也是空闲的,那么预判它马上会被free */
+	/* 如果order < MAX_ORDER -2 并且buddy是可用的 */
 	if ((order < MAX_ORDER-2) && pfn_valid_within(page_to_pfn(buddy))) {
 		struct page *higher_page, *higher_buddy;
+		/* 得到结合之后的idx */
 		combined_idx = buddy_idx & page_idx;
+		/* 得到结合之后的struct page */
 		higher_page = page + (combined_idx - page_idx);
+		/* 找到高一阶段这个buddy */
 		buddy_idx = __find_buddy_index(combined_idx, order + 1);
+		/* 如果高一阶的buddy也是空闲，那么把它加入到free_list尾部 */
 		higher_buddy = higher_page + (buddy_idx - combined_idx);
 		if (page_is_buddy(higher_page, higher_buddy, order + 1)) {
 			list_add_tail(&page->lru,
@@ -956,6 +1141,7 @@ done_merging:
 		}
 	}
 
+	/* 加入到free_list中 */
 	list_add(&page->lru, &zone->free_area[order].free_list[migratetype]);
 out:
 	zone->free_area[order].nr_free++;
@@ -965,10 +1151,15 @@ out:
  * A bad page could be due to a number of fields. Instead of multiple branches,
  * try and check multiple fields with one check. The caller must do a detailed
  * check if necessary.
+ *
+ * 错误的页面可能是由于多个字段造成的.
+ * 代替多个分支,尝试一次检查多个字段.
+ * 如果必要,调用者必须做详细检查
  */
 static inline bool page_expected_state(struct page *page,
 					unsigned long check_flags)
 {
+	/* 如果page->_mapcount不等于-1,那么直接返回了 */
 	if (unlikely(atomic_read(&page->_mapcount) != -1))
 		return false;
 
@@ -1010,10 +1201,13 @@ static void free_pages_check_bad(struct page *page)
 
 static inline int free_pages_check(struct page *page)
 {
+	/* 这个PAGE_FLAGS_CHECK_AT_FREE可以看一下他的定义你就明白了 */
 	if (likely(page_expected_state(page, PAGE_FLAGS_CHECK_AT_FREE)))
 		return 0;
 
-	/* Something has gone sideways, find it */
+	/* Something has gone sideways, find it
+	 * 有东西横着走了,找到它
+	 */
 	free_pages_check_bad(page);
 	return 1;
 }
@@ -1025,14 +1219,19 @@ static int free_tail_pages_check(struct page *head_page, struct page *page)
 	/*
 	 * We rely page->lru.next never has bit 0 set, unless the page
 	 * is PageTail(). Let's make sure that's true even for poisoned ->lru.
+	 *
+	 * 我们依赖page->lru.next从不设置位0,除非页面是PageTail().
+	 * 让我们确保这是真的,即使是poisoned ->lru。
 	 */
 	BUILD_BUG_ON((unsigned long)LIST_POISON1 & 1);
-
+	/* 如果CONFIG_DEBUG_VM没有勾上,那么这里就直接返回0了 */
 	if (!IS_ENABLED(CONFIG_DEBUG_VM)) {
 		ret = 0;
 		goto out;
 	}
+	/* 这边的switch就是算距离 */
 	switch (page - head_page) {
+	/* 如果是第一个尾页,且还有映射,那么就报bad_page之后 goto out吧 */
 	case 1:
 		/* the first tail page: ->mapping is compound_mapcount() */
 		if (unlikely(compound_mapcount(page))) {
@@ -1064,6 +1263,12 @@ static int free_tail_pages_check(struct page *head_page, struct page *page)
 	ret = 0;
 out:
 	page->mapping = NULL;
+	/*
+	 *  static __always_inline void clear_compound_head(struct page *page)
+	 * {
+	 *	WRITE_ONCE(page->compound_head, 0);
+	 * }
+	 */
 	clear_compound_head(page);
 	return ret;
 }
@@ -1072,7 +1277,11 @@ static __always_inline bool free_pages_prepare(struct page *page,
 					unsigned int order, bool check_free)
 {
 	int bad = 0;
-
+	/* 在由N个4KB组成的compound page的第1~N-1的page结构体(page[1] ~ Page[N-1],
+	 * 即tail page)的compound_head上的最后一位设置1,逻辑如下:
+	 * page->compound_head |=  1UL;
+	 */
+	/* 如果这个page是尾页,那么报个BUG吧 */
 	VM_BUG_ON_PAGE(PageTail(page), page);
 
 	trace_mm_page_free(page, order);
@@ -1081,47 +1290,70 @@ static __always_inline bool free_pages_prepare(struct page *page,
 	/*
 	 * Check tail pages before head page information is cleared to
 	 * avoid checking PageCompound for order-0 pages.
+	 *
+	 *在清除首页信息之前,请检查尾页,以避免对order-0的页面检查PageCompound中
 	 */
+	/* 如果order大于0 */
 	if (unlikely(order)) {
+		/* 判断页面是不是复合页面 */
 		bool compound = PageCompound(page);
 		int i;
-
+		/* 如果是复合页面,但是复合页面的order不等于传入的参数order,那么报个BUG吧 */
 		VM_BUG_ON_PAGE(compound && compound_order(page) != order, page);
-
+		/* 如果是复合页面,那么清除他的PG_double_map flags */
 		if (compound)
 			ClearPageDoubleMap(page);
+		/* 从1开始,直到1 << order结束，开始循环 */
 		for (i = 1; i < (1 << order); i++) {
-			if (compound)
+			/* 如果是复合页面 */
+			if (compound)	/* 这边就是一个检查,检查有多少个不符合规则的页面,然后用bad记录下来 */
 				bad += free_tail_pages_check(page, page + i);
+			/* 这边接着检查 */
 			if (unlikely(free_pages_check(page + i))) {
 				bad++;
 				continue;
 			}
+			/* 清掉PAGE_FLAGS_CHECK_AT_PREP所包含的bit位 */
 			(page + i)->flags &= ~PAGE_FLAGS_CHECK_AT_PREP;
 		}
 	}
+	/* 如果他是匿名页面或者是内核可移动的页面,
+	 * 那么把mapping设置为NULL
+	 */
 	if (PageMappingFlags(page))
 		page->mapping = NULL;
+	/* 如果有mem cgroup,那么相应的计数要减去 */
 	if (memcg_kmem_enabled() && PageKmemcg(page))
 		memcg_kmem_uncharge(page, order);
+	/* 如果check_free设置为true了,如果该page是bad,那么要加上 */
 	if (check_free)
 		bad += free_pages_check(page);
+	/* 如果有bad,那么返回false */
 	if (bad)
 		return false;
-
+	/* 重置CPU的_last_cpupid */
 	page_cpupid_reset_last(page);
+	/* 清除该page的PAGE_FLAGS_CHECK_AT_PREP所包含的bit位 */
 	page->flags &= ~PAGE_FLAGS_CHECK_AT_PREP;
+	/* 重设page_owner */
 	reset_page_owner(page, order);
 
+	/* 如果不是高端内存 */
 	if (!PageHighMem(page)) {
 		debug_check_no_locks_freed(page_address(page),
 					   PAGE_SIZE << order);
 		debug_check_no_obj_freed(page_address(page),
 					   PAGE_SIZE << order);
 	}
+	/* 体系架构相关的,看看他们在free page的时候需要做什么 */
 	arch_free_page(page, order);
+	/* 这里主要是设置page代表的地址全部为PAGE_POISON,然后设置__set_bit(PAGE_EXT_DEBUG_POISON, &page_ext->flags); */
 	kernel_poison_pages(page, 1 << order, 0);
+	/* 这里就是设置PTE的PTE_VALID位
+	 * 说明你这page被释放了
+	 */
 	kernel_map_pages(page, 1 << order, 0);
+	/* 清除kasasn的内存 */
 	kasan_free_pages(page, order);
 
 	return true;
@@ -1159,6 +1391,14 @@ static bool bulkfree_pcp_prepare(struct page *page)
  *
  * And clear the zone's pages_scanned counter, to hold off the "all pages are
  * pinned" detection logic.
+ *
+ * 从PCP列表中释放一些页面
+ * 假设列表中的所有页面都在同一zone,且order.
+ * count是要释放的页数.
+ *
+ * 如果zone以前处于"所有页面固定”状态,则查看此释放是否清除该状态.
+ *
+ * 并清除zone的pages_scaned计数器,以阻止“所有页面都是固定”检测逻辑。
  */
 static void free_pcppages_bulk(struct zone *zone, int count,
 					struct per_cpu_pages *pcp)
@@ -1169,8 +1409,12 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 	bool isolated_pageblocks;
 
 	spin_lock(&zone->lock);
+	/* pages_scanned代表最后一次内存紧张以来,页面回收过程已经扫描的页数.目前正在释放内存,将此清0,待回收过程随后回收时重新计数 */
+	/* 看是否zone中函数pageblock块 */
 	isolated_pageblocks = has_isolate_pageblock(zone);
+	/* 得到pgdat里面NR_PAGES_SCANNED */
 	nr_scanned = node_page_state(zone->zone_pgdat, NR_PAGES_SCANNED);
+	/* 如果有就删除 */
 	if (nr_scanned)
 		__mod_node_page_state(zone->zone_pgdat, NR_PAGES_SCANNED, -nr_scanned);
 
@@ -1184,35 +1428,58 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 		 * empty list is encountered.  This is so more pages are freed
 		 * off fuller lists instead of spinning excessively around empty
 		 * lists
+		 *
+		 * 以循环方式从列表中删除页面.
+		 * 将保留一个batch_free计数,当遇到empty list时该计数将递增.
+		 * 这样就可以从更满的列表中释放出更多的页面,而不是在空列表中过度旋转
 		 */
+		/* 这里主要是避免在下面的循环中循环空链表 */
 		do {
+			/* 这里避开了MIGRATE_UNMOVABLE吗? */
+			/* batch_free ++ */
 			batch_free++;
+			/* 如果++migratetype之后等于MIGRATE_PCPTYPES,那么migratype=0 */
 			if (++migratetype == MIGRATE_PCPTYPES)
 				migratetype = 0;
+			/* 拿到对应的pcp->lists */
 			list = &pcp->lists[migratetype];
+			/* 如果是空的就是接着循环 */
 		} while (list_empty(list));
-
+		/* 说明这里没有空的列表,释放所有的 */
 		/* This is the only non-empty list. Free them all. */
 		if (batch_free == MIGRATE_PCPTYPES)
 			batch_free = count;
 
 		do {
 			int mt;	/* migratetype of the to-be-freed page */
-
+			/* 拿到这个list里面的最后一个page */
 			page = list_last_entry(list, struct page, lru);
 			/* must delete as __free_one_page list manipulates */
+			/* 把它从lru链表里面删除 */
 			list_del(&page->lru);
-
+			/*
+			 * 得到该page的migratetype
+			 *  static inline int get_pcppage_migratetype(struct page *page)
+			 * {
+			 *	return page->index;
+			 * }
+			 */
 			mt = get_pcppage_migratetype(page);
-			/* MIGRATE_ISOLATE page should not go to pcplists */
+			/* MIGRATE_ISOLATE page should not go to pcplists
+			 * 如果是个隔离页面,那么报个BUG吧
+			 */
 			VM_BUG_ON_PAGE(is_migrate_isolate(mt), page);
-			/* Pageblock could have been isolated meanwhile */
+			/* Pageblock could have been isolated meanwhile
+			 * 页面块可能同时被隔离
+			 */
+
+			/* 如果zone中有隔离的页面块,拿到该page所在的pageblock中的页面块 */
 			if (unlikely(isolated_pageblocks))
 				mt = get_pageblock_migratetype(page);
-
+			/* 做一些检查,不满住就continue */
 			if (bulkfree_pcp_prepare(page))
 				continue;
-
+			/* 把该页面给释放了 */
 			__free_one_page(page, page_to_pfn(page), zone, 0, mt);
 			trace_mm_page_pcpu_drain(page, 0, mt);
 		} while (--count && --batch_free && !list_empty(list));
@@ -1227,14 +1494,20 @@ static void free_one_page(struct zone *zone,
 {
 	unsigned long nr_scanned;
 	spin_lock(&zone->lock);
+	/* 获得zone->pgdat下的NR_PAGES_SCANNED计数
+	 * 如果有就减去
+	 */
 	nr_scanned = node_page_state(zone->zone_pgdat, NR_PAGES_SCANNED);
 	if (nr_scanned)
 		__mod_node_page_state(zone->zone_pgdat, NR_PAGES_SCANNED, -nr_scanned);
 
+	/* 如果zone里面哟隔离块,或者该migratetype是隔离的migratetype */
 	if (unlikely(has_isolate_pageblock(zone) ||
 		is_migrate_isolate(migratetype))) {
+		/* 拿到他所属块的migratetype */
 		migratetype = get_pfnblock_migratetype(page, pfn);
 	}
+	/* 把它free到相关的migratetype链表里面去 */
 	__free_one_page(page, pfn, zone, order, migratetype);
 	spin_unlock(&zone->lock);
 }
@@ -1323,14 +1596,18 @@ static void __free_pages_ok(struct page *page, unsigned int order)
 {
 	unsigned long flags;
 	int migratetype;
+	/* 获得该page的pfn */
 	unsigned long pfn = page_to_pfn(page);
-
+	/* free_pages前的一些检查 */
 	if (!free_pages_prepare(page, order, true))
 		return;
 
+	/* 拿到该pfn所在块的migratetype */
 	migratetype = get_pfnblock_migratetype(page, pfn);
 	local_irq_save(flags);
+	/* vm的PGFREE event + 1 << order */
 	__count_vm_events(PGFREE, 1 << order);
+	/* 释放page了 */
 	free_one_page(page_zone(page), page, pfn, order, migratetype);
 	local_irq_restore(flags);
 }
@@ -2816,7 +3093,9 @@ void free_hot_cold_page(struct page *page, bool cold)
 	 * (3)MIGRATE_ISOLATE类型释放到伙伴系统order=0的对应迁移类型的空闲链表中
 	 */
 	if (migratetype >= MIGRATE_PCPTYPES) {
+		/* 如果是migratetype == MIGRATE_ISOLATE */
 		if (unlikely(is_migrate_isolate(migratetype))) {
+			/* 在这里做释放处理 */
 			free_one_page(zone, page, pfn, 0, migratetype);
 			goto out;
 		}

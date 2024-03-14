@@ -143,6 +143,10 @@ struct page {
 						 */
 		/* Tail pages of compound page */
 		struct {
+			/* 在由N个4KB组成的compound page的第1~N-1的page结构体(page[1] ~ Page[N-1],
+			 * 即tail page)的compound_head上的最后一位设置1,逻辑如下:
+			 * page->compound_head |=  1UL
+			 */
 			unsigned long compound_head; /* If bit zero is set */
 
 			/* First tail page only */

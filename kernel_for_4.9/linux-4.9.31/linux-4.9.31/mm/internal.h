@@ -132,6 +132,19 @@ struct alloc_context {
  *     P = B & ~(1 << O)
  *
  * Assumption: *_mem_map is contiguous at least up to MAX_ORDER
+ *
+ * 找到我们配对中的匹配伙伴(buddy1)和它们组成的组合O(n+1)页(page)的结构页。
+ *
+ * 1) 任何伙伴B1将具有满足以下等式的O order相连的B2
+ *	B2＝B1 ^（1<<O）
+ * 例如,如果起始buddy(buddy2)是#8,则为其order 1的伙伴是#10
+ *	B2=8 ^ (1<<1) = 8 ^ 2 = 10
+ *
+ * 2) 任何伙伴B都有一个order O+1父P,它满足以下方程:
+ *	P = B & ~（1<<O）
+ *
+ * 假设:*_mem_map至少连续到MAX_ORDER
+ *
  */
 static inline unsigned long
 __find_buddy_index(unsigned long page_idx, unsigned int order)

@@ -592,6 +592,14 @@ static inline int PageTransTail(struct page *page)
  * by one. This reference will go away with last compound_mapcount.
  *
  * See also __split_huge_pmd_locked() and page_remove_anon_compound_rmap().
+ *
+ * PageDoubleMap表示复合页即被PTEs映射又被PMDs映射.
+ *
+ * 这是优化THP的rmap操作所必需的: 我们可以将每个小页面的mapcout计数(及其来自原子操作的开销)推迟到第一次PMD拆分.
+ *
+ * 对于页面,PageDoubleMap意味着所有子页面中的->_mapcount向上加一.
+ * 此引用将随着最后一个compound_mapcount而消失。
+ * 请参见__split_huge_pmd_locked()和page_remove_anon_compound_rmap().
  */
 static inline int PageDoubleMap(struct page *page)
 {
