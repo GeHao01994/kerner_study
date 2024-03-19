@@ -36,6 +36,15 @@
  *   bit 3 ==				1: use of reserved bit detected
  *   bit 4 ==				1: fault was an instruction fetch
  *   bit 5 ==				1: protection keys block access
+ *
+ *
+ * 页面故障错误代码bits
+ * bit 0 ==	0:找不到页面	1：保护故障
+ * bit 1==	0:读取访问	1：写入访问
+ * bit 2==	0:内核模式访问	1:用户模式访问
+ * bit 3==	1：检测到保留位的使用
+ * bit 4==	1：fault是指令获取
+ * bit 5==	1: 保护密钥阻止访问
  */
 enum x86_pf_error_code {
 
@@ -428,7 +437,9 @@ static noinline int vmalloc_fault(unsigned long address)
 	pmd_t *pmd, *pmd_ref;
 	pte_t *pte, *pte_ref;
 
-	/* Make sure we are in vmalloc area: */
+	/* Make sure we are in vmalloc area:
+	 * 确保我们在malloc区域
+	 */
 	if (!(address >= VMALLOC_START && address < VMALLOC_END))
 		return -1;
 
@@ -438,12 +449,23 @@ static noinline int vmalloc_fault(unsigned long address)
 	 * Copy kernel mappings over when needed. This can also
 	 * happen within a race in page table update. In the later
 	 * case just flush:
+	 *
+	 * 在需要时复制内核映射.这也可能发生在页面表更新中的竞争中.
+	 * 在后一种情况下,只需冲洗：
+	 */
+	/* 拿到这块地址对应的pgd
+	 *
+	 * cr3就是页表基地址寄存器,详情可以看一下下面这篇博客
+	 *
+	 * https://blog.csdn.net/SweeNeil/article/details/106171361
 	 */
 	pgd = (pgd_t *)__va(read_cr3()) + pgd_index(address);
+	/* #define pgd_offset_k(address) pgd_offset(&init_mm, (address)) */
 	pgd_ref = pgd_offset_k(address);
+	/* 如果pgd_ref所指的内容是空的,那么返回 -1 */
 	if (pgd_none(*pgd_ref))
 		return -1;
-
+	/* 如果pgd是空的,那么把他设置进去 */
 	if (pgd_none(*pgd)) {
 		set_pgd(pgd, *pgd_ref);
 		arch_flush_lazy_mmu_mode();
@@ -454,19 +476,26 @@ static noinline int vmalloc_fault(unsigned long address)
 	/*
 	 * Below here mismatches are bugs because these lower tables
 	 * are shared:
+	 *
+	 * 下面的不匹配是bug,因为这些底层页表是共享的：
 	 */
 
+	/* 得到pud */
 	pud = pud_offset(pgd, address);
+	/* 从pgd_ref里面得到pud_ref */
 	pud_ref = pud_offset(pgd_ref, address);
+	/* 如果pud_ref为NULL,那么返回-1 */
 	if (pud_none(*pud_ref))
 		return -1;
-
+	/* 如果pud为nono 或者pud的pfn不相等,那么报个BUG */
 	if (pud_none(*pud) || pud_pfn(*pud) != pud_pfn(*pud_ref))
 		BUG();
 
+	/* 如果是大页,那么返回0 */
 	if (pud_huge(*pud))
 		return 0;
 
+	/* 拿到pmd */
 	pmd = pmd_offset(pud, address);
 	pmd_ref = pmd_offset(pud_ref, address);
 	if (pmd_none(*pmd_ref))
@@ -478,6 +507,7 @@ static noinline int vmalloc_fault(unsigned long address)
 	if (pmd_huge(*pmd))
 		return 0;
 
+	/* 拿到pte */
 	pte_ref = pte_offset_kernel(pmd_ref, address);
 	if (!pte_present(*pte_ref))
 		return -1;
@@ -718,15 +748,24 @@ no_context(struct pt_regs *regs, unsigned long error_code,
 	struct task_struct *tsk = current;
 	unsigned long flags;
 	int sig;
-	/* No context means no VMA to pass down */
+	/* No context means no VMA to pass down
+	 * No context意味着没有可传递的VMA
+	 */
 	struct vm_area_struct *vma = NULL;
 
-	/* Are we prepared to handle this kernel fault? */
+	/* Are we prepared to handle this kernel fault?
+	 * 我们准备好处理这个内核故障了吗?
+	 */
+
+	/* X86_TRAP_PF = 14, Page Fault */
 	if (fixup_exception(regs, X86_TRAP_PF)) {
 		/*
 		 * Any interrupt that takes a fault gets the fixup. This makes
 		 * the below recursive fault logic only apply to a faults from
 		 * task context.
+		 *
+		 * 任何发生fault的中断都会得到修复.
+		 * 这使得以下递归故障逻辑仅适用于来自于进程上下文中的faults
 		 */
 		if (in_interrupt())
 			return;
@@ -736,6 +775,9 @@ no_context(struct pt_regs *regs, unsigned long error_code,
 		 *
 		 * In this case we need to make sure we're not recursively
 		 * faulting through the emulate_vsyscall() logic.
+		 *
+		 * 根据以上内容,我们是!in_interrupt(),又名,进程上下文.
+		 * 在这种情况下,我们需要确保我们没有通过emulate_vsyscall()逻辑递归地fault
 		 */
 		if (current->thread.sig_on_uaccess_err && signal) {
 			tsk->thread.trap_nr = X86_TRAP_PF;
@@ -749,6 +791,8 @@ no_context(struct pt_regs *regs, unsigned long error_code,
 
 		/*
 		 * Barring that, we can do the fixup and be happy.
+		 *
+		 * 除此之外,我们可以修复并保持快乐.
 		 */
 		return;
 	}
@@ -758,7 +802,11 @@ no_context(struct pt_regs *regs, unsigned long error_code,
 	 * Stack overflow?  During boot, we can fault near the initial
 	 * stack in the direct map, but that's not an overflow -- check
 	 * that we're in vmalloc space to avoid this.
+	 *
+	 * 堆栈溢出? 在boot过程中中,我们可以在直接映射中的初始堆栈附近fault,但这不是溢出 -- 请检查我们是否在vmalloc空间中以避免这种情况.
 	 */
+
+	/* 如果是vmalloc的区域,并且*/
 	if (is_vmalloc_addr((void *)address) &&
 	    (((unsigned long)tsk->stack - 1 - address < PAGE_SIZE) ||
 	     address - ((unsigned long)tsk->stack + THREAD_SIZE) < PAGE_SIZE)) {
@@ -858,16 +906,22 @@ __bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
 {
 	struct task_struct *tsk = current;
 
-	/* User mode accesses just cause a SIGSEGV */
+	/* User mode accesses just cause a SIGSEGV
+	 * 用户模式访问只会导致SIGSEGV
+	 */
 	if (error_code & PF_USER) {
 		/*
 		 * It's possible to have interrupts off here:
+		 *
+		 * 这里说的是可能在这里有中断off,所以这里打开中断
 		 */
 		local_irq_enable();
 
 		/*
 		 * Valid to do another page fault here because this one came
 		 * from user space:
+		 *
+		 * 在此处执行另一个page fault有效,因为此错误来自用户空间:
 		 */
 		if (is_prefetch(regs, error_code, address))
 			return;
@@ -879,6 +933,13 @@ __bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
 		/*
 		 * Instruction fetch faults in the vsyscall page might need
 		 * emulation.
+		 *
+		 * vsyscall页中的指令获取faults可能需要模拟.
+		 */
+
+		/* 如果error_code中有
+		 * PF_INSTR	=	1 << 4: fault was an instruction fetch
+		 *
 		 */
 		if (unlikely((error_code & PF_INSTR) &&
 			     ((address & ~0xfff) == VSYSCALL_ADDR))) {
@@ -891,10 +952,11 @@ __bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
 		 * To avoid leaking information about the kernel page table
 		 * layout, pretend that user-mode accesses to kernel addresses
 		 * are always protection faults.
-		 */
+		 *
+		 * 为了避免有关内核页表布局的leaking信息,假设用户模式访问内核地址总是protection faults */
 		if (address >= TASK_SIZE_MAX)
 			error_code |= PF_PROT;
-
+		/* 这个只有CONFIG_S390打开了才能设置,否则默认都为1 */
 		if (likely(show_unhandled_signals))
 			show_signal_msg(regs, error_code, address, tsk);
 
@@ -902,11 +964,13 @@ __bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
 		tsk->thread.error_code	= error_code;
 		tsk->thread.trap_nr	= X86_TRAP_PF;
 
+		/* 发送SIGSEGV的信号了 */
 		force_sig_info_fault(SIGSEGV, si_code, address, tsk, vma, 0);
 
 		return;
 	}
 
+	/* 如果是f00f的bug,那么直接返回 */
 	if (is_f00f_bug(regs, address))
 		return;
 
@@ -1247,8 +1311,27 @@ __do_page_fault(struct pt_regs *regs, unsigned long error_code,
 	 * This verifies that the fault happens in kernel space
 	 * (error_code & 4) == 0, and that the fault was not a
 	 * protection error (error_code & 9) == 0.
+	 *
+	 * 我们按需在内核空间虚拟内存中fault-in.“reference” 页表为init_mm.pgd.
+	 *
+	 * 注意！我们决不能为这种情况带任何锁.
+	 * 我们可能处于中断或关键区域,应该只复制master页表中的信息,仅此而已。
+	 *
+	 * 这验证了falut发生在内核空间中(error_code & 4)==0,并且该故障不是保护错误
+	 * (error_coode & 9）== 0.
+	 */
+	/* 所以说这里是判断它的page_fault的地址是不是在内核空间
+	 * static int fault_in_kernel_space(unsigned long address)
+	 * {
+	 *	return address >= TASK_SIZE_MAX;
+	 * }
 	 */
 	if (unlikely(fault_in_kernel_space(address))) {
+		/* PF_RSVD	=	1 << 3 			     1: use of reserved bit detected
+		 * PF_USER	=	1 << 2 0: kernel-mode access 1: user-mode access
+		 * PF_PROT	=	1 << 0,0: no page found	     1: protection fault
+		 *
+		 * 如果error_code没有设置PF_RSVD | PF_USER | PF_PROT 的任何一个 */
 		if (!(error_code & (PF_RSVD | PF_USER | PF_PROT))) {
 			if (vmalloc_fault(address) >= 0)
 				return;
@@ -1257,7 +1340,9 @@ __do_page_fault(struct pt_regs *regs, unsigned long error_code,
 				return;
 		}
 
-		/* Can handle a stale RO->RW TLB: */
+		/* Can handle a stale RO->RW TLB:
+		 * 这里就是去检查一些权限
+		 */
 		if (spurious_fault(error_code, address))
 			return;
 
@@ -1267,6 +1352,8 @@ __do_page_fault(struct pt_regs *regs, unsigned long error_code,
 		/*
 		 * Don't take the mm semaphore here. If we fixup a prefetch
 		 * fault we could otherwise deadlock:
+		 *
+		 * 不要在这里拿mm 信号量,如果我们修复了一个预取fault,否则我们可能会死锁.
 		 */
 		bad_area_nosemaphore(regs, error_code, address, NULL);
 

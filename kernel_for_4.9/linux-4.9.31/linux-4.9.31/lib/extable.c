@@ -14,6 +14,12 @@
 #include <linux/sort.h>
 #include <asm/uaccess.h>
 
+
+/* &x->insn 是异常表项中成员 insn 的地址,也就是宏 _ASM_EXTABLE 中 .long (from) - .;
+ * 指令内位置计数器 “.” 对应的值.
+ * x->insn 是异常表项中成员insn的值,也就是(from)-.的值.
+ * 两者相加，得到的就是 from 的值，也就是异常发生的地址.
+ */
 #ifndef ARCH_HAS_RELATIVE_EXTABLE
 #define ex_to_insn(x)	((x)->insn)
 #else
@@ -99,12 +105,19 @@ void trim_init_extable(struct module *m)
  * or NULL if none is found.
  * We use a binary search, and thus we assume that the table is
  * already sorted.
+ *
+ * 在一个异常向量表中搜索给定指令地址对应的entry,并返回该entry的地址,
+ * 如果没有找到,则返回NULL。
+ * 我们使用二进制搜索,因此我们假设表已经排序
  */
 const struct exception_table_entry *
 search_extable(const struct exception_table_entry *first,
 	       const struct exception_table_entry *last,
 	       unsigned long value)
 {
+	/* 如果first <= last,也就是说从first一直到last去循环整个异常向量表
+	 * 这里其实是用的二分法
+	 */
 	while (first <= last) {
 		const struct exception_table_entry *mid;
 
@@ -112,6 +125,8 @@ search_extable(const struct exception_table_entry *first,
 		/*
 		 * careful, the distance between value and insn
 		 * can be larger than MAX_LONG:
+		 *
+		 * 小心,value和insn之间的距离可能大于MAX_LONG:
 		 */
 		if (ex_to_insn(mid) < value)
 			first = mid + 1;
