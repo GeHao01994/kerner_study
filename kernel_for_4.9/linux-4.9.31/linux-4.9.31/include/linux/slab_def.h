@@ -41,7 +41,7 @@ struct kmem_cache {
 	/* 一个cache colour的长度,和L1 cache line大小相同 */
 	unsigned int colour_off;	/* colour offset */
 	/*
-	 * 空闲对象链表放在slab外部时使用,管理用于slab对象管理结构中freelist成员的缓存,也就是又一个新缓存
+	 * freelist_cache是记录到那个kmalloc的kmem_cache里面去分配num * sizeof(freelist_idx_t)大小的内存
 	 *
 	 * 如果是off-slab的场景,freelist_cache指向一个通用slab cache，用来分配page->freelist的空间
 	 * 如果是on-slab的场景,freelist_cache是空，page->freelist指向slab的尾部

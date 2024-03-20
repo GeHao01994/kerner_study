@@ -2457,7 +2457,7 @@ __kmem_cache_create (struct kmem_cache *cachep, unsigned long flags)
 	}
 #endif
 
-	/* 所以如果freelist在slab的里面(也就是CFLGS_OFF_SLAB没被设置的时候),那么就是
+	/* 所以如果freelist在slab的里面(也就是CFLGS_OBJFREELIST_SLAB没被设置的时候),那么就是
 	 *
 	 *  _____________________________________________________________________
 	 * |    colour 	 |     colour   | freelist  | obj  | obj  | obj  |...... |
@@ -2466,6 +2466,9 @@ __kmem_cache_create (struct kmem_cache *cachep, unsigned long flags)
 	 */
 
 
+	/* 这里需要注意,freelist用于管理对应order的page中分出来的大小为size的每个片段索引号,
+	 * objfreelist,off slab,on slab三者只用其中一个,优先考虑objfreelist,然后是off slab,最后是on slab
+	 */
 	/* 如果set_objfreelist_slab_cache返回true,那么就带上CFLGS_OBJFREELIST_SLAB */
 	if (set_objfreelist_slab_cache(cachep, size, flags)) {
 		flags |= CFLGS_OBJFREELIST_SLAB;
