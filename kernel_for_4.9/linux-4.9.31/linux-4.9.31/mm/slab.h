@@ -51,12 +51,23 @@ struct kmem_cache {
  * Allocators use this to gradually bootstrap themselves. Most allocators
  * have the problem that the structures used for managing slab caches are
  * allocated from slab caches themselves.
+ *
+ * slab分配器的状态.
+ *
+ * 这用于描述引导过程中分配器的状态.
+ * 分配器利用这一点来逐步引导自己.
+ * 大多数分配器都存在这样的问题,即用于管理slab caches的结构是从slab缓存本身分配的
  */
 enum slab_state {
 	DOWN,			/* No slab functionality yet */
-	PARTIAL,		/* SLUB: kmem_cache_node available */
+				/* 尚未提供slab功能 */
+	PARTIAL,		/* SLUB: kmem_cache_node available
+				 * SLUB: kmem_cache_node 可用的,主要是在kmem_cache_init中创建了kmem_cache_node之后就设置了
+				 */
 	PARTIAL_NODE,		/* SLAB: kmalloc size for node struct available */
+				/* SLAB：node struct的kmalloc大小可用 */
 	UP,			/* Slab caches usable but not all extras yet */
+				/* Slab cache可用,但不是所有额外的,详情请看kmem_cache_init_late */
 	FULL			/* Everything is working */
 };
 
@@ -429,16 +440,27 @@ struct kmem_cache_node {
 	spinlock_t list_lock;
 
 #ifdef CONFIG_SLAB
+	/* 只使用了部分对象的SLAB描述符的双向循环链表 */
 	struct list_head slabs_partial;	/* partial list first, better asm code */
+	/* 不包含空闲对象的SLAB描述符的双向循环链表 */
 	struct list_head slabs_full;
+	/* 只包含空闲对象的SLAB描述符的双向循环链表 */
 	struct list_head slabs_free;
+	/* num_slabs则是分配的slab个数，每个slab占用一页 */
 	unsigned long num_slabs;
+	 /* 高速缓存中空闲对象个数(包括slabs_partial链表中和slabs_free链表中所有的空闲对象) */
 	unsigned long free_objects;
+	/* 高速缓存中空闲对象的上限 */
 	unsigned int free_limit;
+	/* 下一个被分配的SLAB使用的colour */
 	unsigned int colour_next;	/* Per-node cache coloring */
+	/* 指向这个结点上所有CPU共享的一个本地高速缓存 */
 	struct array_cache *shared;	/* shared per node */
+	/* 指向其他node共享的本地高速缓存 */
 	struct alien_cache **alien;	/* on other nodes */
+	/* 两次缓存回收时间的间隔,降低次数,提高性能 */
 	unsigned long next_reap;	/* updated without locking */
+	 /* 0:收缩 1:获取一个对象 */
 	int free_touched;		/* updated without locking */
 #endif
 

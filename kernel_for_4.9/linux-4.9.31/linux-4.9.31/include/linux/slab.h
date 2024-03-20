@@ -266,6 +266,11 @@ static inline const char *__check_heap_object(const void *ptr,
  * should be equal or greater to 2^12 / 2^8 = 2^4 = 16.
  * If minimum size of kmalloc is less than 16, we use it as minimum object
  * size and give up to use byte sized index.
+ *
+ * 此限制来自字节大小的索引实现.
+ * 页面大小通常为2^12字节,在这种情况下,如果我们想使用字节大小的索引来表示2^8个条目,
+ * 则对象的大小应等于或大于2^12/2^8=2^4=16.
+ * 如果kmalloc的最小大小小于16,我们将其用作最小对象大小,并放弃使用字节大小的索引.
  */
 #define SLAB_OBJ_MIN_SIZE      (KMALLOC_MIN_SIZE < 16 ? \
                                (KMALLOC_MIN_SIZE) : 16)

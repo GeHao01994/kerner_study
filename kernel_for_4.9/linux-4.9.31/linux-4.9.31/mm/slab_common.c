@@ -43,6 +43,9 @@ struct kmem_cache *kmem_cache;
 /*
  * Merge control. If this is set then no merging of slab caches will occur.
  * (Could be removed. This was introduced to pacify the merge skeptics.)
+ *
+ * Merge control. 如果设置了此选项,则不合并slab caches将会发生.
+ * (可以删除.这是为了介绍安抚merge怀疑者)
  */
 static int slab_nomerge;
 
@@ -71,7 +74,10 @@ EXPORT_SYMBOL(kmem_cache_size);
 static int kmem_cache_sanity_check(const char *name, size_t size)
 {
 	struct kmem_cache *s = NULL;
-
+	/* 如果name为空,在中断上下文中,小于sizeof(void *) 或者大于
+	 * #define KMALLOC_MAX_SIZE	(1UL << KMALLOC_SHIFT_MAX)
+	 * 那么就报个错误之后返回非法参数
+	 */
 	if (!name || in_interrupt() || size < sizeof(void *) ||
 		size > KMALLOC_MAX_SIZE) {
 		pr_err("kmem_cache_create(%s) integrity check failed\n", name);
@@ -86,6 +92,9 @@ static int kmem_cache_sanity_check(const char *name, size_t size)
 		 * This happens when the module gets unloaded and doesn't
 		 * destroy its slab cache and no-one else reuses the vmalloc
 		 * area of the module.  Print a warning.
+		 *
+		 * 当模块被卸载并且没有销毁它的slab缓存并且没有其他人重用模块的vmalloc区域时,就会发生这种情况.
+		 * 打印警告.
 		 */
 		res = probe_kernel_address(s->name, tmp);
 		if (res) {
@@ -232,18 +241,33 @@ static inline void destroy_memcg_params(struct kmem_cache *s)
  */
 int slab_unmergeable(struct kmem_cache *s)
 {
+	/* 如果内核启动参数slab_nomerge被设置了或者flags有设置SLAB_NEVER_MERGE中的一个
+	 * #define SLAB_NEVER_MERGE (SLAB_RED_ZONE | SLAB_POISON | SLAB_STORE_USER | \
+	 *      SLAB_TRACE | SLAB_DESTROY_BY_RCU | SLAB_NOLEAKTRACE | \
+	 *      SLAB_FAILSLAB | SLAB_KASAN)
+	 *
+	 */
+
 	if (slab_nomerge || (s->flags & SLAB_NEVER_MERGE))
 		return 1;
 
+	/* 这里主要是考虑cgroup的情况
+	 * 如果在cgroup中是root_cache,那么它就是unmergeable
+	 */
 	if (!is_root_cache(s))
 		return 1;
 
+	/* 如果有构造函数,那么也返回1 */
 	if (s->ctor)
 		return 1;
 
 	/*
 	 * We may have set a slab to be unmergeable during bootstrap.
+	 *
+	 * 我们可能在引导过程中设置了一个不可合并的slab
 	 */
+
+	/* 如果s->refcount < 0,那么也返回 */
 	if (s->refcount < 0)
 		return 1;
 
@@ -254,41 +278,63 @@ struct kmem_cache *find_mergeable(size_t size, size_t align,
 		unsigned long flags, const char *name, void (*ctor)(void *))
 {
 	struct kmem_cache *s;
-
+	/* 如果内核启动参数slab_nomerge被设置了或者flags有设置SLAB_NEVER_MERGE中的一个
+	 * #define SLAB_NEVER_MERGE (SLAB_RED_ZONE | SLAB_POISON | SLAB_STORE_USER | \
+	 *	SLAB_TRACE | SLAB_DESTROY_BY_RCU | SLAB_NOLEAKTRACE | \
+	 *	SLAB_FAILSLAB | SLAB_KASAN)
+	 *
+	 */
 	if (slab_nomerge || (flags & SLAB_NEVER_MERGE))
 		return NULL;
 
+	/* 如果有构造函数,那么也返回NULL */
 	if (ctor)
 		return NULL;
-
+	/* 这里就是让size和字节大小对齐，AARCH64就是8 */
 	size = ALIGN(size, sizeof(void *));
+	/* 根据我们指定的对齐参数align并结合CPU cache line大小,计算出一个合适的对齐参数 */
 	align = calculate_alignment(flags, align, size);
+	/* 对象 size 重新按照 align 进行对齐 */
 	size = ALIGN(size, align);
+	/* 获得flags */
 	flags = kmem_cache_flags(size, flags, name, NULL);
 
+	/* 然后查找整个slab_caches队列,看有没有合适的slab */
 	list_for_each_entry_reverse(s, &slab_caches, list) {
+		/* 如果slab是unmergeable的,那么continue */
 		if (slab_unmergeable(s))
 			continue;
 
+		/* 如果size比slab的size还要大,那么也不合适 */
 		if (size > s->size)
 			continue;
 
+		/* 校验指定的flag中的SLAB_MERGE_SAME是否与已有slab cache中的flag 一致
+		 *
+		 * #define SLAB_MERGE_SAME (SLAB_RECLAIM_ACCOUNT | SLAB_CACHE_DMA | \
+		 *		SLAB_NOTRACK | SLAB_ACCOUNT)
+		 */
 		if ((flags & SLAB_MERGE_SAME) != (s->flags & SLAB_MERGE_SAME))
 			continue;
 		/*
 		 * Check if alignment is compatible.
 		 * Courtesy of Adrian Drzewiecki
+		 *
+		 * 检查对齐是否兼容.
+		 * 由Adrian Drzewiecki提供
 		 */
 		if ((s->size & ~(align - 1)) != s->size)
 			continue;
 
+		/* 两者的 size 相差在一个 word size 之内 */
 		if (s->size - size >= sizeof(void *))
 			continue;
 
+		/* 已有 slab cache 中对象的对齐 align 要大于指定的align或者可以整除align */
 		if (IS_ENABLED(CONFIG_SLAB) && align &&
 			(align > s->align || s->align % align))
 			continue;
-
+		/* 查找到可以合并的已有 slab cache，不需要再创建新的 slab cache 了 */
 		return s;
 	}
 	return NULL;
@@ -297,6 +343,8 @@ struct kmem_cache *find_mergeable(size_t size, size_t align,
 /*
  * Figure out what the alignment of the objects will be given a set of
  * flags, a user specified alignment and the size of the objects.
+ *
+ * 在给定一组标志、用户指定的对齐方式和对象大小的情况下,算出对象的对齐方式.
  */
 unsigned long calculate_alignment(unsigned long flags,
 		unsigned long align, unsigned long size)
@@ -307,17 +355,29 @@ unsigned long calculate_alignment(unsigned long flags,
 	 *
 	 * The hardware cache alignment cannot override the specified
 	 * alignment though. If that is greater then use it.
+	 *
+	 * 如果用户想要硬件cache对齐的对象,那么如果对象足够大,则遵循该建议
+	 *
+	 * 但是硬件cache对齐方式无法覆盖指定的对齐方式.如果更大,则使用它.
 	 */
+
+	/* 如果flags里面有HWCACHE对齐的标志 */
 	if (flags & SLAB_HWCACHE_ALIGN) {
+		/* #define cache_line_size()	L1_CACHE_BYTES */
 		unsigned long ralign = cache_line_size();
+		/* 这里就是cache_line_size / 2的循环直到size > ralign */
 		while (size <= ralign / 2)
 			ralign /= 2;
+
+		/* 算出align和ralign的最大值 */
 		align = max(align, ralign);
 	}
 
+	/* 如果align小于SLAB最小对齐的值,那么把最小对齐的值赋值给align */
 	if (align < ARCH_SLAB_MINALIGN)
 		align = ARCH_SLAB_MINALIGN;
 
+	/* 让align对齐sizeof((void *)) */
 	return ALIGN(align, sizeof(void *));
 }
 
@@ -330,14 +390,19 @@ static struct kmem_cache *create_cache(const char *name,
 	int err;
 
 	err = -ENOMEM;
+	/* 分配kmem_cache结构体 */
 	s = kmem_cache_zalloc(kmem_cache, GFP_KERNEL);
 	if (!s)
 		goto out;
 
+	/* 把name给新分配的kmem_cache的name */
 	s->name = name;
+	/* 将object_size和size赋值给kmem_cache的object_size和size */
 	s->object_size = object_size;
 	s->size = size;
+	/* 把align赋值给kmem_cache的align */
 	s->align = align;
+	/* 把构造函数赋值给kmem_cache的ctor */
 	s->ctor = ctor;
 
 	err = init_memcg_params(s, memcg, root_cache);
@@ -384,6 +449,25 @@ out_free_cache:
  * %SLAB_HWCACHE_ALIGN - Align the objects in this cache to a hardware
  * cacheline.  This can be beneficial if you're counting cycles as closely
  * as davem.
+ *
+ * kmem_cache_createi - 创建缓存.
+ * @name: /proc/slabinfo中用于标识该缓存的字符串.
+ * @size: 要在此缓存中创建的对象的大小.
+ * @align: 对象所需的对齐方式.
+ * @标志: SLAB标志.
+ * @ctor：对象的构造函数.
+ *
+ * 成功时向缓存返回ptr,失败时返回NULL.
+ * 不能在中断中调用,但可以被中断.
+ * 当缓存分配新页面时,@ctor将运行。
+ *
+ * 标志是
+ *
+ * %SLAB_POISON - 用已知test pattern(a5a5a5a5)来填充slab,以捕获对未初始化内存的引用.
+ *
+ * %SLAB_RED_ZONE - 在分配的内存周围插入“Red” zones,以检查缓冲区是否溢出.
+ *
+ * %SLAB_HWCACHE_ALIGN - 将此缓存中的对象与硬件对齐缓存线.如果你像davem一样仔细地计算周期,这可能是有益的。
  */
 struct kmem_cache *
 kmem_cache_create(const char *name, size_t size, size_t align,
@@ -399,6 +483,9 @@ kmem_cache_create(const char *name, size_t size, size_t align,
 
 	mutex_lock(&slab_mutex);
 
+	/* 入参检查,不能在中断中执行、cache名字不能为空,对象大小在8字节-KMALLOC_MAX_SIZE字节之间,kmalloc 一般情况下的上限是 128K,
+	 * 但是如果打开了KMALLOC_MAX_SIZE这个宏,可以申请的内存会更大
+	 */
 	err = kmem_cache_sanity_check(name, size);
 	if (err) {
 		goto out_unlock;
@@ -409,14 +496,22 @@ kmem_cache_create(const char *name, size_t size, size_t align,
 	 * of all flags. We expect them to define CACHE_CREATE_MASK in this
 	 * case, and we'll just provide them with a sanitized version of the
 	 * passed flags.
+	 *
+	 * 某些分配器会将有效标志集约束为所有标志的子集.
+	 * 在这种情况下,我们希望他们定义CACHE_CREATE_MASK,
+	 * 我们只为他们提供一个经过净化的传递标志版本。
 	 */
+
+	/* #define CACHE_CREATE_MASK (SLAB_CORE_FLAGS | SLAB_DEBUG_FLAGS | SLAB_CACHE_FLAGS) */
 	flags &= CACHE_CREATE_MASK;
 
+	/* 查找是否有现有的slab描述符可以复用,如果没有才通过do_kmem_cache_create来创建一个新的slab描述符 */
 	s = __kmem_cache_alias(name, size, align, flags, ctor);
 	if (s)
 		goto out_unlock;
-
+	/* 分配一段空间,然后把name拷贝到这段空间里面去 */
 	cache_name = kstrdup_const(name, GFP_KERNEL);
+	/* 如果cache_name为NULL,那么返回-ENOMEM */
 	if (!cache_name) {
 		err = -ENOMEM;
 		goto out_unlock;

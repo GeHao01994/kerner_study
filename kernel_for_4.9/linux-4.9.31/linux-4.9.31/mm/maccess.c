@@ -18,6 +18,17 @@
  * do_page_fault() doesn't attempt to take mmap_sem.  This makes
  * probe_kernel_read() suitable for use within regions where the caller
  * already holds mmap_sem, or other locks which nest inside mmap_sem.
+ *
+ * probe_kernel_read(): 安全地尝试从某个位置读取
+ * @dst：指向应获取数据的缓冲区的指针
+ * @src:读取地址
+ * @size：数据块的大小
+ *
+ * 安全地从地址@src读取到@dst的缓冲区.如果发生内核错误,请处理该错误并返回-EFAULT
+ *
+ * 我们确保copy_from_user是在原子上下文中执行的,这样do_page_fault就不会试图获取mmap_sem.
+ * 这使得probe_kernel_read()在调用者早已经获得mmap_sem或者嵌套在mmap_sem内的其他锁的区域内
+ * 更合适的使用
  */
 
 long __weak probe_kernel_read(void *dst, const void *src, size_t size)

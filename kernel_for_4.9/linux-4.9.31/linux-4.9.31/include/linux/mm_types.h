@@ -62,6 +62,7 @@ struct page {
 	/* Second double word */
 	union {
 		pgoff_t index;		/* Our offset within mapping. */
+		 /* 用于SLAB描述符，指向空闲对象链表 */
 		void *freelist;		/* sl[aou]b first free object */
 		/* page_deferred_list().prev	-- second tail page */
 	};
@@ -92,7 +93,7 @@ struct page {
 				 * See page-flags.h for more details.
 				 */
 				atomic_t _mapcount;
-
+				/* 用于SLAB时描述当前SLAB已经使用的对象对象 */
 				unsigned int active;		/* SLAB */
 				struct {			/* SLUB */
 					unsigned inuse:16;

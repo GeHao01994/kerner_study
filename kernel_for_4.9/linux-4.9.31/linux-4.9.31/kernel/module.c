@@ -4144,7 +4144,9 @@ static int __init proc_modules_init(void)
 module_init(proc_modules_init);
 #endif
 
-/* Given an address, look for it in the module exception tables. */
+/* Given an address, look for it in the module exception tables.
+ * 给定一个地址,在模块异常表中查找它
+ */
 const struct exception_table_entry *search_module_extables(unsigned long addr)
 {
 	const struct exception_table_entry *e = NULL;
@@ -4152,21 +4154,30 @@ const struct exception_table_entry *search_module_extables(unsigned long addr)
 
 	preempt_disable();
 	list_for_each_entry_rcu(mod, &modules, list) {
+
+		/* MODULE_STATE_UNFORMED,正在建立加载配置,那么也continue */
 		if (mod->state == MODULE_STATE_UNFORMED)
 			continue;
+
+		/* 如果模块中的异常向量表为0,那么直接continue到下一个 */
 		if (mod->num_exentries == 0)
 			continue;
 
+		/* 在mod中的异常向量中查找 */
 		e = search_extable(mod->extable,
 				   mod->extable + mod->num_exentries - 1,
 				   addr);
+		/* 如果找到了,那么break */
 		if (e)
 			break;
 	}
 	preempt_enable();
 
 	/* Now, if we found one, we are running inside it now, hence
-	   we cannot unload the module, hence no refcnt needed. */
+	 * we cannot unload the module, hence no refcnt needed.
+	 *
+	 * 现在,如果我们找到了一个,我们现在正在里面运行,因此我们无法卸载模块,因此不需要refcnt
+	 */
 	return e;
 }
 

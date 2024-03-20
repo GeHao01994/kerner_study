@@ -107,6 +107,12 @@ extern long strncpy_from_unsafe(char *dst, const void *unsafe_addr, long count);
  * @retval: read into this variable
  *
  * Returns 0 on success, or -EFAULT.
+ *
+ * probe_kernel_address(): 安全地尝试从某个位置读取
+ * @addr: 读取地址
+ * @retval：读进此变量
+ * 成功时返回0,或-EFAULT.
+ *
  */
 #define probe_kernel_address(addr, retval)		\
 	probe_kernel_read(&retval, addr, sizeof(retval))

@@ -11,6 +11,14 @@
  * with the main instruction path.  This means when everything is well,
  * we don't even have to jump over them.  Further, they do not intrude
  * on our cache or tlb entries.
+ *
+ * 异常表由相对于异常表条目本身的三元组地址组成.
+ * 第一个地址是允许fault的指令的地址,第二个地址是程序应该继续的目标地址.
+ * 第三个是处理程序函数,用于处理由第一个字段中的指令引起的故障.
+ *
+ * 下面的所有例程都使用与主指令路径不一致的修复代码位.
+ * 这意味着当一切顺利时,我们甚至不必跳过它们.
+ * 此外,它们不会侵入我们的cache或tlb条目.
  */
 
 struct exception_table_entry {

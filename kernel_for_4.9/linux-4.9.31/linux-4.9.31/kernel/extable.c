@@ -54,6 +54,7 @@ const struct exception_table_entry *search_exception_tables(unsigned long addr)
 {
 	const struct exception_table_entry *e;
 
+	/* 如果在os的异常向量表里面没有找到,那么就会到module里面的去找 */
 	e = search_extable(__start___ex_table, __stop___ex_table-1, addr);
 	if (!e)
 		e = search_module_extables(addr);
