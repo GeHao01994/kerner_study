@@ -93,7 +93,7 @@ struct page {
 				 * See page-flags.h for more details.
 				 */
 				atomic_t _mapcount;
-				/* 用于SLAB时描述当前SLAB已经使用的对象对象 */
+				/* 用于SLAB时描述当前SLAB已经使用的对象数,然后通过它也可以得到下一次分配的对象在freelist的下标 */
 				unsigned int active;		/* SLAB */
 				struct {			/* SLUB */
 					unsigned inuse:16;
