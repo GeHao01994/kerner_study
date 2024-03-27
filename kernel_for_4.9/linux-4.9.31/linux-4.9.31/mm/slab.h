@@ -350,16 +350,29 @@ static inline struct kmem_cache *cache_from_obj(struct kmem_cache *s, void *x)
 	 * case. If it is not compiled in, the compiler should be smart enough
 	 * to not do even the assignment. In that case, slab_equal_or_root
 	 * will also be a constant.
+	 *
+	 * 当不使用kmemcg时,所有的分配都应返回相同的值.但在这种情况下,我们不想支付分配的代价.
+	 * 如果它没有编译进去,编译器应该足够聪明,甚至不会进行分配.
+	 * 在这种情况下,slab_equal_or_root也将是一个常数.
 	 */
 	if (!memcg_kmem_enabled() &&
 	    !unlikely(s->flags & SLAB_CONSISTENCY_CHECKS))
 		return s;
 
+	/* 获得该对象对应的page结构体 */
 	page = virt_to_head_page(x);
+	/* 从page里面得到kmem_cache 结构体 */
 	cachep = page->slab_cache;
+	/* static inline bool slab_equal_or_root(struct kmem_cache *s,
+	 *					struct kmem_cache *p)
+	 * {
+	 *	return p == s || p == s->memcg_params.root_cache;
+	 * }
+	 */
 	if (slab_equal_or_root(cachep, s))
 		return cachep;
 
+	/* 如果不一致,那么就报个错误 */
 	pr_err("%s: Wrong slab cache. %s but object is from %s\n",
 	       __func__, s->name, cachep->name);
 	WARN_ON_ONCE(1);

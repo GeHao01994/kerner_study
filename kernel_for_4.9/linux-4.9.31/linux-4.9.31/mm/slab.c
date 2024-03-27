@@ -786,19 +786,26 @@ static void __drain_alien_cache(struct kmem_cache *cachep,
 				struct array_cache *ac, int node,
 				struct list_head *list)
 {
+	/* 拿到该node的kmem_cache_node */
 	struct kmem_cache_node *n = get_node(cachep, node);
 
+	/* 如果array_cache里面有可用对象 */
 	if (ac->avail) {
 		spin_lock(&n->list_lock);
 		/*
 		 * Stuff objects into the remote nodes shared array first.
 		 * That way we could avoid the overhead of putting the objects
 		 * into the free lists and getting them back later.
+		 *
+		 * 首先将对象填充到远程节点共享数组中.这样我们就可以避免将对象放入空闲列表并稍后将其取回的开销.
 		 */
+
+		/* 如果有共享array_cache,就把它扔过去 */
 		if (n->shared)
 			transfer_objects(n->shared, ac, ac->limit);
-
+		/* 把多余的释放掉 */
 		free_block(cachep, ac->entry, ac->avail, node, list);
+		/* 设置ac->avail为0 */
 		ac->avail = 0;
 		spin_unlock(&n->list_lock);
 	}
@@ -858,22 +865,38 @@ static int __cache_free_alien(struct kmem_cache *cachep, void *objp,
 	struct array_cache *ac;
 	LIST_HEAD(list);
 
+	/* 拿到该节点的kmem_cache_node */
 	n = get_node(cachep, node);
+	/* (cachep)->node_frees++ */
 	STATS_INC_NODEFREES(cachep);
+	/* 如果n->alien不为空,且还有该node的alien_cache */
 	if (n->alien && n->alien[page_node]) {
+		/* 拿到该node的alien_cache */
 		alien = n->alien[page_node];
+		/* 拿到该alien_cache的array_cache */
 		ac = &alien->ac;
 		spin_lock(&alien->lock);
+		/* 如果avail等于limit */
 		if (unlikely(ac->avail == ac->limit)) {
 			STATS_INC_ACOVERFLOW(cachep);
+			/* 那么就想把这里面的对象放到shared arrya_cache里面去
+			 * 如果放不下去了就把它给释放掉
+			 */
 			__drain_alien_cache(cachep, ac, page_node, &list);
 		}
+		/* 然后把这个free的对象给到它 */
 		ac->entry[ac->avail++] = objp;
 		spin_unlock(&alien->lock);
+		/* 该destroy的就destroy */
 		slabs_destroy(cachep, &list);
 	} else {
+		/* 如果没有alien,那么就拿到本node的kmem_cache_node */
 		n = get_node(cachep, page_node);
 		spin_lock(&n->list_lock);
+		/* 调用free_block函数主动去释放1个空闲对象,如果slab没有了活跃对象(即page->active == 0),
+		 * 并且slab节点中所有空闲对象数目n->free_objects超过了n->free_limit阀值,
+		 * 那么调用slab_destroy函数来销毁这个slab.
+		 */
 		free_block(cachep, &objp, 1, page_node, &list);
 		spin_unlock(&n->list_lock);
 		slabs_destroy(cachep, &list);
@@ -1652,18 +1675,26 @@ static bool is_debug_pagealloc_cache(struct kmem_cache *cachep)
 static void store_stackinfo(struct kmem_cache *cachep, unsigned long *addr,
 			    unsigned long caller)
 {
+	/* 拿到对象的大小 */
 	int size = cachep->object_size;
 
+	/* 拿到对象的起始位置 */
 	addr = (unsigned long *)&((char *)addr)[obj_offset(cachep)];
 
+	/* 如果对象大小小于5个sizeof(unsigned long),那么返回 */
 	if (size < 5 * sizeof(unsigned long))
 		return;
 
+	/* 把第一个long填充为0x12345678 */
 	*addr++ = 0x12345678;
+	/* 把第二个填充为 caller */
 	*addr++ = caller;
+	/* 把第三个填充为 cpu id */
 	*addr++ = smp_processor_id();
+	/* 然后把size减去3 * sizeof(unsigned long),预留三个sizeof(unsigned long)位置 */
 	size -= 3 * sizeof(unsigned long);
 	{
+		/* 拿到caller的地址 */
 		unsigned long *sptr = &caller;
 		unsigned long svalue;
 
@@ -1687,6 +1718,7 @@ static void slab_kernel_map(struct kmem_cache *cachep, void *objp,
 	if (!is_debug_pagealloc_cache(cachep))
 		return;
 
+	/* 如果有caller */
 	if (caller)
 		store_stackinfo(cachep, objp, caller);
 
@@ -3356,20 +3388,24 @@ static inline void verify_redzone_free(struct kmem_cache *cache, void *obj)
 {
 	unsigned long long redzone1, redzone2;
 
+	/* 拿到该对象的redzone1和redzone2的值 */
 	redzone1 = *dbg_redzone1(cache, obj);
 	redzone2 = *dbg_redzone2(cache, obj);
 
 	/*
 	 * Redzone is ok.
 	 */
+	/* 如果都是RED_ACTIVE,那么才是正常的 */
 	if (redzone1 == RED_ACTIVE && redzone2 == RED_ACTIVE)
 		return;
 
+	/* 如果都是RED_INACTIVE说明是double free */
 	if (redzone1 == RED_INACTIVE && redzone2 == RED_INACTIVE)
 		slab_error(cache, "double free detected");
-	else
+	else	/* 如果是其他,那么就是被overwritten了 */
 		slab_error(cache, "memory outside object was overwritten");
 
+	/* 打印相关的信息 */
 	pr_err("%p: redzone 1:0x%llx, redzone 2:0x%llx\n",
 	       obj, redzone1, redzone2);
 }
@@ -3380,28 +3416,41 @@ static void *cache_free_debugcheck(struct kmem_cache *cachep, void *objp,
 	unsigned int objnr;
 	struct page *page;
 
+	/* 通过虚拟地址得到cachep,如果和我们传进来的不一样,那么就报个BUG */
 	BUG_ON(virt_to_cache(objp) != cachep);
 
+	/* 这里就得到对象的包括redzone的起始地址 */
 	objp -= obj_offset(cachep);
 	kfree_debugcheck(objp);
+	/* 通过起始地址得到page结构体 */
 	page = virt_to_head_page(objp);
 
+	/* 如果有redzone */
 	if (cachep->flags & SLAB_RED_ZONE) {
+		/* 去验证一下是否redzone是free的 */
 		verify_redzone_free(cachep, objp);
+		/* 将redzone设置为RED_INACTIVE */
 		*dbg_redzone1(cachep, objp) = RED_INACTIVE;
 		*dbg_redzone2(cachep, objp) = RED_INACTIVE;
 	}
 	if (cachep->flags & SLAB_STORE_USER) {
+		/* 将cachep->store_user_clean保持为0 */
 		set_store_user_dirty(cachep);
+		/* 将调用者的返回地址填充到user段里面去 */
 		*dbg_userword(cachep, objp) = (void *)caller;
 	}
 
+	/* 得到对象的index */
 	objnr = obj_to_index(cachep, page, objp);
 
+	/* 安全检查 */
 	BUG_ON(objnr >= cachep->num);
 	BUG_ON(objp != index_to_obj(cachep, page, objnr));
 
+
+	/* 如果cachep->flags & SLAB_POISON */
 	if (cachep->flags & SLAB_POISON) {
+		/* 那么把该对象填充为POISON_FREE,最后一个字节填充为POISON_END */
 		poison_obj(cachep, objp, POISON_FREE);
 		slab_kernel_map(cachep, objp, 0, caller);
 	}
@@ -3731,24 +3780,40 @@ static inline void cache_alloc_debugcheck_before(struct kmem_cache *cachep,
 static void *cache_alloc_debugcheck_after(struct kmem_cache *cachep,
 				gfp_t flags, void *objp, unsigned long caller)
 {
+	/* 如果对象为NULL,那么返回对象(即NULL) */
 	if (!objp)
 		return objp;
+	/* 如果cachep->flags带了SLAB_POISON */
 	if (cachep->flags & SLAB_POISON) {
+		/* 安全检查 */
 		check_poison_obj(cachep, objp);
 		slab_kernel_map(cachep, objp, 1, 0);
+		/* #define	POISON_INUSE	0x5a for use-uninitialised poisoning
+		 * 将该对象都填充为POISON_INUSE
+		 */
 		poison_obj(cachep, objp, POISON_INUSE);
 	}
+
+	/* 如果带了SLAB_STORE_USER,那么就把caller也填充进去 */
 	if (cachep->flags & SLAB_STORE_USER)
 		*dbg_userword(cachep, objp) = (void *)caller;
 
+	/* 如果有RED_ZONE */
 	if (cachep->flags & SLAB_RED_ZONE) {
+		/* 先检查redzone两边是不是都是RED_INACTIVE,如果不是那么可能是double free或者内存被overwritten了
+		 * 然后输出错误的日志
+		 */
 		if (*dbg_redzone1(cachep, objp) != RED_INACTIVE ||
 				*dbg_redzone2(cachep, objp) != RED_INACTIVE) {
 			slab_error(cachep, "double free, or memory outside object was overwritten");
 			pr_err("%p: redzone 1:0x%llx, redzone 2:0x%llx\n",
-			       objp, *dbg_redzone1(cachep, objp),
-			       *dbg_redzone2(cachep, objp));
+				objp, *dbg_redzone1(cachep, objp),
+				*dbg_redzone2(cachep, objp));
 		}
+
+		/* 然后把RED_ACTIVE填充到RED_ZONE中,
+		 * #define	RED_ACTIVE	0xD84156C5635688C0ULL  when obj is active
+		 */
 		*dbg_redzone1(cachep, objp) = RED_ACTIVE;
 		*dbg_redzone2(cachep, objp) = RED_ACTIVE;
 	}
@@ -4131,24 +4196,30 @@ static void cache_flusharray(struct kmem_cache *cachep, struct array_cache *ac)
 	int node = numa_mem_id();
 	LIST_HEAD(list);
 
+	/* 拿到batchcount */
 	batchcount = ac->batchcount;
 
 	check_irq_off();
+	/* 得到该node的kmem_cache_node */
 	n = get_node(cachep, node);
 	spin_lock(&n->list_lock);
+	/* 首先判断是否有共享对象缓冲池,如果有,那么就会把本地对象缓冲池中的空闲对象复制到共享对象缓冲池,这里复制batchcount个空闲对象. */
 	if (n->shared) {
 		struct array_cache *shared_array = n->shared;
+		/* 这里算一下,看一下shared_array可以收多少个对象 */
 		int max = shared_array->limit - shared_array->avail;
+		/* 如果还有的话,就把它复制到共享对象缓冲池中去 */
 		if (max) {
 			if (batchcount > max)
 				batchcount = max;
 			memcpy(&(shared_array->entry[shared_array->avail]),
 			       ac->entry, sizeof(void *) * batchcount);
+			/* shared_array->avail + 上batchcount */
 			shared_array->avail += batchcount;
 			goto free_done;
 		}
 	}
-
+	/* 主动释放batchcount个空闲对象 */
 	free_block(cachep, ac->entry, batchcount, node, &list);
 free_done:
 #if STATS
@@ -4156,17 +4227,30 @@ free_done:
 		int i = 0;
 		struct page *page;
 
+		/* 这里算出有多少个slabs_free page */
 		list_for_each_entry(page, &n->slabs_free, lru) {
 			BUG_ON(page->active);
 
 			i++;
 		}
+		/*
+		 *
+		 * #define	STATS_SET_FREEABLE(x, i)	\
+		 * do {						\
+		 *	if ((x)->max_freeable < i)			\
+		 *	(x)->max_freeable = i;			\
+		 * } while (0)
+		 */
 		STATS_SET_FREEABLE(cachep, i);
 	}
 #endif
+	/* 解锁 */
 	spin_unlock(&n->list_lock);
+	/* 销毁slab */
 	slabs_destroy(cachep, &list);
+	/* 然后减去batchcount */
 	ac->avail -= batchcount;
+	/* 把本地对象缓存池剩余的空闲对象迁移到buffer的头部 */
 	memmove(ac->entry, &(ac->entry[batchcount]), sizeof(void *)*ac->avail);
 }
 
@@ -4187,10 +4271,12 @@ static inline void __cache_free(struct kmem_cache *cachep, void *objp,
 void ___cache_free(struct kmem_cache *cachep, void *objp,
 		unsigned long caller)
 {
+	/* 得到本地CPU的arrya_cache结构体指针 */
 	struct array_cache *ac = cpu_cache_get(cachep);
 
 	check_irq_off();
 	kmemleak_free_recursive(objp, cachep->flags);
+	/* 先把对象给填充为free的状态 */
 	objp = cache_free_debugcheck(cachep, objp, caller);
 
 	kmemcheck_slab_free(cachep, objp, cachep->object_size);
@@ -4201,13 +4287,23 @@ void ___cache_free(struct kmem_cache *cachep, void *objp,
 	 * is per page memory  reference) to get nodeid. Instead use a global
 	 * variable to skip the call, which is mostly likely to be present in
 	 * the cache.
+	 *
+	 * 当平台不是numa时,跳过调用cache_free_alien().
+	 * 这将避免在访问slabp(每页内存引用)以获取nodeid时发生cache miss.
+	 * 使用全局变量去替代可跳过调用,全局变量很可能存在于缓存中.
+	 */
+
+	/* 如果nr_online_nodes大于1就调用cache_free_alien处理
+	 * 主要是考虑到NUMA的情况,这里面有个shared
 	 */
 	if (nr_online_nodes > 1 && cache_free_alien(cachep, objp))
 		return;
-
+	/* 如果ac->avail < ac->limit */
 	if (ac->avail < ac->limit) {
+		/* (cachep)->freehit ++ */
 		STATS_INC_FREEHIT(cachep);
 	} else {
+		/* (cachep)->freemiss ++ */
 		STATS_INC_FREEMISS(cachep);
 		cache_flusharray(cachep, ac);
 	}
@@ -4221,6 +4317,7 @@ void ___cache_free(struct kmem_cache *cachep, void *objp,
 		}
 	}
 
+	/* 让本地可用对象指向刚刚释放的这个对象 */
 	ac->entry[ac->avail++] = objp;
 }
 
@@ -4431,18 +4528,26 @@ EXPORT_SYMBOL(__kmalloc_track_caller);
  *
  * Free an object which was previously allocated from this
  * cache.
+ *
+ * kmem_cache_free - 释放一个对象
+ * @cachep: 分配的时候的cache
+ * @objp: 之前分配的对象
+ *
+ * 释放之前从此缓存分配的对象.
  */
 void kmem_cache_free(struct kmem_cache *cachep, void *objp)
 {
 	unsigned long flags;
+	/* 通过要释放对象obj的虚拟地址找到对应的struct kmem_cache数据结构 */
 	cachep = cache_from_obj(cachep, objp);
 	if (!cachep)
 		return;
-
+	/* local_irq_save 函数用于禁止中断,并且将中断状态保存在 flags 中.local_irq_restore 用于恢复中断,将中断到 flags 状态 */
 	local_irq_save(flags);
 	debug_check_no_locks_freed(objp, cachep->object_size);
 	if (!(cachep->flags & SLAB_DEBUG_OBJECTS))
 		debug_check_no_obj_freed(objp, cachep->object_size);
+	/* 释放该对象 */
 	__cache_free(cachep, objp, _RET_IP_);
 	local_irq_restore(flags);
 
