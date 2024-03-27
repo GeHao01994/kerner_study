@@ -54,6 +54,7 @@ struct page {
 						 * it points to anon_vma object:
 						 * see PAGE_MAPPING_ANON below.
 						 */
+		/* 指向slab的第一个对象,也就是指向对象的起始地址 */
 		void *s_mem;			/* slab first object */
 		atomic_t compound_mapcount;	/* first tail page */
 		/* page_deferred_list().next	 -- second tail page */

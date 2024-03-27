@@ -238,6 +238,25 @@ EXPORT_SYMBOL(hex_dump_to_buffer);
  * 0009ab42: 40 41 42 43 44 45 46 47 48 49 4a 4b 4c 4d 4e 4f  @ABCDEFGHIJKLMNO
  * Example output using %DUMP_PREFIX_ADDRESS and 4-byte mode:
  * ffffffff88089af0: 73727170 77767574 7b7a7978 7f7e7d7c  pqrstuvwxyz{|}~.
+ *
+ *
+ * print_hex_dump - 将二进制数据块的文本十六进制转储打印到syslog
+ * @level: 内核日志级别(例如KERN_DEBUG)
+ * @prefix_str: 在每行前面加上前缀的字符串;
+ *	如果需要，调用者提供尾部空间用于对齐
+ * @prefix_type: 控制prefix的偏移,地址,或者none
+ *	is printed (%DUMP_PREFIX_OFFSET, %DUMP_PREFIX_ADDRESS, %DUMP_PREFIX_NONE)
+ * @rowsize：每行打印的字节数；必须是16或32
+ * @groupsize：一次打印的字节数(1,2,4,8；默认值=1)
+ * @buf:要dump的数据块
+ * @len: @buf中字节数
+ * @asscii: 在十六进制输出后包含ascii
+ *
+ * 给定u8数据的缓冲区,print_hex_dump()将十六进制+ASCII转储打印到指定内核日志级别的内核日志,并带有可选的前导前缀
+ *
+ * print_hex_dump()一次处理一行输出,16或者32字节输入的数据转换成hex + ASCII输出
+ * print_hex_dump()对整个输入@buf进行迭代,将其分解为“行大小”的块以进行格式化和打印
+ *
  */
 void print_hex_dump(const char *level, const char *prefix_str, int prefix_type,
 		    int rowsize, int groupsize,

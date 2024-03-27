@@ -355,7 +355,9 @@ static unsigned long long *dbg_redzone2(struct kmem_cache *cachep, void *objp)
 
 static void **dbg_userword(struct kmem_cache *cachep, void *objp)
 {
+	/* 如果cachep->flags没有带SLAB_STORE_USER,那么报个BUG */
 	BUG_ON(!(cachep->flags & SLAB_STORE_USER));
+	/* 否则,返回userword的最后一个BYTES_PER_WORD的地址 */
 	return (void **)(objp + cachep->size - BYTES_PER_WORD);
 }
 
@@ -1699,11 +1701,14 @@ static inline void slab_kernel_map(struct kmem_cache *cachep, void *objp,
 
 static void poison_obj(struct kmem_cache *cachep, void *addr, unsigned char val)
 {
-
+	/* 先拿到对象的大小 */
 	int size = cachep->object_size;
+	/* 拿到对象的起始地址 */
 	addr = &((char *)addr)[obj_offset(cachep)];
 
+	/* 然后填充val */
 	memset(addr, val, size);
+	/* 最后一个字节填充POISON_END即0xa5 */
 	*(unsigned char *)(addr + size - 1) = POISON_END;
 }
 
@@ -1713,18 +1718,25 @@ static void dump_line(char *data, int offset, int limit)
 	unsigned char error = 0;
 	int bad_count = 0;
 
+	/* 输出slab的行数的起始偏移量 */
 	pr_err("%03x: ", offset);
+	/* 算出哪一个字节坏了,然后计数到bad_count中 */
 	for (i = 0; i < limit; i++) {
 		if (data[offset + i] != POISON_FREE) {
 			error = data[offset + i];
 			bad_count++;
 		}
 	}
+	/* 打印出这一行 */
 	print_hex_dump(KERN_CONT, "", 0, 16, 1,
 			&data[offset], limit, 1);
 
+
+	/* 如果bad_count == 1 */
 	if (bad_count == 1) {
+		/* 如果error等于和POISON_FREE的异或的值 */
 		error ^= POISON_FREE;
+		/* 如果error & (error -1)等于0,那么就报如下错误 */
 		if (!(error & (error - 1))) {
 			pr_err("Single bit error detected. Probably bad RAM.\n");
 #ifdef CONFIG_X86
@@ -1744,18 +1756,22 @@ static void print_objinfo(struct kmem_cache *cachep, void *objp, int lines)
 	int i, size;
 	char *realobj;
 
+	/* 这里就是输出你的redzone的值 */
 	if (cachep->flags & SLAB_RED_ZONE) {
 		pr_err("Redzone: 0x%llx/0x%llx\n",
 		       *dbg_redzone1(cachep, objp),
 		       *dbg_redzone2(cachep, objp));
 	}
 
+	/* 输出你的user的值 */
 	if (cachep->flags & SLAB_STORE_USER) {
 		pr_err("Last user: [<%p>](%pSR)\n",
 		       *dbg_userword(cachep, objp),
 		       *dbg_userword(cachep, objp));
 	}
+	/* 拿到你真实的对象 */
 	realobj = (char *)objp + obj_offset(cachep);
+	/* 拿到你对象的大小 */
 	size = cachep->object_size;
 	for (i = 0; i < size && lines; i += 16, lines--) {
 		int limit;
@@ -1775,50 +1791,78 @@ static void check_poison_obj(struct kmem_cache *cachep, void *objp)
 	if (is_debug_pagealloc_cache(cachep))
 		return;
 
+	/* 找到对象真正的地址 */
 	realobj = (char *)objp + obj_offset(cachep);
+	/* 找到对象的大小 */
 	size = cachep->object_size;
 
 	for (i = 0; i < size; i++) {
 		char exp = POISON_FREE;
+		/* 对象的最后一个字节是POISON_END */
 		if (i == size - 1)
 			exp = POISON_END;
+		/* 判断他有没有被踩 */
 		if (realobj[i] != exp) {
 			int limit;
+
+			/* 下面是一个输出的例子
+			 *
+			 * Slab corruption (Not tainted): kmalloc-2k start=ffff9504c58ab800, len=2048
+			 * 420: 6b 6b 6b 6b 64 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b  kkkkdkkkkkkkkkkk
+			 * Prev obj: start=ffff9504c58ab000, len=2048
+			 * 000: 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b  kkkkkkkkkkkkkkkk
+			 * 010: 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b  kkkkkkkkkkkkkkkk
+			 */
 			/* Mismatch ! */
 			/* Print header */
+			/* 这里说的第一行,输出头 */
 			if (lines == 0) {
 				pr_err("Slab corruption (%s): %s start=%p, len=%d\n",
 				       print_tainted(), cachep->name,
 				       realobj, size);
 				print_objinfo(cachep, objp, 0);
 			}
-			/* Hexdump the affected line */
+			/* Hexdump the affected line
+			 * Hexdump 被污染的行
+			 */
+			/* 这里实际上是获取它的行数,你看前面的输出就知道了,一行16个字节 */
 			i = (i / 16) * 16;
 			limit = 16;
+			/* 如果 i + limit 大于对象的大小,那就说明它最后不足一行,那么limit就设置为你最后一行的大小 */
 			if (i + limit > size)
 				limit = size - i;
 			dump_line(realobj, i, limit);
 			i += 16;
 			lines++;
 			/* Limit to 5 lines */
+			/* 最多输出5行 */
 			if (lines > 5)
 				break;
 		}
 	}
+
+	/* 如果lines != 0 说明有些数据烂了 */
 	if (lines != 0) {
 		/* Print some data about the neighboring objects, if they
 		 * exist:
+		 *
+		 * 打印有关相邻对象的一些数据(如果存在):
 		 */
+
+		/* 拿到这个page */
 		struct page *page = virt_to_head_page(objp);
 		unsigned int objnr;
 
+		/* 算出这个对象的index */
 		objnr = obj_to_index(cachep, page, objp);
+		/* 如果为0,那就没有Prev obj,否则就打印前置对象的2行 */
 		if (objnr) {
 			objp = index_to_obj(cachep, page, objnr - 1);
 			realobj = (char *)objp + obj_offset(cachep);
 			pr_err("Prev obj: start=%p, len=%d\n", realobj, size);
 			print_objinfo(cachep, objp, 2);
 		}
+		/* 如果有 打印出后置对象 */
 		if (objnr + 1 < cachep->num) {
 			objp = index_to_obj(cachep, page, objnr + 1);
 			realobj = (char *)objp + obj_offset(cachep);
@@ -1835,20 +1879,28 @@ static void slab_destroy_debugcheck(struct kmem_cache *cachep,
 {
 	int i;
 	/* #define	OBJFREELIST_SLAB(x)	((x)->flags & CFLGS_OBJFREELIST_SLAB)
-	 * 如果是on-slab的场景,freelist_cache是空,page->freelist指向slab的尾部
-	 * 所以page->freelist - obj_offset(cachep)这就得到了对象的起始位置
+	 * 对于OBJFREELIST_SLAB的SLAB,freelist是用了最后一个对象来存储的
 	 *
+	 * 如果freelist不是随机化的,并且是OBJFREELIST_SLAB
+	 *	if (!shuffled && OBJFREELIST_SLAB(cachep)) {
+	 *		page->freelist就是最后一个对象的起始地址,obj_offset是说的对象的偏移,因为对象前后还有redzone这些
+	 *			page->freelist = index_to_obj(cachep, page, cachep->num - 1) + obj_offset(cachep);
+	 * }
+	 *
+	 * 所以page->freelist - obj_offset(cachep),即把最后一个对象的内容填充为POISON_FREE
 	 * #define POISON_FREE	0x6b	for use-after-free poisoning
-	 * 把对象都设置为0x6b
 	 */
 	if (OBJFREELIST_SLAB(cachep) && cachep->flags & SLAB_POISON) {
 		poison_obj(cachep, page->freelist - obj_offset(cachep),
 			POISON_FREE);
 	}
 
+	/* 然后对这个cachep里面所有的对象进行检查 */
 	for (i = 0; i < cachep->num; i++) {
+		/* 找到该对象的地址 */
 		void *objp = index_to_obj(cachep, page, i);
 
+		/* 如果有SLAB_POISON,那么就开始检查 */
 		if (cachep->flags & SLAB_POISON) {
 			check_poison_obj(cachep, objp);
 			slab_kernel_map(cachep, objp, 1, 0);
@@ -2858,14 +2910,40 @@ static void cache_init_objs_debug(struct kmem_cache *cachep, struct page *page)
 #if DEBUG
 	int i;
 
+	/* 通过下面这个代码的分析,我们能够得到的obj的布局如下
+	 *
+	 *
+	 *  _____________________________________________________________________
+	 * |    red zone |      object size    |    red zone  |  track  | track  |
+	 * |_____________|_____________________|______________|_________|________|
+	 *
+	 */
+	/* 对该page的每个对象进行做debug的初始化 */
 	for (i = 0; i < cachep->num; i++) {
-		void *objp = index_to_obj(cachep, page, i);
 
+		/* page->s_mem + cache->size * idx; */
+		/* 也就是说拿到这块对象的内存 */
+		void *objp = index_to_obj(cachep, page, i);
+		/* 如果cachep->flags带了SLAB_STORE_USER
+		 * 那么把这块内存的最后一个 BYTES_PER_WORD设置为NULL
+		 *
+		 * (void **)(objp + cachep->size - BYTES_PER_WORD);
+		 */
 		if (cachep->flags & SLAB_STORE_USER)
 			*dbg_userword(cachep, objp) = NULL;
 
+		/* 如果带了SLAB_RED_ZONE */
 		if (cachep->flags & SLAB_RED_ZONE) {
+			/* objp + obj_offset(cachep) - sizeof(unsigned long long)
+			 * 也就是把对象前面的那个unsigned long long那一块赋值为0x09F911029D74E35BULL
+			 */
 			*dbg_redzone1(cachep, objp) = RED_INACTIVE;
+			/* 所以说redzone是放到首位两边的
+			 * if (cachep->flags & SLAB_STORE_USER)
+			 *	return (unsigned long long *)(objp + cachep->size - sizeof(unsigned long long) - REDZONE_ALIGN);
+			 *
+			 *	return (unsigned long long *) (objp + cachep->size - sizeof(unsigned long long));
+			 */
 			*dbg_redzone2(cachep, objp) = RED_INACTIVE;
 		}
 		/*
@@ -2880,15 +2958,18 @@ static void cache_init_objs_debug(struct kmem_cache *cachep, struct page *page)
 			kasan_poison_object_data(
 				cachep, objp + obj_offset(cachep));
 		}
-
+		/* 如果cachep->flags & SLAB_RED_ZONE,那么去检查REDZONE有没有被人修改,也就是有没有被object越界 */
 		if (cachep->flags & SLAB_RED_ZONE) {
 			if (*dbg_redzone2(cachep, objp) != RED_INACTIVE)
 				slab_error(cachep, "constructor overwrote the end of an object");
 			if (*dbg_redzone1(cachep, objp) != RED_INACTIVE)
 				slab_error(cachep, "constructor overwrote the start of an object");
 		}
-		/* need to poison the objs? */
+		/* need to poison the objs?
+		 * 需要去填充对象
+		 */
 		if (cachep->flags & SLAB_POISON) {
+			/* 这里就是给对象全部填充为POISON_FREE(0x6b),但是最后一个字节将会是0xa5 */
 			poison_obj(cachep, objp, POISON_FREE);
 			slab_kernel_map(cachep, objp, 0, 0);
 		}
@@ -3014,6 +3095,7 @@ static void cache_init_objs(struct kmem_cache *cachep,
 	void *objp;
 	bool shuffled;
 
+	/* 这里主要是初始化obj的一些东西,譬如redzone、posion等 */
 	cache_init_objs_debug(cachep, page);
 
 	/* Try to randomize the freelist if enabled */
@@ -3227,20 +3309,27 @@ static void cache_grow_end(struct kmem_cache *cachep, struct page *page)
 
 	check_irq_off();
 
+	/* 如果page为NULL,那么直接返回了 */
 	if (!page)
 		return;
 
+	/* 初始化page的lru成员 */
 	INIT_LIST_HEAD(&page->lru);
+	/* 拿到该node的kmem_cache_node */
 	n = get_node(cachep, page_to_nid(page));
 
 	spin_lock(&n->list_lock);
+	/* 如果page里面没有活跃的slab 对象,那么把它添加到尾部 */
 	if (!page->active)
 		list_add_tail(&page->lru, &(n->slabs_free));
 	else
 		fixup_slab_list(cachep, n, page, &list);
 
+	/* 该kmem_cache_node的num_slabs++ */
 	n->num_slabs++;
+	/* cachep->grown++ 表示cachep增长的次数 */
 	STATS_INC_GROWN(cachep);
+	/* 让该node的kmem_cache_node的free_objects技术增加对应的数值 */
 	n->free_objects += cachep->num - page->active;
 	spin_unlock(&n->list_lock);
 
@@ -3601,22 +3690,34 @@ direct_grow:
 				return obj;
 		}
 
+		/* 这里主要是去分配页面,顺便填充一下对象 */
 		page = cache_grow_begin(cachep, gfp_exact_node(flags), node);
 
 		/*
 		 * cache_grow_begin() can reenable interrupts,
 		 * then ac could change.
+		 *
+		 * cache_grow_begin可以再使能中断,然后ac可以更改
 		 */
+
+		/* 拿到本CPU的array_cache */
 		ac = cpu_cache_get(cachep);
+		/* 如果ac的可用对象里面没有空闲但是有page
+		 * 那么去该page里面去分
+		 */
 		if (!ac->avail && page)
 			alloc_block(cachep, ac, page, batchcount);
+		/* 主要是看把这个页面分到那个链表里面去,slabs_free、slabs_partial、slabs_full */
 		cache_grow_end(cachep, page);
 
+		/* 如果ac->avail还为空,那么返回NULL */
 		if (!ac->avail)
 			return NULL;
 	}
+	/* 因为在分配对象,所以设置为1 */
 	ac->touched = 1;
 
+	/* 把最新的那个对象返回出去 */
 	return ac->entry[--ac->avail];
 }
 
