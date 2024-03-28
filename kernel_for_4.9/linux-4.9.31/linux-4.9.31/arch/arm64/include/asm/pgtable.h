@@ -23,6 +23,41 @@
 #include <asm/pgtable-hwdef.h>
 #include <asm/pgtable-prot.h>
 
+/* ARM64 内存布局
+ *
+ *  _________ ←--- 0xffff_ffff_ffff_ffff
+ * |  线性   |
+ * |  地址   |
+ * |（128TB）|
+ * |—————————|←--- 0xffff_8000_0000_0000
+ * | vmemmap |
+ * |  (2TB)  |
+ * |—————————|←--- 0xffff_8000_0000_0000 - VMEMPA_SIZE
+ * | 2MB空隙 |
+ * |—————————|←--- 0xffff_80000_0000_0000 - VMEMPA_SIZE - 2MB
+ * |PCI I/O区|
+ * |（16MB） |
+ * |—————————|←--- 0xffff_8000_0000_0000 - VMEMPA_SIZE - 18MB
+ * | 2MB空隙 |
+ * |—————————|←--- 0xffff_8000_0000_0000 - VMEMPA_SIZE - 20MB
+ * | 固定映射|
+ * | (4124KB)|
+ * |—————————|←--- 0xffff_8000_0000_0000 - VMEMPA_SIZE - 20MB - 4124KB
+ * |   空隙  |
+ * |—————————|←--- 0xffff_8000_0000_0000 - VMEMPA_SIZE - PUD_SIZE - SZ_64KB
+ * | vmalloc |
+ * |   区域  |
+ * |—————————|←--- MODULE_START_ADDR + 128MB
+ * | modules |
+ * |   区域  |
+ * | (128MB) |
+ * |—————————|←--- 0xffff_0000_0000_0000 + KASAN_SIZE
+ * |  kasan  |
+ * | shadow区|
+ * |_________|←--- 0xffff_0000_0000_0000
+ *
+ */
+
 /*
  * VMALLOC range.
  *

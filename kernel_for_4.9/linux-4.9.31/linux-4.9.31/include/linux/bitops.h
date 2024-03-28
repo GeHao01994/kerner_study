@@ -196,14 +196,19 @@ static inline int get_count_order(unsigned int count)
  * @l: parameter
  *
  * it is same as get_count_order() but with long type parameter
+ *
+ * get_count_order_long-将@l取整为2的幂后获得order
+ * @l: 参数
+ *
+ * 它与get_count_order()相同,但具有长类型参数
  */
 static inline int get_count_order_long(unsigned long l)
 {
 	if (l == 0UL)
 		return -1;
-	else if (l & (l - 1UL))
+	else if (l & (l - 1UL))/* 如果取整之后不为0,那么取fls_long,其实这里面已经向上取整了,你想想,0x1=1,也就是说这里对于order来说他多占了一位 */
 		return (int)fls_long(l);
-	else
+	else		/* 如果正好是整数,那么就-1 */
 		return (int)fls_long(l) - 1;
 }
 
