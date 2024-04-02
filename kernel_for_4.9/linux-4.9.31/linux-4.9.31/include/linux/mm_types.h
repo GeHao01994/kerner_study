@@ -444,7 +444,15 @@ struct mm_rss_stat {
 
 struct kioctx_table;
 struct mm_struct {
+	/* 每个VMA都要连接到mm_struct中的链表和红黑树中,以方便查找
+	 * VMA按照起始地址以递增的方式插入mm_struct->mmap链表中.
+	 * 当进程拥有大量的VMA时,扫描链表和查找特定的VMA是非常低效的操作,例如在云计算的机器中,
+	 * 所以内核中通常要靠红黑树来协助,以便提高查找速度
+	 */
+
+	/* mmap形成一个单链表,进程中所有的VMA都链接到这个链表中,链表头是mm_struct->mmap */
 	struct vm_area_struct *mmap;		/* list of VMAs */
+	/* mm_rb是红黑树的根节点,每个进程有一颗VMA的红黑树 */
 	struct rb_root mm_rb;
 	u32 vmacache_seqnum;                   /* per-thread vmacache */
 #ifdef CONFIG_MMU

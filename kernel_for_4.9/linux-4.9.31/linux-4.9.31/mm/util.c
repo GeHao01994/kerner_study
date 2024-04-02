@@ -469,13 +469,15 @@ unsigned long vm_commit_limit(void)
 {
 	unsigned long allowed;
 
-	if (sysctl_overcommit_kbytes)
+	/* /proc/sys/vm/overcommit_kbytes */
+	if (sysctl_overcommit_kbytes)	/* 这个操作实际上是将kB转换成以page为单位 */
 		allowed = sysctl_overcommit_kbytes >> (PAGE_SHIFT - 10);
-	else
+	else /* 否则使用overcommit_ratio */
 		allowed = ((totalram_pages - hugetlb_total_pages())
 			   * sysctl_overcommit_ratio / 100);
 	allowed += total_swap_pages;
 
+	/* 返回判断overcommit的阈值,是以page为单位的 */
 	return allowed;
 }
 
@@ -514,6 +516,16 @@ EXPORT_SYMBOL_GPL(vm_memory_committed);
  *
  * Note this is a helper function intended to be used by LSMs which
  * wish to use this logic.
+ *
+ * 检查进程是否有足够的内存来分配新的虚拟映射. 0表示有足够的内存用于成功分配,而-ENOMM表示没有.
+ *
+ * 我们目前支持三种overcommit策略，它们是通过vm.overcommit_memory sysctl设置的.See Documentation/vm/overcommit-accounting
+ *
+ * Alan Cox于2002年2月26日增加了overcommit模式。
+ * Robert Love于2002年7月20日添加了附加代码
+ *
+ * 如果进程具有管理员权限,则cap_sys_admin为1,否则为0.
+ * 请注意,这是一个帮助函数,旨在由希望使用此逻辑的LSM使用。
  */
 int __vm_enough_memory(struct mm_struct *mm, long pages, int cap_sys_admin)
 {
@@ -523,16 +535,32 @@ int __vm_enough_memory(struct mm_struct *mm, long pages, int cap_sys_admin)
 			-(s64)vm_committed_as_batch * num_online_cpus(),
 			"memory commitment underflow");
 
+	/*  static inline void vm_acct_memory(long pages)
+	 * {
+	 *	__percpu_counter_add(&vm_committed_as, pages, vm_committed_as_batch);
+	 * }
+	 * 将这次要分配的pages数量传入到vm_committed_as中
+	 */
 	vm_acct_memory(pages);
 
 	/*
 	 * Sometimes we want to use more memory than we have
 	 */
+	/* 由于内核不限制overcommit,直接返回0,
+	 * sysctl_overcommit_memory受内核参数/proc/sys/vm/overcommit_memory控制
+	 */
 	if (sysctl_overcommit_memory == OVERCOMMIT_ALWAYS)
 		return 0;
 
+	/* 若为OVERCOMMIT_GUESS,内核会进行判断内存分配是否合理 */
 	if (sysctl_overcommit_memory == OVERCOMMIT_GUESS) {
+		/* 1.首先会计算当前系统的可用内存
+		 * (1)计算有多少空闲page
+		 */
 		free = global_page_state(NR_FREE_PAGES);
+		/* 计算有多少page cache使用的page frame,主要是用户空间进程读写文件造成的
+		 * 这些cache都是为了加快系统性能而增加的,提高CPU读写命中率,因此,如果直接操作到磁盘,本质上这些page cache都是free的
+		 */
 		free += global_node_page_state(NR_FILE_PAGES);
 
 		/*
@@ -540,9 +568,19 @@ int __vm_enough_memory(struct mm_struct *mm, long pages, int cap_sys_admin)
 		 * case, they can't be purged, only swapped out, and
 		 * that won't affect the overall amount of available
 		 * memory in the system.
+		 *
+		 * 在这种情况下,shmem页面不应被视为空闲,它们不能被清除,只能交换出去,这不会影响系统中可用内存的总量.
+		 */
+
+		/* (3)用于进程间的share memory机制的这些shmem page frame不能认为是free的，需要减去
+		 * 而且它们不能被清除(free),只能换出(swap out)
 		 */
 		free -= global_node_page_state(NR_SHMEM);
 
+		/* (4)加上swap file或者swap device上空闲的“page frame”数目.
+		 * 本质上,swap file或者swap device上的磁盘空间都是给anonymous page做腾挪之用,其实这里的“page frame”不是真的page frame.称之swap page好了
+		 * 这里把free swap page的数目也计入free主要是因为可以把使用中的page frame swap out到free swap page上,因此也算是free page
+		 */
 		free += get_nr_swap_pages();
 
 		/*
@@ -550,11 +588,20 @@ int __vm_enough_memory(struct mm_struct *mm, long pages, int cap_sys_admin)
 		 * SLAB_RECLAIM_ACCOUNT flag claim to have contents
 		 * which are reclaimable, under pressure.  The dentry
 		 * cache and most inode caches should fall into this
+		 *
+		 * 使用SLAB_RECLAIM_ACCOUNT标志创建的任何slab都声称其内容可在压力下回收.
+		 * dentry缓存和大多数inode缓存应该属于这种
 		 */
+
+		/* (5)加上被标记为可回收的slab对应的页面 */
 		free += global_page_state(NR_SLAB_RECLAIMABLE);
 
 		/*
 		 * Leave reserved pages. The pages are not for anonymous pages.
+		 */
+
+		/* totalreserve_pages，这是一个能让系统运行需要预留的page frame的数目，
+		 * (7)因此我们要从减去totalreserve_pages.如果当前free page数目小于totalreserve_pages,则拒绝本次对内核空间里面的虚拟内存的申请.
 		 */
 		if (free <= totalreserve_pages)
 			goto error;
@@ -564,30 +611,49 @@ int __vm_enough_memory(struct mm_struct *mm, long pages, int cap_sys_admin)
 		/*
 		 * Reserve some for root
 		 */
+		/* (8)如果是普通的进程,还需要保留admin_reserve_kbytes(/proc/sys/vm/admin_reserve_kbytes)的free page,
+		 *    以便在出问题时可以让root用户可以登录并进行恢复操作
+		 */
 		if (!cap_sys_admin)
 			free -= sysctl_admin_reserve_kbytes >> (PAGE_SHIFT - 10);
 
+		/* 最关键的判断来了
+		 * 比对当前系统的可用内存(free)和本次请求分配virtual memory的page数目(pages),
+		 * 如果在前面减去了所必须的page frame之后,还有足够的page可以满足本次分配,那么就批准本次对内核空间里面的虚拟内存的分配.
+		 */
 		if (free > pages)
 			return 0;
 
 		goto error;
 	}
 
+	/* 2.下面为OVERCOMMIT_NEVER的情况，是禁止出现overcommit
+	 * (1)这里调用vm_commit_limit得到判断是否出现overcommit的阈值allowed,以page为单位
+	 */
 	allowed = vm_commit_limit();
 	/*
 	 * Reserve some for root
 	 */
+	/* (2)同前面一样，需要减去预留给root用户的内存 */
 	if (!cap_sys_admin)
 		allowed -= sysctl_admin_reserve_kbytes >> (PAGE_SHIFT - 10);
 
 	/*
 	 * Don't let a single process grow so big a user can't recover
 	 */
+	/* (3)如果是用户空间的进程,要为用户能够从绝境中恢复而保留一些page frame,具体保留多少需要考量两个因素,
+	 * 一个是单一进程的total virtual memory,
+	 * 一个是用户设定的运行时参数user_reserve_kbytes
+	 * 更具体的考量因素可以参考https://lkml.org/lkml/2013/3/18/812
+	 */
 	if (mm) {
 		reserve = sysctl_user_reserve_kbytes >> (PAGE_SHIFT - 10);
 		allowed -= min_t(long, mm->total_vm / 32, reserve);
 	}
 
+	/* allowed变量保存了判断overcommit的上限(CommitLimit),vm_committed_as(Committed_AS)保存了当前系统中已经申请(包括本次)
+	 * 的virtual memory的数目.如果大于这个上限就判断overcommit,本次申请虚拟内存失败.
+	 */
 	if (percpu_counter_read_positive(&vm_committed_as) < allowed)
 		return 0;
 error:

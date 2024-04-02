@@ -476,9 +476,15 @@ static int find_vma_links(struct mm_struct *mm, unsigned long addr,
 {
 	struct rb_node **__rb_link, *__rb_parent, *rb_prev;
 
+	/* 指向红黑树的根节点 */
 	__rb_link = &mm->mm_rb.rb_node;
 	rb_prev = __rb_parent = NULL;
 
+	/* 遍历这个红黑树来寻找合适的插入位置,如果addr小于某个节点VMA的结束地址,那么继续遍历当前VMA的左子树.
+	 * 如果要插入的vma恰好和现有的VMA有一小部分的重叠,那么返回错误码-ENOMEM,
+	 * 如果addr大于节点VMA的结束地址,那么继续遍历这个节点的右子树.
+	 * while循环一直遍历下去,直到某个节点没有子节点为止
+	 */
 	while (*__rb_link) {
 		struct vm_area_struct *vma_tmp;
 
@@ -496,10 +502,13 @@ static int find_vma_links(struct mm_struct *mm, unsigned long addr,
 		}
 	}
 
+	/* rb_prev指向待插入节点的前继节点,这里获取前继节点的结构体 */
 	*pprev = NULL;
 	if (rb_prev)
 		*pprev = rb_entry(rb_prev, struct vm_area_struct, vm_rb);
+	/* *rb_link指向____rb_parent->rb_right或____rb_parent->rb_left指针本身的地址 */
 	*rb_link = __rb_link;
+	/* __rb_parent指向找到的待插入节点的父节点 */
 	*rb_parent = __rb_parent;
 	return 0;
 }
@@ -966,12 +975,23 @@ static inline int is_mergeable_vma(struct vm_area_struct *vma,
 	 * the kernel to generate new VMAs when old one could be
 	 * extended instead.
 	 */
+	/* prev和area的vm_flags是否相同,这里需要排除VM_SOFTDIRTY
+	 * VM_SOFTDIRTY用于追踪进程写了哪些内存页,如果 prev 被标记了soft dirty,
+	 * 那么合并之后的 vma 也应该继续保留 soft dirty 标记
+	 */
 	if ((vma->vm_flags ^ vm_flags) & ~VM_SOFTDIRTY)
 		return 0;
+	/* prev 和 area 如果是文件映射区的话，这里需要检查两者映射的文件是否相同 */
 	if (vma->vm_file != file)
 		return 0;
+	/* 如果 prev 虚拟内存区域中包含了close的操作,后续可能会释放 prev 的资源
+	 * 所以这种情况下不能和 prev 进行合并,否则就会导致 prev 的资源无法释放
+	 */
 	if (vma->vm_ops && vma->vm_ops->close)
 		return 0;
+	/* userfaultfd 是用来在用户态实现缺页处理的机制,这里需要保证两者的 userfaultfd 相同
+	 * 不过在 mmap_region 中传入的 vm_userfaultfd_ctx 为 null，这里我们不需要关注
+	 */
 	if (!is_mergeable_vm_userfaultfd_ctx(vma, vm_userfaultfd_ctx))
 		return 0;
 	return 1;
@@ -1001,6 +1021,12 @@ static inline int is_mergeable_anon_vma(struct anon_vma *anon_vma1,
  * We don't check here for the merged mmap wrapping around the end of pagecache
  * indices (16TB on ia32) because do_mmap_pgoff() does not permit mmap's which
  * wrap, nor mmaps which cover the final page at index -1UL.
+ *
+ * 如果我们可以将此(vm_flags、anon_vma、file、vm_pgoff)合并到vma前面(较低的虚拟地址和文件偏移量)则返回true.
+ *
+ * 如果两个vma具有不同的分配(非NULL)的anon_vm,或者分配了相同的anon_vma但偏移量不兼容,我们就不能合并它们。
+ *
+ * 我们在这里不检查覆盖pagecache结尾的索引合并的mmap,因为do_mmap_pgoff()不允许换行的mmap,也不允许覆盖索引-1UL处的最后一页的mmap.
  */
 static int
 can_vma_merge_before(struct vm_area_struct *vma, unsigned long vm_flags,
@@ -1022,6 +1048,9 @@ can_vma_merge_before(struct vm_area_struct *vma, unsigned long vm_flags,
  *
  * We cannot merge two vmas if they have differently assigned (non-NULL)
  * anon_vmas, nor if same anon_vma is assigned but offsets incompatible.
+ *
+ * 如果我们可以将此(vm_flags、anon_vma、file、vm_pgoff)合并到vma之外(虚拟地址和文件偏移量高于),则返回true。
+ * 如果两个vma具有不同的分配(非NULL)anon_vm,或者分配了相同的anon_vm但偏移量不兼容,我们就不能合并它们.
  */
 static int
 can_vma_merge_after(struct vm_area_struct *vma, unsigned long vm_flags,
@@ -1029,10 +1058,12 @@ can_vma_merge_after(struct vm_area_struct *vma, unsigned long vm_flags,
 		    pgoff_t vm_pgoff,
 		    struct vm_userfaultfd_ctx vm_userfaultfd_ctx)
 {
+	/* 判断参数中指定的vma能否与其后一个vma进行合并 */
 	if (is_mergeable_vma(vma, file, vm_flags, vm_userfaultfd_ctx) &&
 	    is_mergeable_anon_vma(anon_vma, vma->anon_vma, vma)) {
 		pgoff_t vm_pglen;
 		vm_pglen = vma_pages(vma);
+		/* 判断vma和next两个文件映射区域的映射偏移pgoff是否是连续的 */
 		if (vma->vm_pgoff + vm_pglen == vm_pgoff)
 			return 1;
 	}
@@ -1054,6 +1085,14 @@ can_vma_merge_after(struct vm_area_struct *vma, unsigned long vm_flags,
  * The following mprotect cases have to be considered, where AAAA is
  * the area passed down from mprotect_fixup, never extending beyond one
  * vma, PPPPPP is the prev vma specified, and NNNNNN the next vma after:
+ *
+ * 给定一个映射请求(addr,end,vm_flags,file,pgoff),
+ * 弄清楚它是否可以与它的前一个或后一个合并,或者两者都有(它巧妙地填满了一个洞).
+ *
+ * 在大多数情况下 - 当调用mmap、brk或mremap - [addr，end)时肯定不会在调用vma_merge时进行映射;
+ * 但当调用mprotect时,肯定已经进行了映射(在prev内的偏移量处,或在next的开始处),并且该区域的标志即将更改为vm_flags,并且没有更改的情况已经消除.
+ *
+ * 必须考虑以下mpprotect情况,其中AAAA是从mprotect_fixup传下来的区域,从不延伸超过一个vma,PPPPPP是指定的前一个vm,NNNNNN是之后的下一个vma:
  *
  *     AAAA             AAAA                AAAA          AAAA
  *    PPPPPPNNNNNN    PPPPPPNNNNNN    PPPPPPNNNNNN    PPPPNNNNXXXX
@@ -1078,6 +1117,25 @@ can_vma_merge_after(struct vm_area_struct *vma, unsigned long vm_flags,
  * or other rmap walkers (if working on addresses beyond the "end"
  * parameter) may establish ptes with the wrong permissions of NNNN
  * instead of the right permissions of XXXX.
+ *
+ * 对于情况8来说,重要的是VMA AAA和VMA NNNN永远不会扩展到XXXX上.
+ * 相反,XXXX必须在区域AAAA中扩展,并且必须删除NNNN.
+ * 这样,在vma_merge成功的所有情况下,当vma_adjust删除rmap_locks时,合并后的vma的属性将已经对整个合并范围进行更正.
+ * 其中一些属性,如vm_page_prot/vm_flags,可以由rmap_walks访问,并且它们必须在释放rmap_locks后立即对整个合并范围正确.否则,如果XXXX将被删除,并且
+ * NNNN将扩展到XXXX范围,remove_migration_ptes或其他rmap walker(如果处理“结束”参数以外的地址)可能会使用NNNN的错误权限而不是XXXX的正确权限建立pte.
+ */
+
+/* 当新的VMA被加入到进程的地址空间时,内核会检查它是否可以与一个或多个
+ * 现存的VMA进行合并.
+ * vma_merge函数实现将一个新的VMA和附近的VMA合并功能
+ *
+ * vma_merge函数多达9个,其中mm是相关进程的struct mm_struct数据结构;
+ * prev是紧接着新VMA钱继节点的VMA,一般通过find_vma_links函数来获取;
+ * addr和end是新VMA的起始地址和结束地址
+ * vm_flags是新VMA的标志位.
+ * 如果新VMA属于一个文件映射,则参数file指向该文件struct file数据结构.
+ * 参数proff指定文件映射偏移量;
+ * 参数anon_vma是匿名映射的struct anon_vma数据结构
  */
 struct vm_area_struct *vma_merge(struct mm_struct *mm,
 			struct vm_area_struct *prev, unsigned long addr,
@@ -1086,6 +1144,7 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 			pgoff_t pgoff, struct mempolicy *policy,
 			struct vm_userfaultfd_ctx vm_userfaultfd_ctx)
 {
+	/* 算出有多个page */
 	pgoff_t pglen = (end - addr) >> PAGE_SHIFT;
 	struct vm_area_struct *area, *next;
 	int err;
@@ -1094,24 +1153,47 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 	 * We later require that vma->vm_flags == vm_flags,
 	 * so this tests vma->vm_flags & VM_SPECIAL, too.
 	 */
+	/* VM_SPECIAL指的是non-mergable和non-mlockable的VMAs,
+	 * 主要是包含(VM_IO | VM_DONTEXPAND | VM_PFNMAP | VM_MIXEDMAP)
+	 */
 	if (vm_flags & VM_SPECIAL)
 		return NULL;
 
+	/* 如果有前继节点,那么next指向prev->vm_next */
 	if (prev)
 		next = prev->vm_next;
-	else
+	else	/* 否则next指向mm->mmap的第一个节点 */
 		next = mm->mmap;
+	/* 把next赋值给area */
 	area = next;
+	/* 这里说的就是待合并的那个vma和next有重合部分 */
 	if (area && area->vm_end == end)		/* cases 6, 7, 8 */
 		next = next->vm_next;
 
-	/* verify some invariant that must be enforced by the caller */
+	/* verify some invariant that must be enforced by the caller
+	 * 验证一些必须由调用方强制执行的不变量
+	 */
+
+	/* 如果prev有值,但是addr <= prev->vm_start,那么报个WARN */
 	VM_WARN_ON(prev && addr <= prev->vm_start);
+	/* 如果area有值,也就是next是有值的,但是end > area->vm_end,那么也可以报个WARN了 */
 	VM_WARN_ON(area && end > area->vm_end);
+	/* 如果addr比end要大,那么也报个WARN */
 	VM_WARN_ON(addr >= end);
 
 	/*
 	 * Can it merge with the predecessor?
+	 *
+	 * 它能与前一个合并吗?
+	 */
+
+
+	/* 下面的代码就是和前继节点合并.当要插入节点的起始地址和prev节点的结束地址相等,就满足第一个条件了,
+	 * can_vma_merge_after函数判断prev节点是否可以被合并.
+	 * 理想情况是新插入节点的结束地址等于next节点的起始地址,那么前后节点prev和next可以合并在一起.
+	 * 最终合并是在vma_adjust函数中实现的,它会恰当地修改所设计的数据结构,例如VMA等,最后会释放不再需要的vma数据结构
+	 */
+	/* 如果prev存在并且prev->vm_end等于addr,那就是说刚好挨着的,policy相等
 	 */
 	if (prev && prev->vm_end == addr &&
 			mpol_equal(vma_policy(prev), policy) &&
@@ -1120,6 +1202,11 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 					    vm_userfaultfd_ctx)) {
 		/*
 		 * OK, it can.  Can we now merge in the successor as well?
+		 */
+		/*
+		 *
+		 * 如果area可以和prev进行合并,那么这里继续判断area能够与next进行合并
+		 * 内核这里需要保证 vma 合并程度的最大化
 		 */
 		if (next && end == next->vm_start &&
 				mpol_equal(policy, vma_policy(next)) &&
@@ -1130,30 +1217,44 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 				is_mergeable_anon_vma(prev->anon_vma,
 						      next->anon_vma, NULL)) {
 							/* cases 1, 6 */
+		/* 流程走到这里表示area可以和它的prev,next区域进行合并
+		 * __vma_adjust是真正执行vma合并操作的函数,这里会重新调整已有vma的相关属性,
+		 * 比如: vm_start,vm_end,vm_pgoff.以及涉及到相关数据结构的改变
+		 */
 			err = __vma_adjust(prev, prev->vm_start,
 					 next->vm_end, prev->vm_pgoff, NULL,
 					 prev);
-		} else					/* cases 2, 5, 7 */
+		} else /* 流程走到这里表示area只能和prev进行合并*/	/* cases 2, 5, 7 */
 			err = __vma_adjust(prev, prev->vm_start,
 					 end, prev->vm_pgoff, NULL, prev);
 		if (err)
 			return NULL;
 		khugepaged_enter_vma_merge(prev, vm_flags);
+		/* 返回最终合并好的vma */
 		return prev;
 	}
 
 	/*
 	 * Can this new request be merged in front of next?
 	 */
+	/* 判断是否可以和后继节点合并 */
+	/* 下面这种情况属于,area 的结束地址end与next的起始地址是重合的
+	 * 但是 area 的起始地址start和prev的结束地址不是重合的
+	 */
 	if (next && end == next->vm_start &&
 			mpol_equal(policy, vma_policy(next)) &&
 			can_vma_merge_before(next, vm_flags,
 					     anon_vma, file, pgoff+pglen,
 					     vm_userfaultfd_ctx)) {
+		/* area 区域前半部分和prev 区域的后半部分重合
+		 * 那么就缩小prev区域,然后将area合并到next区域
+		 */
 		if (prev && addr < prev->vm_end)	/* case 4 */
 			err = __vma_adjust(prev, prev->vm_start,
 					 addr, prev->vm_pgoff, NULL, next);
-		else {					/* cases 3, 8 */
+		else {	/* area 区域前半部分和prev区域是有间隙gap的
+			 * 那么这种情况下prev不变,area合并到next中
+			 */					/* cases 3, 8 */
 			err = __vma_adjust(area, addr, next->vm_end,
 					 next->vm_pgoff - pglen, NULL, next);
 			/*
@@ -2089,26 +2190,56 @@ get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 
 EXPORT_SYMBOL(get_unmapped_area);
 
-/* Look up the first VMA which satisfies  addr < vm_end,  NULL if none. */
+/* Look up the first VMA which satisfies  addr < vm_end,  NULL if none.
+ * 查找第一个满足addr < vm_end的VMA,如果没有,则为NULL.
+ *
+ * find_vma函数根据给定地址addr查找满足如下条件之一的VMA,如下图所示
+ *
+ * 1、addr在VMA空间范围内的,即vma->vm_start <= addr < vma->vm_end
+ * 2、距离addr最近并且VMA的结束地址大于addr的一个VMA
+ *  ______________________________________________________________
+ * |	    |  VMA1  |     ......     |	 VMA2	|     ......	  |
+ * |________|________|________________|_________|_________________|
+ *                      ↑                 ↑
+ *                    地址A              地址B
+ * find_vma通过地址addr查找mm->mm_rb红黑树的节点并找到相应的VMA.
+ * 1.在VMA空间范围内,如果找到B,那么找到VMA2.
+ * 2.距离地址addr最近并且小于VMA的结束地址: 如果是地址A,那么找到VMA2
+ */
 struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 {
 	struct rb_node *rb_node;
 	struct vm_area_struct *vma;
 
 	/* Check the cache first. */
+	/* vmacache_find是内核中最近出现的一个查找VMA的优化方法,在task_struct结构体中,
+	 * 有一个存放最近访问过的VMA数组vmacache[VMACACHE_SIZE],其中可以存放4个最近使用的VMA,
+	 * 充分利用了局部性原理.
+	 * 如果在vmacache中没有找到VMA,那么遍历这个用户进程的mm_rb红黑树,这个红黑树存放着该进程所有的vma
+	 */
 	vma = vmacache_find(mm, addr);
+	/* 如果找到了就万事大吉,直接返回该vma */
 	if (likely(vma))
 		return vma;
 
+	/* 不然就去红黑树里面找
+	 * 拿到红黑树的根节点
+	 */
 	rb_node = mm->mm_rb.rb_node;
 
 	while (rb_node) {
 		struct vm_area_struct *tmp;
-
+		/* 拿到该节点对应的vm_area_struct */
 		tmp = rb_entry(rb_node, struct vm_area_struct, vm_rb);
 
+		/* 如果该节点的tmp->vm_end > addr,那么就往左边 */
 		if (tmp->vm_end > addr) {
 			vma = tmp;
+			/* 如果tmp->vm_start <= addr,那么break,
+			 * 这里break的条件就是tmp->vm_start <= addr <tmp->vm_end
+			 * 也就是落在中间了
+			 * 但是还一种情况就是你的左边已经没有节点了
+			 */
 			if (tmp->vm_start <= addr)
 				break;
 			rb_node = rb_node->rb_left;
@@ -2116,6 +2247,14 @@ struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 			rb_node = rb_node->rb_right;
 	}
 
+	/* 如果找到了该vma,那么更新vmacache
+	 *
+	 *  void vmacache_update(unsigned long addr, struct vm_area_struct *newvma)
+	 * {
+	 *	if (vmacache_valid_mm(newvma->vm_mm))
+	 *		current->vmacache[VMACACHE_HASH(addr)] = newvma;
+	 * }
+	 */
 	if (vma)
 		vmacache_update(addr, vma);
 	return vma;
@@ -2125,6 +2264,8 @@ EXPORT_SYMBOL(find_vma);
 
 /*
  * Same as find_vma, but also return a pointer to the previous VMA in *pprev.
+ *
+ * 与find_vma相同,但也返回一个指向*pprev中前一个vma的指针.
  */
 struct vm_area_struct *
 find_vma_prev(struct mm_struct *mm, unsigned long addr,
@@ -2132,10 +2273,12 @@ find_vma_prev(struct mm_struct *mm, unsigned long addr,
 {
 	struct vm_area_struct *vma;
 
+	/* 如果find_vma有东西,那么就返回vma的前一个vm_area_struct */
 	vma = find_vma(mm, addr);
 	if (vma) {
 		*pprev = vma->vm_prev;
 	} else {
+		/* 如果没找到,pprev是最右边的那个节点的vm_area_struct */
 		struct rb_node *rb_node = mm->mm_rb.rb_node;
 		*pprev = NULL;
 		while (rb_node) {
@@ -2957,15 +3100,20 @@ void exit_mmap(struct mm_struct *mm)
 /* Insert vm structure into process list sorted by address
  * and into the inode's i_mmap tree.  If vm_file is non-NULL
  * then i_mmap_rwsem is taken here.
+ *
+ * 将vm结构插入按地址排序的进程列表和inode的i_mmap树中.
+ * 如果vm_file为非NULL,则此处取i_mmap_rwsem.
  */
 int insert_vm_struct(struct mm_struct *mm, struct vm_area_struct *vma)
 {
 	struct vm_area_struct *prev;
 	struct rb_node **rb_link, *rb_parent;
 
+	/* 找到要插入的位置 */
 	if (find_vma_links(mm, vma->vm_start, vma->vm_end,
 			   &prev, &rb_link, &rb_parent))
 		return -ENOMEM;
+	/* 如果带有VM_ACCOUNT表示虚拟内存区域需要记账,判断所有进程申请的虚拟内存的总和是否超过物理内存容量 */
 	if ((vma->vm_flags & VM_ACCOUNT) &&
 	     security_vm_enough_memory_mm(mm, vma_pages(vma)))
 		return -ENOMEM;
@@ -2981,12 +3129,19 @@ int insert_vm_struct(struct mm_struct *mm, struct vm_area_struct *vma)
 	 * vma, merges and splits can happen in a seamless way, just
 	 * using the existing file pgoff checks and manipulations.
 	 * Similarly in do_mmap_pgoff and in do_brk.
+	 *
+	 * 纯匿名vma的vm_pgoff应该是不相关的,直到它的第一次写入fault,即设置了页面的anon_vma和index.
+	 * 但现在设置vm_pgoff,它几乎肯定会结束(除非mremap在第一个wfault之前将其移动到其他位置),所以/proc/pid/maps告诉了一个一致的故事.
+	 *
+	 * 通过将其设置去反映vma的虚拟起始地址，可以以无缝的方式进行合并和拆分,只需使用现有的文件pgoff检查和操作.
+	 * 类似地，在do_mmap_pgoff和do_brk中。
 	 */
 	if (vma_is_anonymous(vma)) {
 		BUG_ON(vma->anon_vma);
 		vma->vm_pgoff = vma->vm_start >> PAGE_SHIFT;
 	}
 
+	/* 将vma插入链表和红黑树中 */
 	vma_link(mm, vma, prev, rb_link, rb_parent);
 	return 0;
 }

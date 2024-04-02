@@ -152,36 +152,59 @@ extern unsigned int kobjsize(const void *objp);
  */
 #define VM_NONE		0x00000000
 
+/* VM_READ、VM_WRITE、VM_EXEC和VM_SHARED分别表示可读、可写、可执行和可以被多个进程共享. */
 #define VM_READ		0x00000001	/* currently active flags */
 #define VM_WRITE	0x00000002
 #define VM_EXEC		0x00000004
 #define VM_SHARED	0x00000008
 
 /* mprotect() hardcodes VM_MAYREAD >> 4 == VM_READ, and so for r/w/x bits. */
+/* VM_MAYREAD表示允许设置VM_READ,
+ * VM_MAYWRITE表示允许设置VM_WRITE,
+ * VM_MAYEXEC表示允许设置VM_EXEC,
+ * VM_MAYSHARE表示允许设置VM_SHARED.
+ * 这4个标志用来限制系统调用mprotect可以设置的访问权限.
+ */
 #define VM_MAYREAD	0x00000010	/* limits for mprotect() etc */
 #define VM_MAYWRITE	0x00000020
 #define VM_MAYEXEC	0x00000040
 #define VM_MAYSHARE	0x00000080
 
+/* VM_GROWSDOWN表示虚拟内存区域可以向下(低的虚拟地址)扩展,VM_GROWSUP表示虚拟内存区域可以向上(高的虚拟地址)扩展.
+ * VM_STACK表示虚拟内存区域是栈,绝大多数处理器的栈是向下扩展,VM_STACK等价于VM_GROWSDOWN;
+ * 少数处理器(例如PA-RISC处理器)的栈是向上扩展,VM_STACK等价于VM_GROWSUP.
+ */
 #define VM_GROWSDOWN	0x00000100	/* general info on the segment */
 #define VM_UFFD_MISSING	0x00000200	/* missing pages tracking */
+/* VM_PFNMAP表示页帧号(Page Frame Number, PFN)映射,特殊映射不希望关联页描述符,直接使用页帧号,可能是因为页描述符不存,，也可能是因为不想使用页描述符. */
 #define VM_PFNMAP	0x00000400	/* Page-ranges managed without "struct page", just pure PFN */
 #define VM_DENYWRITE	0x00000800	/* ETXTBSY on write attempts.. */
 #define VM_UFFD_WP	0x00001000	/* wrprotect pages tracking */
 
+/* VM_LOCKED表示页被锁定在内存中,不允许换出到交换区 */
 #define VM_LOCKED	0x00002000
 #define VM_IO           0x00004000	/* Memory mapped I/O or similar */
 
 					/* Used by sys_madvise() */
+/* VM_SEQ_READ表示进程从头到尾按顺序读一个文件,
+ * VM_RAND_READ表示进程随机读一个文件.
+ * 这两个标志用来提示文件系统,如果进程按顺序读一个文件,文件系统可以预读文件,提高性能.
+ */
 #define VM_SEQ_READ	0x00008000	/* App will access data sequentially */
 #define VM_RAND_READ	0x00010000	/* App will not benefit from clustered reads */
 
+/* VM_DONTCOPY表示调用fork以创建子进程时不把虚拟内存区域复制给子进程 */
 #define VM_DONTCOPY	0x00020000      /* Do not copy this vma on fork */
+/* VM_DONTEXPAND表示不允许使用mremap()扩大虚拟内存区域 */
 #define VM_DONTEXPAND	0x00040000	/* Cannot expand with mremap() */
 #define VM_LOCKONFAULT	0x00080000	/* Lock the pages covered when they are faulted in */
+/* VM_ACCOUNT表示虚拟内存区域需要记账,判断所有进程申请的虚拟内存的总和是否超过物理内存容量. */
 #define VM_ACCOUNT	0x00100000	/* Is a VM accounted object */
+/* VM_NORESERVE表示不需要预留物理内存 */
 #define VM_NORESERVE	0x00200000	/* should the VM suppress accounting */
+/* VM_HUGETLB表示虚拟内存区域使用标准巨型页 */
 #define VM_HUGETLB	0x00400000	/* Huge TLB Page VM */
+/* VM_ARCH_1和VM_ARCH_2由各种处理器架构自定义 */
 #define VM_ARCH_1	0x01000000	/* Architecture-specific flag */
 #define VM_ARCH_2	0x02000000
 #define VM_DONTDUMP	0x04000000	/* Do not include in the core dump */
@@ -192,9 +215,12 @@ extern unsigned int kobjsize(const void *objp);
 # define VM_SOFTDIRTY	0
 #endif
 
+/* VM_MIXEDMAP表示映射混合使用页帧号和页描述符 */
 #define VM_MIXEDMAP	0x10000000	/* Can contain "struct page" and pure PFN pages */
+/* VM_HUGEPAGE表示虚拟内存区域允许使用透明巨型页,VM_NOHUGEPAGE表示虚拟内存区域不允许使用透明巨型页 */
 #define VM_HUGEPAGE	0x20000000	/* MADV_HUGEPAGE marked this vma */
 #define VM_NOHUGEPAGE	0x40000000	/* MADV_NOHUGEPAGE marked this vma */
+/* VM_MERGEABLE表示KSM(内核相同页合并,Kernel Samepage Merging)可以合并数据相同的页. */
 #define VM_MERGEABLE	0x80000000	/* KSM may merge identical pages */
 
 #ifdef CONFIG_ARCH_USES_HIGH_VMA_FLAGS
@@ -2167,13 +2193,20 @@ extern struct vm_area_struct * find_vma_prev(struct mm_struct * mm, unsigned lon
 					     struct vm_area_struct **pprev);
 
 /* Look up the first VMA which intersects the interval start_addr..end_addr-1,
-   NULL if none.  Assume start_addr < end_addr. */
+ * NULL if none.  Assume start_addr < end_addr.
+ * 查找与区间start_addr..end_addr-1相交的第一个VMA,
+ * 如果没有则返回NULL.
+ * 假设start_addr < end_addr
+ */
 static inline struct vm_area_struct * find_vma_intersection(struct mm_struct * mm, unsigned long start_addr, unsigned long end_addr)
 {
+	/* 找到vma,详情请看find_vma函数 */
 	struct vm_area_struct * vma = find_vma(mm,start_addr);
 
+	/* 如果vma是NULL,或者说end_addr <= vma->vm_start就没有相交的区域,那么返回NULL */
 	if (vma && end_addr <= vma->vm_start)
 		vma = NULL;
+	/* 到这里说明有相交的区域了,那么就可以返回这块VMA了 */
 	return vma;
 }
 
