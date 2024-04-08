@@ -359,6 +359,10 @@ struct vm_area_struct {
 	 * VMAs below us in the VMA rbtree and its ->vm_prev. This helps
 	 * get_unmapped_area find a free area of the right size.
 	 */
+
+	/* 在当前 vma 的红黑树左右子树中的所有节点vma(包括当前 vma)
+	 * 这个集合中的 vma 与其 vm_prev 之间最大的虚拟内存地址gap(单位字节)保存在 rb_subtree_gap 字段中
+	 */
 	unsigned long rb_subtree_gap;
 
 	/* Second cache line starts here. */
@@ -463,6 +467,7 @@ struct mm_struct {
 	unsigned long mmap_base;		/* base of mmap area */
 	unsigned long mmap_legacy_base;         /* base of mmap area in bottom-up allocations */
 	unsigned long task_size;		/* size of task vm space */
+	/* mm->highest_vm_end表示当前进程虚拟内存空间中,地址最高的一个 VMA 的结束地址位置 */
 	unsigned long highest_vm_end;		/* highest vma end address */
 	pgd_t * pgd;
 	atomic_t mm_users;			/* How many users with user space? */
@@ -471,6 +476,7 @@ struct mm_struct {
 #if CONFIG_PGTABLE_LEVELS > 2
 	atomic_long_t nr_pmds;			/* PMD page table pages */
 #endif
+	/* VMA的数量 */
 	int map_count;				/* number of VMAs */
 
 	spinlock_t page_table_lock;		/* Protects page tables and some counters */

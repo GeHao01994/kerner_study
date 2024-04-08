@@ -775,6 +775,22 @@ static void print_bad_pte(struct vm_area_struct *vma, unsigned long addr,
  *
  *	pfn_of_page == vma->vm_pgoff + ((addr - vma->vm_start) >> PAGE_SHIFT)
  *
+ * vm_normal_page -- 此函数获取与pte关联的"struct page".
+ *
+ * “Special” 映射不希望与“struct page”关联(要么它不存在,要么它存在但他们不想接触它).
+ * 在这种情况下,此处返回NULL.“Normal”映射确实有struct page.
+ *
+ * 有两种广泛的情况.首先,一个体系结构可以定义一个pte_special() pte位,在这种情况下,这个函数是微不足道的.
+ * 其次,架构可能没有空闲的pte位,这需要更复杂的方案,如下所述.
+ *
+ * 原始VM_PFNMAP映射(即非COWed映射)始终被视为special映射(即使存在底层有效的“struct pages”).
+ * VM_PFNMAP的COWed页面总是正常的.
+ *
+ * 我们在VM_PFNMAP映射中识别COWed页面的方式是通过由"remap_pfn_range()"设置的规则:vma将设置VM_PFNMAP位,
+ * 并且vm_pgoff将指向映射的第一个PFN: 因此,每个特殊映射都将始终遵循该规则
+ *
+ * pfn_of_page == vma->vm_pgoff + ((addr-vma->vm_start) >> PAGE_SHIFT)
+ *
  * And for normal mappings this is false.
  *
  * This restricts such mappings to be a linear translation from virtual address
@@ -793,6 +809,38 @@ static void print_bad_pte(struct vm_area_struct *vma, unsigned long addr,
  * advantage is that we don't have to follow the strict linearity rule of
  * PFNMAP mappings in order to support COWable mappings.
  *
+ * 对于正常映射,这是错误的.
+ *
+ * 这将这种映射限制为从虚拟地址到pfn的线性转换.为了绕过这个限制,我们允许任意映射,只要vma不是COW映射;
+ * 在这种情况下,我们知道所有的ptes都是special(因为没有一个可能是COWed).
+ *
+ * 为了支持任意特殊映射的COW,我们有VM_MIXEDMAP.
+ *
+ * VM_MIXEDMAP映射同样可以包含带有或不带有“struct page”的内存.
+ * 然而不同的是带有struct page 的_all_ pages(即pfn_valid为true的那些页)被VM重新计数并视为normal page.
+ * 缺点是页面被重新计数(这可能会更慢,而且对于一些PFNMAP用户来说根本不是一个选项).
+ * 优点是我们不必遵循PFNMAP映射的严格线性规则来支持COWable映射.
+ *
+ */
+
+/* vm_normal_page函数是一个很有意思的函数,它返回normal mapping页面的struct page数据结构,
+ * 一些特殊映射的页面是不会返回struct page数据结构的,这些页面不需要被参与到内存管理的一些活动中,
+ * 例如页面回收、页迁移和KSM等.
+ * HAVE_PTE_SPECIAL宏利用PTE页表项的空闲比特位来做一些有意义的事情,在ARM32架构的3级页表和ARM64的代码中会用到这个特性,
+ * 而ARM32架构的2级页表里没有实现这个特性.
+ * 在ARM64中,定义了PTE_SPECIAL比特位,注意这是利用硬件上的空闲比特位来定义
+ *
+ * 内核通常使用pte_mkspecial宏来设置PTE_SPECIAL软件定义的比特位,主要有以下用途.
+ * 1、内核的零页面zero page.
+ * 2、大量的驱动程序使用remap_pfn_range()函数来实现映射内核页面到用户空间.这些用户程序使用的VMA通常设置了(VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP)属性.
+ * 3、vm_insert_page/vm_insert_pfn映射内核到用户空间
+ *
+ * vm_normal_page函数把page页面分为两个阵营,一个是normal page,另外一个是special page.
+ * (1) normal page通常指正常mapping的页面,例如匿名页面、page cache和共享内存页面等
+ * (2) special page通常指不正常mapping的页面,这些页面不希望参与内存管理的回收或者合并的功能,例如映射如下特性页面.
+ *	1、VM_IO: 为I/O设备映射内存.
+ *	2、VM_PFN_MAP: 纯PFN映射
+ *	3、VM_MIXEDMAP: 固定映射
  */
 #ifdef __HAVE_ARCH_PTE_SPECIAL
 # define HAVE_PTE_SPECIAL 1
@@ -804,13 +852,18 @@ struct page *vm_normal_page(struct vm_area_struct *vma, unsigned long addr,
 {
 	unsigned long pfn = pte_pfn(pte);
 
+	/* 处理定义了HAVE_PTE_SPECIAL的情况 */
 	if (HAVE_PTE_SPECIAL) {
+		/* 如果pte的PTE_SOECIAL比特位没有置位,那么跳转到check_pfn继续检查 */
 		if (likely(!pte_special(pte)))
 			goto check_pfn;
+		/* 如果vma有操作符且定义了find_special_page函数指针,那么调用这个函数继续检查 */
 		if (vma->vm_ops && vma->vm_ops->find_special_page)
 			return vma->vm_ops->find_special_page(vma, addr);
+		/* 如果vm_flags设置了(VM_PFNMAP | VM_MIXEDMAP),那么这是special mapping,返回NULL */
 		if (vma->vm_flags & (VM_PFNMAP | VM_MIXEDMAP))
 			return NULL;
+		/* 如果不是内核的zero page,那么输出bad_pte之后返回NULL */
 		if (!is_zero_pfn(pfn))
 			print_bad_pte(vma, addr, pte, NULL);
 		return NULL;
@@ -818,24 +871,34 @@ struct page *vm_normal_page(struct vm_area_struct *vma, unsigned long addr,
 
 	/* !HAVE_PTE_SPECIAL case follows: */
 
+	/* 如果没有定义HAVE_PTE_SPECIAL */
+	/* 下面是检查VM_PFNMAP | VM_MIXEDMAP的情况 */
 	if (unlikely(vma->vm_flags & (VM_PFNMAP|VM_MIXEDMAP))) {
 		if (vma->vm_flags & VM_MIXEDMAP) {
+			/* 如果pfn不是有效的,那么返回NULL */
 			if (!pfn_valid(pfn))
 				return NULL;
+			/* 否则 goto out */
 			goto out;
 		} else {
+			/* 这里就是VM_PFNMAP的情况
+			 * remap_pfn_range函数通常使用VM_PFNMAP比特位且vm_pgoff指向第一个PFN映射,所以我们可以使用如下公式来判断这种情况的special mapping
+			 * pfn_of_page == vma->vm_pgoff + (addr - vma->vm_start) >> PAGE_SHIFT */
 			unsigned long off;
 			off = (addr - vma->vm_start) >> PAGE_SHIFT;
 			if (pfn == vma->vm_pgoff + off)
 				return NULL;
+			/* 如果映射是COW mapping(写时复制映射),那么页面也是normal 映射 */
 			if (!is_cow_mapping(vma->vm_flags))
 				return NULL;
 		}
 	}
 
+	/* 如果是zero page,那么也返回NULL */
 	if (is_zero_pfn(pfn))
 		return NULL;
 check_pfn:
+	/* 如果pfn大于high memory的地址范围,则返回NULL */
 	if (unlikely(pfn > highest_memmap_pfn)) {
 		print_bad_pte(vma, addr, pte, NULL);
 		return NULL;
@@ -846,6 +909,7 @@ check_pfn:
 	 * eg. VDSO mappings can cause them to exist.
 	 */
 out:
+	/* 最后通过 pfn_to_page返回struct page数据结构实例 */
 	return pfn_to_page(pfn);
 }
 

@@ -76,19 +76,28 @@ void clear_page_mlock(struct page *page)
 /*
  * Mark page as mlocked if not already.
  * If page on LRU, isolate and putback to move to unevictable list.
+ *
+ * 如果页面尚未mlocked,请将其标记为mlocked。
+ * 如果页面在LRU上,隔离并返回到不可回收列表.
  */
 void mlock_vma_page(struct page *page)
 {
-	/* Serialize with page migration */
+	/* Serialize with page migration
+	 * 页面迁移在串行
+	 */
 	BUG_ON(!PageLocked(page));
 
 	VM_BUG_ON_PAGE(PageTail(page), page);
 	VM_BUG_ON_PAGE(PageCompound(page) && PageDoubleMap(page), page);
 
+	/* 设置PG_mlocked bit,这个bit很重要,决定它后面进入了不可回收的链表 */
 	if (!TestSetPageMlocked(page)) {
+		/* 让NR_MLOCK的计数加上我们的page数量 */
 		mod_zone_page_state(page_zone(page), NR_MLOCK,
 				    hpage_nr_pages(page));
+		/* vm event UNEVICTABLE_PGMLOCKED 计数增加 */
 		count_vm_event(UNEVICTABLE_PGMLOCKED);
+		/* 将它从原有的lru链表里面隔离出来送入到不可回收链表里面去 */
 		if (!isolate_lru_page(page))
 			putback_lru_page(page);
 	}

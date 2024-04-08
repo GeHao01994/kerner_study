@@ -2129,13 +2129,27 @@ extern unsigned long unmapped_area_topdown(struct vm_unmapped_area_info *info);
  * - is contained within the [low_limit, high_limit) interval;
  * - is at least the desired size.
  * - satisfies (begin_addr & align_mask) == (align_offset & align_mask)
+ *
+ * 寻找一个未映射的地址范围.
+ * 我们正在寻找一个范围:
+ * - 不与任何VMA相交;
+ * - 包含在[low_limit，high_limit)区间内；
+ * - 至少是所需的size
+ * - 满足(begin_addr & align_mask) ==(align_offset & align_mask)
  */
 static inline unsigned long
 vm_unmapped_area(struct vm_unmapped_area_info *info)
 {
+	/* 按照进程虚拟内存空间中文件映射与匿名映射区的地址增长方向
+	 * 分为两个函数,来在进程地址空间中查找未映射的VMA
+	 */
+
+	/* 当文件映射与匿名映射区的地址增长方向是从上到下逆向增长时(新式布局)
+	 * 采用topdown后缀的函数查找
+	 */
 	if (info->flags & VM_UNMAPPED_AREA_TOPDOWN)
 		return unmapped_area_topdown(info);
-	else
+	else   // 地址增长方向为从下倒上正向增长(经典布局),采用该函数查找
 		return unmapped_area(info);
 }
 
@@ -2269,20 +2283,29 @@ static inline struct page *follow_page(struct vm_area_struct *vma,
 	unsigned int unused_page_mask;
 	return follow_page_mask(vma, address, foll_flags, &unused_page_mask);
 }
-
+				/* 判断pte是否具有可写属性 */
 #define FOLL_WRITE	0x01	/* check pte is writable */
+				/* 标记page可访问 */
 #define FOLL_TOUCH	0x02	/* mark page accessed */
+				/* 对这个page执行get_page操作,增加count计数*/
 #define FOLL_GET	0x04	/* do get_page on page */
 #define FOLL_DUMP	0x08	/* give error on hole if it would be zero */
+				/* get_user_pages函数具有读写权限 */
 #define FOLL_FORCE	0x10	/* get_user_pages read/write w/o permission */
+				/* 如果需要一个磁盘传输,那么开始一个IO传输不需要为其等待 */
 #define FOLL_NOWAIT	0x20	/* if a disk transfer is needed, start the IO
 				 * and return without waiting upon it */
 #define FOLL_POPULATE	0x40	/* fault in page */
+				/* 不返回大页面,切分他们 */
 #define FOLL_SPLIT	0x80	/* don't return transhuge pages, split them */
+				/* 检查这个page是否hwpoisoned */
 #define FOLL_HWPOISON	0x100	/* check page is hwpoisoned */
+				/* 强制NUMA触发一个缺页中断 */
 #define FOLL_NUMA	0x200	/* force NUMA hinting page fault */
+				/* 等待页面合并 */
 #define FOLL_MIGRATION	0x400	/* wait for page to replace migration entry */
 #define FOLL_TRIED	0x800	/* a retry, previous pass started an IO */
+				/* 标记这个page是mlocked */
 #define FOLL_MLOCK	0x1000	/* lock present pages */
 #define FOLL_REMOTE	0x2000	/* we are working on non-current tsk/mm */
 #define FOLL_COW	0x4000	/* internal GUP flag */
