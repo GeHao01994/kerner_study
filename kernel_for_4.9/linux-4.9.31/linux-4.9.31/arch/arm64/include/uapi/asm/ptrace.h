@@ -27,6 +27,19 @@
 /*
  * PSR bits
  */
+/* PSTATE.M[3:0]
+ * PSTATE.M[3:0] is AArch64 Exception level and selected Stack Pointer.
+ * M[3:2] is set to the value of PSTATE.EL on taking an exception to EL3 and copied to PSTATE.EL on executing an exception return operation in EL3.
+ * M[1] is unused and is 0 for all non-reserved values.
+ * M[0] is set to the value of PSTATE.SP on taking an exception to EL3 and copied to PSTATE.SP on executing an exception return operation in EL3.
+ *
+ * The t suffix indicates that the SP_EL0 stack pointer is selected.(后缀t表示已选择SP_EL0堆栈指.)
+ * The h suffix indicates that the SP_ELn stack pointer is selected.
+ *
+ * 详情请参考
+ * https://developer.arm.com/documentation/den0024/a/ARMv8-Registers/AArch64-special-registers/Stack-pointer?lang=en
+ *
+ */
 #define PSR_MODE_EL0t	0x00000000
 #define PSR_MODE_EL1t	0x00000004
 #define PSR_MODE_EL1h	0x00000005

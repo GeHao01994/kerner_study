@@ -471,8 +471,12 @@ static inline int lock_page_killable(struct page *page)
  * lock_page_or_retry - Lock the page, unless this would block and the
  * caller indicated that it can handle a retry.
  *
+ * lock_page_or_retry - 锁定页面,除非这会block并且调用者指示它可以处理重试.
+ *
  * Return value and mmap_sem implications depend on flags; see
  * __lock_page_or_retry().
+ *
+ * 返回值和mmap_sem含义取决于标志;请参见__lock_page_or_retry()
  */
 static inline int lock_page_or_retry(struct page *page, struct mm_struct *mm,
 				     unsigned int flags)

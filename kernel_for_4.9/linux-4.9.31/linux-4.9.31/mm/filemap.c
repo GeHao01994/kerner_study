@@ -967,25 +967,45 @@ EXPORT_SYMBOL_GPL(__lock_page_killable);
  *
  * If neither ALLOW_RETRY nor KILLABLE are set, will always return 1
  * with the page locked and the mmap_sem unperturbed.
+ *
+ *
+ * 返回值：
+ * 1 - 页面已锁定; mmap_sem仍然保持.
+ * 0 - 页面未锁定.
+ *
+ * mmap_sem已经被释放(up_read()),除非标志同时设置了FAULT_FLAG_ALLOW_RETRY和FAULT_FlagG_RETRY_NOWAIT,
+ * 在这种情况下，mmap_sem仍保持不变。
+ * 如果既没有设置ALLOW_RETRY也没有设置KILLABLE,则在页面锁定且mmap_sem未受干扰的情况下,将始终返回1.
  */
 int __lock_page_or_retry(struct page *page, struct mm_struct *mm,
 			 unsigned int flags)
 {
+	/* 如果flag带了FAULT_FLAG_ALLOW_RETRY
+	 * #define FAULT_FLAG_ALLOW_RETRY	0x04	Retry fault if blocking
+	 */
 	if (flags & FAULT_FLAG_ALLOW_RETRY) {
 		/*
 		 * CAUTION! In this case, mmap_sem is not released
 		 * even though return 0.
+		 *
+		 * 小心! 在这种情况下,即使返回0,mmap_sem也不会被释放.
 		 */
 		if (flags & FAULT_FLAG_RETRY_NOWAIT)
 			return 0;
 
 		up_read(&mm->mmap_sem);
+		/* #define FAULT_FLAG_KILLABLE	0x10	The fault task is in SIGKILL killable region
+		 *
+		 * 这下面就是一直阻塞直到PG_locked被清除
+		 * 只是一个可被KILLABLE,另外一个不行
+		 */
 		if (flags & FAULT_FLAG_KILLABLE)
 			wait_on_page_locked_killable(page);
 		else
 			wait_on_page_locked(page);
 		return 0;
 	} else {
+		/* 这里就是要去阻塞直到拿到lock */
 		if (flags & FAULT_FLAG_KILLABLE) {
 			int ret;
 
@@ -1773,7 +1793,7 @@ find_page:
 			if (unlikely(page == NULL))
 				goto no_cached_page;
 		}
-		/* 如果当前page设置了"PG_Readahead"预读标记位，说明本次读取的文件页数据正好命中上一次的预读窗口的文件页 */
+		/* 如果当前page设置了"PG_Readahead"预读标记位,说明本次读取的文件页数据正好命中上一次的预读窗口的文件页 */
 		if (PageReadahead(page)) {
 			/* 这里发起异步文件预读 */
 			page_cache_async_readahead(mapping,
@@ -2188,6 +2208,8 @@ static int page_cache_read(struct file *file, pgoff_t offset, gfp_t gfp_mask)
 /*
  * Synchronous readahead happens when we don't even find
  * a page in the page cache at all.
+ *
+ * 当我们在页面缓存中根本找不到页面时,就会发生同步预读.
  */
 static void do_sync_mmap_readahead(struct vm_area_struct *vma,
 				   struct file_ra_state *ra,
@@ -2202,19 +2224,27 @@ static void do_sync_mmap_readahead(struct vm_area_struct *vma,
 	if (!ra->ra_pages)
 		return;
 
+	/* 如果是顺序读,那么就进行同步预读 */
 	if (vma->vm_flags & VM_SEQ_READ) {
 		page_cache_sync_readahead(mapping, ra, file, offset,
 					  ra->ra_pages);
 		return;
 	}
 
-	/* Avoid banging the cache line if not needed */
+	/* Avoid banging the cache line if not needed
+	 * 如果不需要,避免撞击cache line
+	 */
+
+	/* #define MMAP_LOTSAMISS  (100),如果ra->mmap_miss < 1000,那么++ */
 	if (ra->mmap_miss < MMAP_LOTSAMISS * 10)
 		ra->mmap_miss++;
 
 	/*
 	 * Do we miss much more than hit in this file? If so,
 	 * stop bothering with read-ahead. It will only hurt.
+	 *
+	 * 在这个文件中,我们miss的比命中的多得多吗?
+	 * 如果是这样的话,就别再为预读而烦恼了.这只会很疼.
 	 */
 	if (ra->mmap_miss > MMAP_LOTSAMISS)
 		return;
@@ -2222,15 +2252,25 @@ static void do_sync_mmap_readahead(struct vm_area_struct *vma,
 	/*
 	 * mmap read-around
 	 */
+	/* 设置好预读参数之后开始提交预读 */
+	/* 将预读的起始页索引设置为0和offset - ra->ra_pages/2的最大值
+	 * 这个预读是想左右都预读ra_pages的50%? */
 	ra->start = max_t(long, 0, offset - ra->ra_pages / 2);
+	/* 设置预读的大小为最大预读页数 */
 	ra->size = ra->ra_pages;
+	/* 设置async_size为ra->ra_pages / 4
+	 * async_size指定一个阈值，预读窗口剩余这么多页时，就开始异步预读
+	 */
 	ra->async_size = ra->ra_pages / 4;
+	/* 提交预读的请求 */
 	ra_submit(ra, mapping, file);
 }
 
 /*
  * Asynchronous readahead happens when we find the page and PG_readahead,
  * so we want to possibly extend the readahead further..
+ *
+ * 异步预读发生在我们找到页面和PG_readahead时,因此我们希望可能进一步扩展预读.
  */
 static void do_async_mmap_readahead(struct vm_area_struct *vma,
 				    struct file_ra_state *ra,
@@ -2240,11 +2280,20 @@ static void do_async_mmap_readahead(struct vm_area_struct *vma,
 {
 	struct address_space *mapping = file->f_mapping;
 
-	/* If we don't want any read-ahead, don't bother */
+	/* If we don't want any read-ahead, don't bother
+	 * 如果我们不想提前阅读，不要麻烦
+	 */
+
+	/* 这里表示如果是随机读,那么直接返回 */
 	if (vma->vm_flags & VM_RAND_READ)
 		return;
+	/* 知道我们为什么到这个函数里面来吗,因为我们找到了这块地址所对应的page,
+	 * 那你这个mmap_miss肯定要-1啦 */
 	if (ra->mmap_miss > 0)
 		ra->mmap_miss--;
+	/* 如果page的内容不是有效的,或者如果当前page设置了"PG_Readahead"预读标记位,说明本次读取的文件页数据正好命中上一次的预读窗口的文件页
+	 * 那么我们这里开始异步预读
+	 */
 	if (PageReadahead(page))
 		page_cache_async_readahead(mapping, ra, file,
 					   page, offset, ra->ra_pages);
@@ -2273,41 +2322,79 @@ static void do_async_mmap_readahead(struct vm_area_struct *vma,
  * has not been released.
  *
  * We never return with VM_FAULT_RETRY and a bit from VM_FAULT_ERROR set.
+ *
+ * filemap_fault - 为page fault handling读取文件数据
+ * @vma: 发生falut的vma
+ * @vmf: 包含fault详细信息的struct vm_fault
+ *
+ * filemap_fault()是通过映射内存区域的vma操作向量调用的,用于在页面故障期间读取文件数据.
+ *
+ * goto有点难看,但这简化了将其保存在页面缓存中的正常情况,并合理地处理了特殊情况,而没有大量重复的代码.
+ *
+ * vma->vm_mm->mmap_sem必须在entry中保留
+ *
+ * 如果我们的返回值设置了VM_FAULT_RETRY,那是因为lock_page_or_retry返回了0.
+ * 在这种情况下,通常会释放mmap_sem.有关异常,请参见__lock_page_or_retry().
+ *
+ * 如果我们的返回值没有设置VM_FAULT_RETRY,则mmap_sem还没有被释放
+ *
+ * 我们从不返回VM_FAULT_RETRY和VM_FAULTE_ERROR集合中的一位。
  */
 int filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
 	int error;
+	/* 拿到vma指向的文件 */
 	struct file *file = vma->vm_file;
+	/* 拿到文件的地址空间 */
 	struct address_space *mapping = file->f_mapping;
+	/* 拿到文件的预读状态 */
 	struct file_ra_state *ra = &file->f_ra;
+	/* 拿到文件对应的inode */
 	struct inode *inode = mapping->host;
+	/* 拿到pgoff */
 	pgoff_t offset = vmf->pgoff;
 	struct page *page;
 	loff_t size;
 	int ret = 0;
 
+	/* 拿到文件的大小,然后要和PAGE_SIZE向上对齐 */
 	size = round_up(i_size_read(inode), PAGE_SIZE);
+	/* 如果offser比size >> PAGE_SHIFT还要大,那么可以返回VM_FAULT_SIGBUS了 */
 	if (offset >= size >> PAGE_SHIFT)
 		return VM_FAULT_SIGBUS;
 
 	/*
 	 * Do we have something in the page cache already?
+	 *
+	 * 页面缓存中已经有内容了吗?
 	 */
 	page = find_get_page(mapping, offset);
+	/* 如果对应这块已经有page cache了
+	 * 并且#define FAULT_FLAG_TRIED	0x20	Second try
+	 * 不是第二次尝试
+	 */
 	if (likely(page) && !(vmf->flags & FAULT_FLAG_TRIED)) {
 		/*
 		 * We found the page, so try async readahead before
 		 * waiting for the lock.
+		 *
+		 * 我们找到了页面,所以在等待锁定之前请尝试异步预读.
 		 */
 		do_async_mmap_readahead(vma, ra, file, page, offset);
+		/* 如果没有在该文件中发现page */
 	} else if (!page) {
 		/* No page in the page cache at all */
+		/* 同步预读 */
 		do_sync_mmap_readahead(vma, ra, file, offset);
+		/* vm_event_states的PGMAJFAULT event +1 */
 		count_vm_event(PGMAJFAULT);
 		mem_cgroup_count_vm_event(vma->vm_mm, PGMAJFAULT);
+		/* 将VM_FAULT_MAJOR 赋值给ret */
 		ret = VM_FAULT_MAJOR;
 retry_find:
+		/* 再去尝试找这一页 */
 		page = find_get_page(mapping, offset);
+		/* 如果还是没找到,那么就去no_cached_page */
 		if (!page)
 			goto no_cached_page;
 	}
@@ -2400,21 +2487,37 @@ void filemap_map_pages(struct fault_env *fe,
 {
 	struct radix_tree_iter iter;
 	void **slot;
+	/* 拿到vma所对应的文件 */
 	struct file *file = fe->vma->vm_file;
+	/* 拿到该文件的地址空间 */
 	struct address_space *mapping = file->f_mapping;
 	pgoff_t last_pgoff = start_pgoff;
 	loff_t size;
 	struct page *head, *page;
 
 	rcu_read_lock();
+	/*
+	 * #define radix_tree_for_each_slot(slot, root, iter, start)		\
+	 *	for (slot = radix_tree_iter_init(iter, start) ;			\
+	 *		slot || (slot = radix_tree_next_chunk(root, iter, 0)) ;	\
+	 *		slot = radix_tree_next_slot(slot, iter, 0))
+	 */
+
+	/* 这里就是通过start来循环到end */
 	radix_tree_for_each_slot(slot, &mapping->page_tree, &iter,
 			start_pgoff) {
+		/* 如果iter.index大于end_pgoff,那么直接退出循环,你已经超过end_pgoff了
+		 * 不在我们的范围内
+		 */
 		if (iter.index > end_pgoff)
 			break;
 repeat:
+		/* 找到这个slot的page */
 		page = radix_tree_deref_slot(slot);
+		/* 如果page为NULL,那么goto next */
 		if (unlikely(!page))
 			goto next;
+		/* radix_tree_deref_slot返回任一异常? */
 		if (radix_tree_exception(page)) {
 			if (radix_tree_deref_retry(page)) {
 				slot = radix_tree_iter_retry(&iter);
@@ -2422,44 +2525,66 @@ repeat:
 			}
 			goto next;
 		}
-
+		/* 如果是复合页面 */
 		head = compound_head(page);
 		if (!page_cache_get_speculative(head))
 			goto repeat;
 
-		/* The page was split under us? */
+		/* The page was split under us?
+		 * 如果页面被我们拆分了?
+		 */
 		if (compound_head(page) != head) {
 			put_page(head);
 			goto repeat;
 		}
 
-		/* Has the page moved? */
+		/* Has the page moved?
+		 * 页面被移动了?
+		 */
 		if (unlikely(page != *slot)) {
 			put_page(head);
 			goto repeat;
 		}
 
+		/* PG_uptodate tells whether the page's contents is valid.
+		 * When a read completes,the page becomes uptodate,unless a disk I/O error happened.
+		 *
+		 * 如果page的内容不是有效的,或者如果当前page设置了"PG_Readahead"预读标记位,说明本次读取的文件页数据正好命中上一次的预读窗口的文件页
+		 * 或者说是PageHWPosion
+		 * 为什么预读page不能进行映射???
+		 */
 		if (!PageUptodate(page) ||
 				PageReadahead(page) ||
 				PageHWPoison(page))
 			goto skip;
+		/* 如果trylock_page,那么skip */
 		if (!trylock_page(page))
 			goto skip;
 
+		/* 如果page->mapping被改了,或者page的内容不可用
+		 * 那么goto unlock
+		 */
 		if (page->mapping != mapping || !PageUptodate(page))
 			goto unlock;
 
+		/* 将inode->size向上取证到PAGE_SIZE的倍数 */
 		size = round_up(i_size_read(mapping->host), PAGE_SIZE);
+		/* 如果page->index >= size >> PAGE_SHIFT,那么goto unlock */
 		if (page->index >= size >> PAGE_SHIFT)
 			goto unlock;
 
+		/* mmap_miss: Cache miss stat for mmap accesses mmap
+		 * 如果cache miss 大于0,那么--
+		 */
 		if (file->f_ra.mmap_miss > 0)
 			file->f_ra.mmap_miss--;
-
+		/* 计算出地址 */
 		fe->address += (iter.index - last_pgoff) << PAGE_SHIFT;
+		/* 拿到pte */
 		if (fe->pte)
 			fe->pte += iter.index - last_pgoff;
 		last_pgoff = iter.index;
+		/* 把page和pte绑起来 */
 		if (alloc_set_pte(fe, NULL, page))
 			goto unlock;
 		unlock_page(page);

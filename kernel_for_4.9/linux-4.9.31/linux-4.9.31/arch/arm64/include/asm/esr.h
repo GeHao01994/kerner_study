@@ -79,6 +79,9 @@
 #define ESR_ELx_IL		(UL(1) << 25)
 #define ESR_ELx_ISS_MASK	(ESR_ELx_IL - 1)
 
+/* 看如下文档
+ * https://developer.arm.com/documentation/ddi0601/2020-12/AArch64-Registers/ESR-EL1--Exception-Syndrome-Register--EL1-?lang=en#fieldset_0-31_26
+ */
 /* ISS field definitions shared by different classes */
 #define ESR_ELx_WNR		(UL(1) << 6)
 

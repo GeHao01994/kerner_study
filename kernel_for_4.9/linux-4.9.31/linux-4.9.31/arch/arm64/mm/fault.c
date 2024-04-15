@@ -41,11 +41,16 @@
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
 
+
+/* struct fault_info数据结构用于描述一条失效状态对应的处理方案 */
 struct fault_info {
+	/* fn表示修复这条失效状态的函数指针 */
 	int	(*fn)(unsigned long addr, unsigned int esr,
 		      struct pt_regs *regs);
+	/* sig表示处理失败时Linux内核要发送的信号类型 */
 	int	sig;
 	int	code;
+	/* name成员表示这条失效状态的名称 */
 	const char *name;
 };
 
@@ -53,6 +58,7 @@ static const struct fault_info fault_info[];
 
 static inline const struct fault_info *esr_to_fault_info(unsigned int esr)
 {
+	/* fault_info + esr & 0b111111 */
 	return fault_info + (esr & 63);
 }
 
@@ -87,31 +93,39 @@ void show_pte(struct mm_struct *mm, unsigned long addr)
 
 	if (!mm)
 		mm = &init_mm;
-
+	/* 按指针的形式打出pgd起始值 */
 	pr_alert("pgd = %p\n", mm->pgd);
+	/* 通过首地址pgd得到addr对应的pgd的指针 */
 	pgd = pgd_offset(mm, addr);
+	/* 打印出pgd的值,也就是pud的地址加上相关状态位 */
 	pr_alert("[%08lx] *pgd=%016llx", addr, pgd_val(*pgd));
 
 	do {
 		pud_t *pud;
 		pmd_t *pmd;
 		pte_t *pte;
-
+		/* 如果pgd为none或者bad,那么break,所以你这里只看到了两个打印,也就是pgd = xxx,*pgd = xxx */
 		if (pgd_none(*pgd) || pgd_bad(*pgd))
 			break;
-
+		/* 拿到对应地址的pud的指针 */
 		pud = pud_offset(pgd, addr);
+		/* 打印pud的值,也就是pmd的地址加上相关状态位 */
 		printk(", *pud=%016llx", pud_val(*pud));
+		/*  如果pud为none或者bad,那么break,所以你这里只看到三个打印,也就是pgd = xxx,*pgd = xxx, *pud = xxx*/
 		if (pud_none(*pud) || pud_bad(*pud))
 			break;
-
+		/* 拿到对应地址的pmd的指针 */
 		pmd = pmd_offset(pud, addr);
+		/* 打印pmd的值,也就是pte的地址加上相关状态位 */
 		printk(", *pmd=%016llx", pmd_val(*pmd));
 		if (pmd_none(*pmd) || pmd_bad(*pmd))
 			break;
 
+		/* 拿到对应地址的pte的指针 */
 		pte = pte_offset_map(pmd, addr);
+		/* 打印pte的值,也就是对应的物理地址加上相关状态位 */
 		printk(", *pte=%016llx", pte_val(*pte));
+		/* ARM64这里是空的 */
 		pte_unmap(pte);
 	} while(0);
 
@@ -182,19 +196,29 @@ static void __do_kernel_fault(struct mm_struct *mm, unsigned long addr,
 	/*
 	 * Are we prepared to handle this kernel fault?
 	 * We are almost certainly not prepared to handle instruction faults.
+	 *
+	 * 我们准备好处理这个内核fault了吗?
+	 * 我们几乎肯定没有准备好处理指令错误
 	 */
 	if (!is_el1_instruction_abort(esr) && fixup_exception(regs))
 		return;
 
 	/*
 	 * No handler, we'll have to terminate things with extreme prejudice.
+	 *
+	 * 没有处理者,我们将不得不带着极端的偏见终止时间.
 	 */
 	bust_spinlocks(1);
+	/* 如果addr < PAGE_SIZE,那么就是NULL pointer dereference
+	 * 否则就是paging request
+	 */
 	pr_alert("Unable to handle kernel %s at virtual address %08lx\n",
 		 (addr < PAGE_SIZE) ? "NULL pointer dereference" :
 		 "paging request", addr);
 
+	/* 答应相关的pte映射信息 */
 	show_pte(mm, addr);
+	/* 然后die Oops */
 	die("Oops", regs, esr);
 	bust_spinlocks(0);
 	do_exit(SIGKILL);
@@ -203,6 +227,9 @@ static void __do_kernel_fault(struct mm_struct *mm, unsigned long addr,
 /*
  * Something tried to access memory that isn't in our memory map. User mode
  * accesses just cause a SIGSEGV
+ *
+ * 有东西试图访问我们内存映射中没有的内存.
+ * 用户模式访问只会导致SIGSEGV
  */
 static void __do_user_fault(struct task_struct *tsk, unsigned long addr,
 			    unsigned int esr, unsigned int sig, int code,
@@ -256,10 +283,12 @@ static int __do_page_fault(struct mm_struct *mm, unsigned long addr,
 	struct vm_area_struct *vma;
 	int fault;
 
+	/* 首先通过失效地址addr来查找vma,如果find_vma找不到vma,说明addr地址还没有在进程地址空间中,返回VM_FAULT_BADMAP错误 */
 	vma = find_vma(mm, addr);
 	fault = VM_FAULT_BADMAP;
 	if (unlikely(!vma))
 		goto out;
+	/* 如果说起始地址比它大,那么goto check_stack标签处,也就是落在了外面 */
 	if (unlikely(vma->vm_start > addr))
 		goto check_stack;
 
@@ -271,6 +300,11 @@ good_area:
 	/*
 	 * Check that the permissions on the VMA allow for the fault which
 	 * occurred.
+	 * 检查VMA上的权限是否允许发生fault
+	 *
+	 * 这里判断vma是否具备可写或可执行等权限.
+	 * 如果发生一个写错误的缺页中断,首先判断vma属性是否具有可写属性,
+	 * 如果没有,则返回VM_FAULT_BADACCESS
 	 */
 	if (!(vma->vm_flags & vm_flags)) {
 		fault = VM_FAULT_BADACCESS;
@@ -319,27 +353,57 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 	 * If we're in an interrupt or have no user context, we must not take
 	 * the fault.
 	 */
+
+	/* 如果current->pagefault_disabled,
+	 * in_atomit判断当前状态是否处于中断上下文或者禁止抢占状态,
+	 * 如果是,说明系统运行在原子上下文中(atomic context),那么跳转到
+	 * no_context标签处的__do_kernel_fault函数.
+	 * 如果当前进程中没有struct mm_struct数据结构,说明这是个内核线程,
+	 * 同样跳转到__do_kernel_fault函数中
+	 */
 	if (faulthandler_disabled() || !mm)
 		goto no_context;
 
+	/* #define user_mode(regs)	\
+	 *	(((regs)->pstate & PSR_MODE_MASK) == PSR_MODE_EL0t)
+	 * 如果是用户空间的地址,那么flag置位FAULT_FLAG_USER
+	 */
 	if (user_mode(regs))
 		mm_flags |= FAULT_FLAG_USER;
 
+	/* 判断是否为低异常等级的指令异常,若为指令异常,说明该地址具有可执行权限 */
 	if (is_el0_instruction_abort(esr)) {
 		vm_flags = VM_EXEC;
+		/* ESR_ELx_WNR 表示: Write not Read.Indicates whether a synchronous abort was caused by an instruction writing to a memory
+		 * location, or by an instruction reading from a memory location.
+		 *
+		 * WnR		Meaning
+		 * 0b0		Abort caused by an instruction reading from a memory location.
+		 * 0b1		Abort caused by an instruction writing to a memory
+		 *
+		 * 并且CM没有设置为0
+		 */
+
+		/* 如果是写内存导致的fault,那么设置vm_flags为VM_WRITE
+		 * mm_flags |= FAULT_FLAG_WRITE
+		 */
 	} else if ((esr & ESR_ELx_WNR) && !(esr & ESR_ELx_CM)) {
 		vm_flags = VM_WRITE;
 		mm_flags |= FAULT_FLAG_WRITE;
 	}
 
+	/* 如果是权限fault,并且地址是用户空间的地址 */
 	if (is_permission_fault(esr) && (addr < USER_DS)) {
 		/* regs->orig_addr_limit may be 0 if we entered from EL0 */
+		/* 地址属于用户空间,但是出错是在内核空间,也就是内核空间访问了用户空间的地址,报错 */
 		if (regs->orig_addr_limit == KERNEL_DS)
 			die("Accessing user space memory with fs=KERNEL_DS", regs, esr);
 
+		/* 如果是el1的指令异常,那么die */
 		if (is_el1_instruction_abort(esr))
 			die("Attempting to execute userspace memory", regs, esr);
 
+		/* 这里是去异常向量表里面去找pc指针对应的 */
 		if (!search_exception_tables(regs->pc))
 			die("Accessing user space memory outside uaccess.h routines", regs, esr);
 	}
@@ -348,6 +412,12 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 	 * As per x86, we may deadlock here. However, since the kernel only
 	 * validly references user space from well defined areas of the code,
 	 * we can bug out early if this is from code which shouldn't.
+	 */
+
+	/* down_read_trylock函数判断当前进程的mm->mmap_sem读写信号量是否可以获取,返回1则表示成功获得锁,返回0则表示锁已被被人占用.
+	 * mm->mmap_sem锁被别人占用时要区分两种情况,一种是发生在内核空间,另外一种是发生在用户空间.
+	 * 发生在用户空间的情况可以调用down_read来睡眠等待锁持有者释放该锁;
+	 * 发生在内核空间时,如果没有在exception table查询到该地址,那么跳转到no_context标签处的__do_kernel_fault函数
 	 */
 	if (!down_read_trylock(&mm->mmap_sem)) {
 		if (!user_mode(regs) && !search_exception_tables(regs->pc))
@@ -372,6 +442,9 @@ retry:
 	 * If we need to retry but a fatal signal is pending, handle the
 	 * signal first. We do not need to release the mmap_sem because it
 	 * would already be released in __lock_page_or_retry in mm/filemap.c.
+	 *
+	 * 如果我们需要retry,但有一个致命信号挂起,请先处理该信号.
+	 * 我们不需要释放mmap_sem,因为它已经在mm/filemap.c中的__lock_page_or_retry中释放了.
 	 */
 	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
 		return 0;
@@ -380,9 +453,17 @@ retry:
 	 * Major/minor page fault accounting is only done on the initial
 	 * attempt. If we go through a retry, it is extremely likely that the
 	 * page will be found in page cache at that point.
+	 *
+	 * Major/minor page fault仅在初次尝试时完成计数.
+	 * 如果我们进行重试,那么很可能会在页面缓存中找到该页面。
 	 */
 
 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, addr);
+	/* 如果handle_mm_fault()函数成功地给进程分配一个页框,则返回VM_FAULT_MINOR或VM_FAULT_MAJOR.
+	 * 值VM_FAULT_MINOR表示在没有阻塞当前进程的情况下处理了缺页,这种缺页叫做次缺页(minor fault).
+	 * 值VM_FAULT_MAJOR表示缺页迫使当前进程睡眠(很可能是由于当用磁盘上的数据填充所分配的页框时花费时间);阻塞当前进程的缺页就叫做主缺页(major fault).
+	 * 函数也返回VM_FAULT_OOM(没有足够的内存)或VM_FAULT_STGBOS(其他任何错误).
+	 */
 	if (mm_flags & FAULT_FLAG_ALLOW_RETRY) {
 		if (fault & VM_FAULT_MAJOR) {
 			tsk->maj_flt++;
@@ -397,8 +478,11 @@ retry:
 			/*
 			 * Clear FAULT_FLAG_ALLOW_RETRY to avoid any risk of
 			 * starvation.
+			 *
+			 * 清除FAULT_FLAG_ALLOW_RETRY以避免任何饥饿风险.
 			 */
 			mm_flags &= ~FAULT_FLAG_ALLOW_RETRY;
+			/* #define FAULT_FLAG_TRIED	0x20	Second try */
 			mm_flags |= FAULT_FLAG_TRIED;
 			goto retry;
 		}
@@ -409,6 +493,8 @@ retry:
 	/*
 	 * Handle the "normal" case first - VM_FAULT_MAJOR
 	 */
+
+	/* 如果没有返回(VM_FAULT_ERROR | VM_FAULT_BADMAP | VM_FAULT_BADACCESS) 说明缺页中断就处理完成了 */
 	if (likely(!(fault & (VM_FAULT_ERROR | VM_FAULT_BADMAP |
 			      VM_FAULT_BADACCESS))))
 		return 0;
@@ -416,15 +502,20 @@ retry:
 	/*
 	 * If we are in kernel mode at this point, we have no context to
 	 * handle this fault with.
+	 *
+	 * 如果我们现在处于内核模式,那么我们没有上下文来处理这个fault.
 	 */
 	if (!user_mode(regs))
 		goto no_context;
 
+	/* 如果错误类型是VM_FAULT_OOM,说明当前系统没有足够的内存,那么调用pagefault_out_of_memory函数触发OOM机制. */
 	if (fault & VM_FAULT_OOM) {
 		/*
 		 * We ran out of memory, call the OOM killer, and return to
 		 * userspace (which will retry the fault, or kill us if we got
 		 * oom-killed).
+		 *
+		 * 我们耗尽了内存,调用OOM killer,然后返回到用户空间(这将重试fault,或者如果我们得到oom-killed,那就kill掉我们).
 		 */
 		pagefault_out_of_memory();
 		return 0;
@@ -434,6 +525,8 @@ retry:
 		/*
 		 * We had some memory, but were unable to successfully fix up
 		 * this page fault.
+		 *
+		 * 我们有一些内存,但无法成功修复此页面错误.
 		 */
 		sig = SIGBUS;
 		code = BUS_ADRERR;
@@ -441,12 +534,15 @@ retry:
 		/*
 		 * Something tried to access memory that isn't in our memory
 		 * map.
+		 *
+		 * 有东西试图访问我们内存映射中没有的内存
 		 */
 		sig = SIGSEGV;
 		code = fault == VM_FAULT_BADACCESS ?
 			SEGV_ACCERR : SEGV_MAPERR;
 	}
 
+	/* __do_user_fault给用户进程发信号,因为这时内核已经无能为力了 */
 	__do_user_fault(tsk, addr, esr, sig, code, regs);
 	return 0;
 
@@ -571,9 +667,11 @@ static const struct fault_info fault_info[] = {
 asmlinkage void __exception do_mem_abort(unsigned long addr, unsigned int esr,
 					 struct pt_regs *regs)
 {
+	/* 将esr转换成fault_info */
 	const struct fault_info *inf = esr_to_fault_info(esr);
 	struct siginfo info;
 
+	/* 这里就是调用fault_info对应的function */
 	if (!inf->fn(addr, esr, regs))
 		return;
 
