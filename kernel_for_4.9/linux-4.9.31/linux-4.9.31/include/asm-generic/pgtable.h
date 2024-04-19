@@ -696,9 +696,19 @@ static inline int pmd_move_must_withdraw(spinlock_t *new_pmd_ptl,
  * caller (a special atomic read not done by "gcc" as in the generic
  * version above, is also needed when THP is disabled because the page
  * fault can populate the pmd from under us).
+ *
+ * 此函数适用于在读取模式下使用mmap_sem保持的站点遍历页表,以防止MADV_DONTNEED和转移页faults.
+ * MADV_DONTNEED可以将transhuge pmd转换为空pmd,transhuge 页面fault 可以将空pmd转换成hugepmd或常规pmd(如果hugepage分配失败).
+ * 在读取模式下保持mmap_sem时,pmd会变得稳定,并且只有在它不是null且不是transhuge pmd的情况下才会停止更改.
+ * 当这些竞争发生时,此函数与标准的pmd_none_or_clear_bad相比产生了差异,结果是未定义的,因此表现为pmd为none是安全的(因为它无论如何都可以返回none).
+ * 编译器级别的barrier()对于在同一pmdval上原子计算两个检查至关重要.
+ *
+ * 对于具有64位大pmd_t的32位内核,这会自动负责原子读取pmd,以避免当mmap_sem被调用方拿到以供读取时SMP对pmd_populate()的竞争条件
+ * (一种特殊的原子读取,而不是由“gcc”完成,如在泛型中上面的版本,当THP被禁用时也需要,因为页面错误可以从我们下面填充pmd).
  */
 static inline int pmd_none_or_trans_huge_or_clear_bad(pmd_t *pmd)
 {
+	/* 读取pmd的值 */
 	pmd_t pmdval = pmd_read_atomic(pmd);
 	/*
 	 * The barrier will stabilize the pmdval in a register or on
@@ -713,13 +723,23 @@ static inline int pmd_none_or_trans_huge_or_clear_bad(pmd_t *pmd)
 	 * the low part of the pmd is found null, the high part will
 	 * be also null or the pmd_none() check below would be
 	 * confused.
+	 *
+	 * 屏障将稳定寄存器或堆栈中的pmdval,以便它在代码下停止更改.
+	 * 当x86 32位PAE上的CONFIG_TRANSPARENT_HUGEPAGE=y时,允许pmd_read_atomic返回非原子pmdval(例如,指向从未映射到pmd中的巨大页面).
+	 * 以下检查只关心32位PAE x86的pmd的低部分,pmd_none()除外.
+	 * 因此,重要的是,如果pmd的低部分被发现为空,那么高部分也将为空,或者下面的pmd_none()检查会被混淆.
 	 */
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	barrier();
 #endif
+	/* 如果pmdval为NULL,或者pmd是块映射,那么返回1 */
 	if (pmd_none(pmdval) || pmd_trans_huge(pmdval))
 		return 1;
+	/* 如果pmd是bad不是页表类型,那么就是bad了,因为前面已经判断你是不是块映射了
+	 * #define pmd_bad(pmd)		(!(pmd_val(pmd) & PMD_TABLE_BIT))
+	 */
 	if (unlikely(pmd_bad(pmdval))) {
+		/* 保存之后清除pmd的值 */
 		pmd_clear_bad(pmd);
 		return 1;
 	}
@@ -738,6 +758,11 @@ static inline int pmd_none_or_trans_huge_or_clear_bad(pmd_t *pmd)
  * split_huge_page_pmd returns (because it may have run when the pmd
  * become null, but then a page fault can map in a THP and not a
  * regular page).
+ *
+ * 如果没有在内核中内置Transparent Hugepage支,这是一个错误.
+ * 否则,它等效于pmd_none_or_trans_huge_or_clear_bad(),并且只能在已经验证pmd不是none的地方调用,并且他们想在read模式下手持mmap sem时轮询ptes(写入模式不需要此项).
+ * 如果未启用THP,即使MADV_DONTNEED运行,pmd也不能在代码下消失,但如果启用了THP,则在split_huge_page_pmd返回后,
+ * 我们需要在遍历ptes之前运行pmd_trans_unstable(因为当pmd变为null时,它可能已经运行,但page fault可以映射到THP而不是常规页面).
  */
 static inline int pmd_trans_unstable(pmd_t *pmd)
 {

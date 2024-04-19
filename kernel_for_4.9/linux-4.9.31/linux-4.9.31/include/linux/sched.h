@@ -1886,8 +1886,14 @@ struct task_struct {
 	 * when (nr_dirtied >= nr_dirtied_pause), it's time to call
 	 * balance_dirty_pages() for some dirty throttling pause
 	 */
+	/* nr_dirtied表明当前进程脏页数量,初始化为0.
+	 * nr_dirtied_pause是一个限制值,初始为32,即128KB
+	 * 进行写文件,nr_dirtied值增加1,每写一个page就会增加1,并每次都会在balance_dirty_pages_ratelimited中查看
+	 * nr_dirtied值是否达到了nr_dirtied_pause的限制值,如果达到了则启用脏页平衡机制(balance_drity_pages)
+	 */
 	int nr_dirtied;
 	int nr_dirtied_pause;
+	/* dirty_paused_when是进程上一次执行balance_dirty_pages()脏页平衡的时间点(或者再加上休眠的时间点) */
 	unsigned long dirty_paused_when; /* start of a write-and-pause period */
 
 #ifdef CONFIG_LATENCYTOP

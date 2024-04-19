@@ -1717,6 +1717,16 @@ EXPORT_SYMBOL(find_get_entries_tag);
  * readahead(R+4...B+3) => bang => read(R+4) => read(R+5) => ......
  *
  * It is going insane. Fix it by quickly scaling down the readahead size.
+ *
+ * CD/DVD很容易出错. 当发生介质错误时,驱动程序可能会使I/O请求的_large_部分失败.想象一下最糟糕的情况：
+ *
+ *	---R __________________________________________ B__________
+ *	   ^ reading here				^ 坏块(假设4k)
+ *
+ * 读取(R)= > miss => readahead(R ... B) => 介质错误 =>令人沮丧的重试次数 => 整个请求失败 => 读取(R) => 读取(R+1) =>
+ * 预读(R+1 ... B+1) => bang => 读取(R+2) => 读取(R+3) => 预读 (R+3 … B+2 ) => bang =>读取(R+3) => 读取(R+4) =>
+ * 预读(R+4…B+3) => bang => 读(R+4) => 读(R+5) => .....
+ * 这简直是疯了.通过快速缩小预读大小来解决此问题.
  */
 static void shrink_readahead_size_eio(struct file *filp,
 					struct file_ra_state *ra)
@@ -2178,6 +2188,13 @@ EXPORT_SYMBOL(generic_file_read_iter);
  *
  * This adds the requested page to the page cache if it isn't already there,
  * and schedules an I/O to read in its contents from disk.
+ *
+ * page_cache_read - 将请求的页面添加到页面缓存中如果还没有的话
+ * @file:	要读取的文件
+ * @offset:	页面索引
+ * @gfp_mask:	内存分配标志
+ *
+ * 这会将请求的页面添加到页面缓存中(如果该页面还没有),并调度一个I/O从磁盘读取其内容.
  */
 static int page_cache_read(struct file *file, pgoff_t offset, gfp_t gfp_mask)
 {
@@ -2186,11 +2203,15 @@ static int page_cache_read(struct file *file, pgoff_t offset, gfp_t gfp_mask)
 	int ret;
 
 	do {
+		/* 分配一个页面 */
 		page = __page_cache_alloc(gfp_mask|__GFP_COLD);
+		/* 如果分配不出来,那么返回-ENOMEM */
 		if (!page)
 			return -ENOMEM;
 
+		/* 把它添加到相关位置,已经lru链表里面去 */
 		ret = add_to_page_cache_lru(page, mapping, offset, gfp_mask & GFP_KERNEL);
+		/* 如果分配好了的话,那么就去读这一页 */
 		if (ret == 0)
 			ret = mapping->a_ops->readpage(file, page);
 		else if (ret == -EEXIST)
@@ -2399,12 +2420,19 @@ retry_find:
 			goto no_cached_page;
 	}
 
+	/* lock page or retry,如果返回0表示page没有被lock,那么put_page
+	 * 返回ret | VM_FAULT_RETRY
+	 */
 	if (!lock_page_or_retry(page, vma->vm_mm, vmf->flags)) {
 		put_page(page);
 		return ret | VM_FAULT_RETRY;
 	}
 
-	/* Did it get truncated? */
+	/* Did it get truncated?
+	 * 如果说被截断了,看起来就是它已经不属于这个文件了
+	 * 那么unlock_page、put_page之后
+	 * goto retry_find
+	 */
 	if (unlikely(page->mapping != mapping)) {
 		unlock_page(page);
 		put_page(page);
@@ -2415,6 +2443,10 @@ retry_find:
 	/*
 	 * We have a locked page in the page cache, now we need to check
 	 * that it's up-to-date. If not, it is going to be due to an error.
+	 *
+	 * 我们在页面缓存中有一个locked page,
+	 * 现在我们需要检查它是否是最新的.
+	 * 如果没有,那将是由于一个错误.
 	 */
 	if (unlikely(!PageUptodate(page)))
 		goto page_not_uptodate;
@@ -2422,14 +2454,23 @@ retry_find:
 	/*
 	 * Found the page and have a reference on it.
 	 * We must recheck i_size under page lock.
+	 *
+	 * 找到该页,并在上面有引用.
+	 * 必须在page lock下重新检查i_size
 	 */
+
+	/* 拿到文件的大小,然后要和PAGE_SIZE向上对齐 */
 	size = round_up(i_size_read(inode), PAGE_SIZE);
+	/* 如果offser比size >> PAGE_SHIFT还要大,那么
+	 * 在unlock page和put page之后可以返回VM_FAULT_SIGBUS了
+	 */
 	if (unlikely(offset >= size >> PAGE_SHIFT)) {
 		unlock_page(page);
 		put_page(page);
 		return VM_FAULT_SIGBUS;
 	}
 
+	/* 然后把page设置到vmf的page */
 	vmf->page = page;
 	return ret | VM_FAULT_LOCKED;
 
@@ -2437,6 +2478,10 @@ no_cached_page:
 	/*
 	 * We're only likely to ever get here if MADV_RANDOM is in
 	 * effect.
+	 *
+	 * 只有在MADV_RANDOM生效的情况下,我们才有可能到达这里.
+	 *
+	 * 如果大于等于0,说明分配了page cache并且读取了数据
 	 */
 	error = page_cache_read(file, offset, vmf->gfp_mask);
 
@@ -2444,6 +2489,9 @@ no_cached_page:
 	 * The page we want has now been added to the page cache.
 	 * In the unlikely event that someone removed it in the
 	 * meantime, we'll just come back here and read it again.
+	 *
+	 * 我们想要的页面现在已经添加到页面缓存中.
+	 * 在不太可能的情况下,有人在此期间删除了它,我们将回到这里重新阅读.
 	 */
 	if (error >= 0)
 		goto retry_find;
@@ -2452,6 +2500,9 @@ no_cached_page:
 	 * An error return from page_cache_read can result if the
 	 * system is low on memory, or a problem occurs while trying
 	 * to schedule I/O.
+	 *
+	 * 如果系统内存不足,page_cache_read将返回一个错误,
+	 * 或者当试图调度I/O的时候发生了一个错误
 	 */
 	if (error == -ENOMEM)
 		return VM_FAULT_OOM;
@@ -2463,20 +2514,41 @@ page_not_uptodate:
 	 * Try to re-read it _once_. We do this synchronously,
 	 * because there really aren't any performance issues here
 	 * and we need to check for errors.
+	 *
+	 * Umm,如果页面不是最新的,请注意错误.
+	 * 试着重读一遍.我们是同步进行的,因为这里确实没有任何性能问题,我们需要检查错误.
+	 */
+
+	/* 走到这里是因为!PageUptodate(page),
+	 * PG_uptodate tells whether the page's contents is valid.When a read completes,
+	 * the page becomes uptodate, unless a disk I/O error happened.
+	 */
+
+	/* 清除PG_error
+	 * PG_error is set to indicate that an I/O error occurred on this page.
 	 */
 	ClearPageError(page);
+	/* 这里重新去读 */
 	error = mapping->a_ops->readpage(file, page);
+	/* 如果没有error,那么就等pageunlocked */
 	if (!error) {
 		wait_on_page_locked(page);
+		/* 如果PG_uptodate还在置位,那么返回-EIO吧 */
 		if (!PageUptodate(page))
 			error = -EIO;
 	}
+	/* put_page */
 	put_page(page);
 
 	if (!error || error == AOP_TRUNCATED_PAGE)
 		goto retry_find;
+	/* Things didn't work out. Return zero to tell the mm layer so.
+	 * 事情没有成功.返回零来告诉mm层是这样的.
+	 */
 
-	/* Things didn't work out. Return zero to tell the mm layer so. */
+	/* 否则这里缩小预读的大小
+	 * ra->ra_pages /= 4;
+	 */
 	shrink_readahead_size_eio(file, ra);
 	return VM_FAULT_SIGBUS;
 }

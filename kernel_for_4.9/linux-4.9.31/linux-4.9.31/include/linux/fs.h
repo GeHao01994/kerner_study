@@ -320,6 +320,18 @@ struct iattr {
  * special semantics to the caller.  These are much larger than the bytes in a
  * page to allow for functions that return the number of bytes operated on in a
  * given page.
+ *
+ * enum-positive_aop_returns - 具有特定语义的aop返回代码
+ *
+ * @AOP_WRITEPAGE_ACTIVATE: 通知调用者页面写回已完成,页面仍处于锁定状态,应视为活动页面.
+ *			    VM使用此提示将页面返回到活动列表 -- 在不久的将来,它不会再次成为回写的候选者.
+ *			    如果其他调用者收到此返回,则必须小心解锁页面. writepage()返回;
+ * @AOP_TRUNCATED_PAGE: 交给锁定页面的AOP方法已将其解锁,页面可能已被截断.
+ *			调用者应备份以获取新页面并重试,aop将采取合理的预防措施,避免再次锁定.
+ *			如果调用方持有页面引用,则应在重试之前将其删除.由readpage()返回.
+ *
+ * address_space_operation 函数返回这些大常量,以向调用方指示特殊的语义.
+ * 这些字节比页面中的字节大得多,以允许函数返回给定页面中操作的字节数.
  */
 
 enum positive_aop_returns {

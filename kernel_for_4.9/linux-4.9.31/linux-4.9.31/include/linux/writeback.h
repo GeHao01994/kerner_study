@@ -126,6 +126,15 @@ struct wb_domain {
 	 * We introduce a concept of time, a period over which we measure
 	 * these events, because demand can/will vary over time. The length
 	 * of this period itself is measured in page writeback completions.
+	 *
+	 * 按相对写出速度的比例缩放写回缓存大小.
+	 *
+	 * 我们通过在BDI之间保持一个浮动比例来实现这一点,基于页面写回完成[end_page_writeback()].
+	 * 那些写页面速度最快的设备将获得更大的份额,而速度较慢的设备将得到更小的份额.
+	 *
+	 * 我们使用页面写出完成量是因为我们对清除脏页面感兴趣.把它们写出来是首要目标.
+	 *
+	 * 我们引入了时间的概念,即我们测量这些事件的时间段,因为需求可能会随着时间的推移而变化.此周期本身的长度是以页写回完成数为单位测量的.
 	 */
 	struct fprop_global completions;
 	struct timer_list period_timer;	/* timer for aging of completions */

@@ -188,7 +188,9 @@ static struct fprop_local_percpu *wb_memcg_completions(struct bdi_writeback *wb)
 static void wb_min_max_ratio(struct bdi_writeback *wb,
 			     unsigned long *minp, unsigned long *maxp)
 {
+	/* 这表示平均写带宽 */
 	unsigned long this_bw = wb->avg_write_bandwidth;
+	/*  表示total wb任务的bandwidth之和,带宽指单位时间写有多少次io */
 	unsigned long tot_bw = atomic_long_read(&wb->bdi->tot_write_bandwidth);
 	unsigned long long min = wb->bdi->min_ratio;
 	unsigned long long max = wb->bdi->max_ratio;
@@ -196,18 +198,24 @@ static void wb_min_max_ratio(struct bdi_writeback *wb,
 	/*
 	 * @wb may already be clean by the time control reaches here and
 	 * the total may not include its bw.
+	 *
+	 * 当时间控制到达此处时,wb可能已经是干净的,并且总数可能不包括其bw.
 	 */
+
+	/* 如果平均写带宽小于整体带宽 */
 	if (this_bw < tot_bw) {
+		/* 如果min不为0,那么min = wb->bdi->min_ratio * this_bw / tot_bw */
 		if (min) {
 			min *= this_bw;
 			do_div(min, tot_bw);
 		}
+		/* 如果max < 100,那么max = this_bw * wb->bdi->max_ratio / tot_bw */
 		if (max < 100) {
 			max *= this_bw;
 			do_div(max, tot_bw);
 		}
 	}
-
+	/* 赋值出去 */
 	*minp = min;
 	*maxp = max;
 }
@@ -412,8 +420,9 @@ static unsigned long global_dirtyable_memory(void)
  * dirty limits will be lifted by 1/4 for PF_LESS_THROTTLE (ie. nfsd) and
  * real-time tasks.
  *
- * domain_dirty_limits-计算wb_domain的thresh和bg_thresh
- * @dtc:dirty_throttle_control of interest
+ * domain_dirty_limits - 计算wb_domain的thresh和bg_thresh
+ * @dtc: dirty_throttle_control of interest
+ *
  * 考虑vm_dirty_{bytes|ratio}和dirty_background_{bytes|ratio}计算@dtc->thresh和->bg_thresh.
  * 调用方必须确保在调用此函数之前设置了@dtc->vail.
  * PF_LESS_THROTTLE（如nfsd）和实时任务的脏限制将提高1/4.
@@ -426,12 +435,12 @@ static void domain_dirty_limits(struct dirty_throttle_control *dtc)
 	 * 直到脏页被回写到磁盘,此值过低时,遇到写入突增时,会造成短时间内pagecache脏页快速上升，造成写请求耗时增加.
 	 * 但是此值也不能设置的太高,当该值太高时，会造成内核flush脏页时,超过内核限制的120s导致进程挂起或中断.
 	 * 注意：dirty_bytes 和 dirty_ratio 是相对的,只能指定其中一个.
-	 * 当其中一个参数文件被写入时，会立即开始计算脏页限制，并且会将另一个参数的值清零.
+	 * 当其中一个参数文件被写入时,会立即开始计算脏页限制,并且会将另一个参数的值清零.
 	 */
 	/*
 	 * 当系统脏页的比例或者所占内存数量超过dirty_background_ratio(百分数)/dirty_background_bytes(字节)设定的
 	 * 阈值时,启动相关内核线程(pdflush/flush/kdmflush)开始将脏页写入磁盘.
-	 * 如果该值过大，同时又有进程大量写磁盘(未使用DIRECT_IO)时,会使pagecache占用对应比例的系统内存.
+	 * 如果该值过大,同时又有进程大量写磁盘(未使用DIRECT_IO)时,会使pagecache占用对应比例的系统内存.
 	 * 注意：dirty_background_bytes参数和dirty_background_ratio参数是相对的，只能指定其中一个.
 	 * 当其中一个参数文件被写入时,会立即开始计算脏页限制,并且会将另一个参数的值清零.
 	 */
@@ -447,7 +456,10 @@ static void domain_dirty_limits(struct dirty_throttle_control *dtc)
 	unsigned long bg_thresh;
 	struct task_struct *tsk;
 
-	/* gdtc is !NULL iff @dtc is for memcg domain */
+	/* gdtc is !NULL iff @dtc is for memcg domain
+	 *
+	 * 当且仅当dtc是memcg domain的时候gdtc才是NULL
+	 */
 	if (gdtc) {
 		/* global_avail = gdtc->avail = global_page_state(NR_FREE_PAGES) +  global_node_page_state(NR_INACTIVE_FILE) + global_node_page_state(NR_ACTIVE_FILE)
 		 * 				- min(x, totalreserve_pages) + 1
@@ -466,6 +478,7 @@ static void domain_dirty_limits(struct dirty_throttle_control *dtc)
 		 * per-PAGE_SIZE，它们可以通过将字节除以页数来获得。
 		 */
 		/* 如果定义了字节数或者dirty_background_bytes
+		 * 这里global_avail表示全局可变脏的页面
 		 * 那么ratio = (bytes + global_avail - 1) / global_avail 和PAGE_SIZE中的最小值
 		 * 理论上我们算ratio应该是bytes / (global_avail * PAGE_SIZE)
 		 * 实际上这个除以PAGE_SIZE 放到了下面的thresh计算里面
@@ -846,6 +859,21 @@ static void mdtc_calc_avail(struct dirty_throttle_control *mdtc,
  *
  * The wb's share of dirty limit will be adapting to its throughput and
  * bounded by the bdi->min_ratio and/or bdi->max_ratio parameters, if set.
+ *
+ * __wb_calc_thresh - @wb的脏节流阈值份额
+ * dtc: 感兴趣的dirty_throttle_context
+ *
+ * 返回@wb的drity limit(以页为单位). 脏平衡上下文中的术语“drity” 包括所有PG_dirty、PG_writeback和NFS unstable页面.
+ *
+ * 请注意,balance_dirty_pages()只会在每页睡眠的max_pause不足以控制脏页的情况下将其视为硬限制.
+ * 例如,当设备由于某些错误条件而完全停滞时,或者当有1000个dd任务写入速度较慢的10MB/s USB密钥时.
+ * 在其他正常情况下,当wb脏页变高时,它会更温和地对任务进行节流(而不是完全阻止它们).
+ *
+ * 它为快/慢设备分配高/低脏限制,以防止
+ * - 饥饿的快速设备
+ * - 在慢速设备上堆积脏页(需要很长时间才能同步)
+ *
+ * wb的脏限制份额将适应其吞吐量,并受bdi->min_ratio and/or bdi->max_ratio参数的限制(如果设置).
  */
 static unsigned long __wb_calc_thresh(struct dirty_throttle_control *dtc)
 {
@@ -858,15 +886,31 @@ static unsigned long __wb_calc_thresh(struct dirty_throttle_control *dtc)
 	/*
 	 * Calculate this BDI's share of the thresh ratio.
 	 */
+
+	/* 该函数用于计算某种特定事件在整体事件中所占的比例,其结果通过函数参数numerator和denominator返回,分别代表分子和分母。
+	 * 分子返回特定类型事件的计数
+	 * 分母返回所有事件的计数
+	 * 同时做了修正,保证分子除以分母的结果永远保证在0和1之间.
+	 * 只不过计数使用的percpu_counter.
+	 */
+
+	/* __wb_calc_thresh()会依据wb的writeback完成的数量占全局的比例,比例划分出其应该占得的全局background thresh的量.
+	 * 注意一个是dom->completions 另外一个是wb_completions
+	 */
 	fprop_fraction_percpu(&dom->completions, dtc->wb_completions,
 			      &numerator, &denominator);
 
+	/* bdi_min_ratio,分配给这个BDI的全局“脏门槛”的最小百分比
+	 * 所以这里的wb_thresh就是这个bdi的阀值
+	 */
 	wb_thresh = (thresh * (100 - bdi_min_ratio)) / 100;
+	/* 这个阀值需要 * 全局的比例 */
 	wb_thresh *= numerator;
 	do_div(wb_thresh, denominator);
-
+	/* 拿到wb->bdi->min_ratio 和 wb->bdi->max_ratio */
 	wb_min_max_ratio(dtc->wb, &wb_min_ratio, &wb_max_ratio);
 
+	/* 这个阀值还需要加上全局阀值*wb_min_ratio / 100 */
 	wb_thresh += (thresh * wb_min_ratio) / 100;
 	if (wb_thresh > (thresh * wb_max_ratio) / 100)
 		wb_thresh = thresh * wb_max_ratio / 100;
@@ -1640,12 +1684,11 @@ static inline void wb_dirty_limits(struct dirty_throttle_control *dtc)
 	 *   wb_position_ratio() will let the dirtier task progress
 	 *   at some rate <= (write_bw / 2) for bringing down wb_dirty.
 	 *
-	 * wb_thresh没有像dirty_thresh那样被视为某种限制因素，原因如下
-	 * -在JBOD设置中，wb_thresh可能波动很大
-	 * -在具有HDD和USB密钥的系统中,USB密钥可能会以某种方式进入状态(wb_dirty >> wb_thresh),这可能是因为wb_dirty起点高,
-	 *  也可能是因为wb_thresh下降得很低.
-	 *  在这种情况下,我们不想在wb_dirty低于wb_thresh之前对USB密钥脏器进行100秒的硬节流.
-	 *  相反，wb_position_ratio（）中的辅助wb控制行将使较脏的任务以某种速率<=（write_bw/2）进行，以降低wb_dirty。
+	 * wb_thresh没有像dirty_thresh那样被视为某种限制因素,原因如下
+	 * - 在JBOD设置中,wb_thresh可能波动很大
+	 * - 在具有HDD和USB密钥的系统中,USB密钥可能会以某种方式进入状态(wb_dirty >> wb_thresh),这可能是因为wb_dirty起点高,
+	 *   也可能是因为wb_thresh下降得很低.在这种情况下,我们不想在wb_dirty低于wb_thresh之前对USB密钥脏器进行100秒的硬节流.
+	 *   相反,wb_position_ratio()中的辅助wb控制行将使较脏的任务以某种rate <= (write_bw/2)进行,以降低wb_dirty.
 	 */
 	dtc->wb_thresh = __wb_calc_thresh(dtc);
 	dtc->wb_bg_thresh = dtc->thresh ?
@@ -1701,7 +1744,9 @@ static void balance_dirty_pages(struct address_space *mapping,
 	unsigned long task_ratelimit;
 	unsigned long dirty_ratelimit;
 	struct backing_dev_info *bdi = wb->bdi;
-	/* BDI_CAP_STRICTLIMIT: Keep number of dirty pages below bdi threshold. */
+	/* BDI_CAP_STRICTLIMIT: Keep number of dirty pages below bdi threshold.
+	 * BDI_CAP_STRICTLIMIT: 将脏页数保持在BDI阈值以下
+	 */
 	bool strictlimit = bdi->capabilities & BDI_CAP_STRICTLIMIT;
 	unsigned long start_time = jiffies;
 
@@ -1721,14 +1766,21 @@ static void balance_dirty_pages(struct address_space *mapping,
 		 * Unstable writes 是某些网络文件系统(如NFS)的一个特性,
 		 * 其中数据可能已写入服务器的写入缓存,但是还没有被冲洗到永久存储.
 		 */
+
+		/* 全局文件脏页  + 网络文件系统 */
 		nr_reclaimable = global_node_page_state(NR_FILE_DIRTY) +
 					global_node_page_state(NR_UNSTABLE_NFS);
+		/* 这里表示全局可变脏的页面数 */
 		gdtc->avail = global_dirtyable_memory();
 		/* 设置drity为nr_reclaimable + 回写的页数 */
 		gdtc->dirty = nr_reclaimable + global_node_page_state(NR_WRITEBACK);
 
+		/* 得到两个脏页阀值background_thresh和dirty_thresh,
+		 * background_thresh脏页阀值与脏页回写内核进程有关(脏页超过阀值就回写),
+		 * dirty_thresh脏页阀值与进程脏页平衡有关(进程会因脏页太多而阻塞)
+		 */
 		domain_dirty_limits(gdtc);
-
+		/* 这里应该是单独bdi回收 */
 		if (unlikely(strictlimit)) {
 			wb_dirty_limits(gdtc);
 
@@ -2019,13 +2071,17 @@ void balance_dirty_pages_ratelimited(struct address_space *mapping)
 
 	/* nr_dirtied_pause：当前task的脏页门限;
 	 * 进程脏页数超过nr_dirtied_pause就要阻塞休眠等待脏页回写
-	 * 进程task结构的nr_dirtied_pause，即进程达到多少脏页时，进程需要执行balance_dirty_pages()进行脏页平衡，测试时current->nr_dirtied_pause有64，32，256
+	 * 进程task结构的nr_dirtied_pause,即进程达到多少脏页时,进程需要执行balance_dirty_pages()进行脏页平衡,测试时current->nr_dirtied_pause有64,32,256
 	 */
 	ratelimit = current->nr_dirtied_pause;
 	/* dirty_exceeded 如果该值设置了，则需要通过降低平衡触发的门限来加速脏页回收
 	 *
 	 * dirty_exceeded = (bdi_dirty > bdi_thresh) &&(nr_dirty > dirty_thresh)和 bdi->dirty_exceeded = 1，如果bdi脏页大于阀值,
 	 * 并且系统脏页数大于阀值则令bdi->dirty_exceeded = 1。
+	 */
+
+	/* 如果已经执行balance_dirty_pages()进行脏页平衡,重新计算ratelimit,会很小(8),这样很容易执行下边的balance_dirty_pages()
+	 * 这里应该说得是wb的dirty_exceeded已经执行过了,则需要通过降低平衡触发的门限来加速脏页回收
 	 */
 	if (wb->dirty_exceeded)
 		ratelimit = min(ratelimit, 32 >> (PAGE_SHIFT - 10));
@@ -2037,18 +2093,18 @@ void balance_dirty_pages_ratelimited(struct address_space *mapping)
 	 * 1000+ tasks, all of them start dirtying pages at exactly the same
 	 * time, hence all honoured too large initial task->nr_dirtied_pause.
 	 *
-	 * 这可以防止一个CPU在不调用balance_dirty_pages（）的情况下积累太多脏页,
-	 * 当有1000多个任务时,可能会发生这种情况,所有任务都在同一时间开始脏页,因此所有任务都接受了太大的初始任务->nr_dirtied_pause。
+	 * 这可以防止一个CPU在不调用balance_dirty_pages()的情况下积累太多脏页,
+	 * 当有1000多个任务时,可能会发生这种情况,所有任务都在同一时间开始脏页,因此所有任务都接受了太大的初始task->nr_dirtied_pause。
 	 */
 
 	/* bdp_ratelimits percpu变量，当前CPU的脏页数
 	 * 在标记page脏页时执行account_page_dirtied()令bdp_ratelimits加1，表示当前cpu的脏页数
 	 */
 	p =  this_cpu_ptr(&bdp_ratelimits);
-	/* 如果当前线程脏页数超过门限值，则肯定会触发下面的回收流程。同时重新计算当前CPU的脏页数 */
+	/* 如果当前线程脏页数超过门限值,则肯定会触发下面的回收流程. 同时重新计算当前CPU的脏页数 */
 	if (unlikely(current->nr_dirtied >= ratelimit))
-		*p = 0; //对per cpu变量bdp_ratelimits变量清0，这表示脏页太多，下边就要执行balance_dirty_pages进行脏页平衡了
-	else if (unlikely(*p >= ratelimit_pages)) {  /* 默认值为32页 */ /* 当前线程的脏页数未超过门限值，但是当前CPU的脏页数超过CPU脏页门限值，则设置门限为0，肯定会触发回收。同时重新计算当前CPU的脏页数 */
+		*p = 0; //对per cpu变量bdp_ratelimits变量清0,这表示脏页太多,下边就要执行balance_dirty_pages进行脏页平衡了
+	else if (unlikely(*p >= ratelimit_pages)) {  /* 默认值为32页 */ /* 当前线程的脏页数未超过门限值,但是当前CPU的脏页数超过CPU脏页门限值,则设置门限为0,肯定会触发回收.同时重新计算当前CPU的脏页数 */
 		*p = 0;
 		ratelimit = 0;
 	}
@@ -2057,7 +2113,7 @@ void balance_dirty_pages_ratelimited(struct address_space *mapping)
 	 * short-lived tasks (eg. gcc invocations in a kernel build) escaping
 	 * the dirty throttling and livelock other long-run dirtiers.
 	 *
-	 * 拾取已退出任务的脏页。这避免了许多短期任务(例如，内核构建中的gcc调用)逃避肮脏的节流和活锁其他长期肮脏的任务.
+	 * 拾取已退出任务的脏页.这避免了许多短期任务(例如,内核build的gcc调用)逃避肮脏的节流和活锁其他长期肮脏的任务.
 	 */
 
 	/* 进程退出时把进程残留的脏页数累加到dirty_throttle_leaks这个per cpu变量 */

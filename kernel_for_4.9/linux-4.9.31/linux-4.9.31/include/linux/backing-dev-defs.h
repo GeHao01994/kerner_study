@@ -103,7 +103,7 @@ struct bdi_writeback {
 	unsigned long bw_time_stamp;	/* last time write bw is updated */
 	unsigned long dirtied_stamp;
 	unsigned long written_stamp;	/* pages written at bw_time_stamp */
-	/* bdi->write_bandwidth, 根据bdi_stat[BDI_WRITTEN], 计算3s内的平均速度. 
+	/* bdi->write_bandwidth, 根据bdi_stat[BDI_WRITTEN],计算3s内的平均速度. 
 	 * 但一般都是200ms就更新,所以它应该比较均衡.
 	 */
 	unsigned long write_bandwidth;	/* the estimated write bandwidth */
@@ -122,6 +122,9 @@ struct bdi_writeback {
 	unsigned long balanced_dirty_ratelimit;
 
 	struct fprop_local_percpu completions;
+	/* dirty_exceeded: 全局的脏页数超过门限或者该bdi的脏页数超过门限;
+	 * dirty_exceeded = (bdi_dirty > bdi_thresh) && ((nr_dirty > dirty_thresh) || strictlimit);
+	 */
 	int dirty_exceeded;
 
 	spinlock_t work_lock;		/* protects work_list & dwork scheduling */
