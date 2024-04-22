@@ -932,6 +932,14 @@ out:
  * NOTE: total_mapcount should not be relied upon by the caller if
  * reuse_swap_page() returns false, but it may be always overwritten
  * (see the other implementation for CONFIG_SWAP=n).
+ *
+ * 如果没有其他引用,我们可以在没有COW的情况下写入一个匿名页面.
+ * 副作用是,释放它的swap: 因为磁盘上的旧内容永远不会被读取,以后再找回来写新内容只会浪费集群时间.
+ *
+ * 注意: 如果reuse_swap_page()返回false,调用方不应依赖total_mapcount,但它可能总是被覆盖(请参阅CONFIG_swap=n的其他实现).
+ *
+ * reuse_swap_page函数通过page_trans_huge_mapcount计数到变量count中,
+ * 并且返回“count是否小于等于1”. count为1,表示只有一个进程映射了找个页面
  */
 bool reuse_swap_page(struct page *page, int *total_mapcount)
 {

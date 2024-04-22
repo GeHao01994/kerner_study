@@ -2575,14 +2575,26 @@ static int wp_page_shared(struct fault_env *fe, pte_t orig_pte,
  * We enter with non-exclusive mmap_sem (to exclude vma changes,
  * but allow concurrent faults), with pte both mapped and locked.
  * We return with mmap_sem still held, but pte unmapped and unlocked.
+ *
+ * 当用户试图写入共享页面时,此例程处理present页面.
+ * 这是通过将页面复制到新地址并递减旧页面的共享页面计数器来完成的.
+ *
+ * 请注意,此例程假定protection检查已由调用方完成(在大多数情况下为low-level 页面故障例程).
+ * 因此,一旦我们完成了任何必要的COW,我们就可以安全地将其标记为可写.
+ *
+ * 在这一点上,我们还将页面标记为脏的,即使只有在实际写入时页面才会更改.这避免了竞争,潜在地提高效率.
+ *
+ * 我们以非独占的mmap_sem进入(以排除vma更改,但允许并发fault),pte同时映射和锁定.
+ * 我们带着mmap_sem返回,但pte未映射并解锁。
  */
 static int do_wp_page(struct fault_env *fe, pte_t orig_pte)
 	__releases(fe->ptl)
 {
 	struct vm_area_struct *vma = fe->vma;
 	struct page *old_page;
-
+	/* 首先通过vm_normal_page函数查找缺页异常地址addr对应的struct page数据结构,返回normal mapping页面. */
 	old_page = vm_normal_page(vma, fe->address, orig_pte);
+	/* 如果vm_normal_page函数返回page指针为NULL,说明这是个special mapping的页面 */
 	if (!old_page) {
 		/*
 		 * VM_MIXEDMAP !pfn_valid() case, or VM_SOFTDIRTY clear on a
@@ -2590,6 +2602,11 @@ static int do_wp_page(struct fault_env *fe, pte_t orig_pte)
 		 *
 		 * We should not cow pages in a shared writeable mapping.
 		 * Just mark the pages writable and/or call ops->pfn_mkwrite.
+		 *
+		 * VM_MIXEDMAP !pfn_valid()情况,或者VM_SOFTDIRTY在一个VM_PFMMAP VMA中清除
+		 *
+		 * 我们不应该在共享的可写映射中cow page.
+		 * 只需将页面标记为可写 and/or 调用ops->pfn_mkwrite.
 		 */
 		if ((vma->vm_flags & (VM_WRITE|VM_SHARED)) ==
 				     (VM_WRITE|VM_SHARED))
@@ -2602,15 +2619,33 @@ static int do_wp_page(struct fault_env *fe, pte_t orig_pte)
 	/*
 	 * Take out anonymous pages first, anonymous shared vmas are
 	 * not dirty accountable.
+	 *
+	 * 先去掉匿名页面,匿名共享的vma不会被追究责任.
 	 */
+
+	/* 判断当前页面是否为不属于KSM的匿名页面.
+	 * 利用page->mapping成员的最低2个比特位来判断匿名页面使用PageAnon宏*/
 	if (PageAnon(old_page) && !PageKsm(old_page)) {
 		int total_mapcount;
+		/* trylock_page(old_page)函数判断当前old_page是否已经加锁,
+		 * trylock_pages返回false,说明这个页面已经被别的进程加锁,所以第38行代码会使用lock_page等待其他进程释放了锁才有机会获取锁
+		 */
 		if (!trylock_page(old_page)) {
+			/* page->_refcount +1 */
 			get_page(old_page);
+			/*
+			 * #define pte_unmap_unlock(pte, ptl)	do {		\
+			 * spin_unlock(ptl);				\
+			 * pte_unmap(pte);					\
+			 * } while (0)
+			 */
 			pte_unmap_unlock(fe->pte, fe->ptl);
+			/* 等到old_page的锁直到获取到该锁 */
 			lock_page(old_page);
+			/* 拿到pte,并且锁上fe->ptl */
 			fe->pte = pte_offset_map_lock(vma->vm_mm, fe->pmd,
 					fe->address, &fe->ptl);
+			/* 然后判断PTE是否发生变化,若发生变化,就退出异常处理 */
 			if (!pte_same(*fe->pte, orig_pte)) {
 				unlock_page(old_page);
 				pte_unmap_unlock(fe->pte, fe->ptl);

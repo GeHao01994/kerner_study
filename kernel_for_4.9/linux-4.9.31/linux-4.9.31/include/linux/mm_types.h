@@ -92,6 +92,43 @@ struct page {
 				 * stored here for pages that are never mapped,
 				 * in which case the value MUST BE <= -2.
 				 * See page-flags.h for more details.
+				 *
+				 * 在mms中映射的ptes计数,以显示页面何时映射并限制反向映射搜索
+				 *
+				 * 关于页面类型的额外信息可以被存储在这里用于从未被映射的页面，
+				 * 在这种情况下,该值必须 <= -2.
+				 * 有关详细信息,请参阅page-flags.h.
+				 *
+				 * _mapcount引用计数表示这个页面被进程映射的个数,即已经映射了多少个用户pte页表.
+				 * 在32位Linux内核中,每个用户进程都拥有3GB的虚拟地址空间和一份独立的页表,
+				 * 所以有可能出现多个用户进程地址空间同时映射到一个物理页面的情况,
+				 * RMAP反向映射系统就是李咏这个特性来实现的.
+				 * _mapcount引用计数主要用于RMAP反向映射系统中.
+				 * _mapcount == -1,表示没有pte映射到页面中
+				 * _mapcount = 0 表示只有父进程映射了页面.匿名页面刚分配时,_mapcount引用计数初始化为0.
+				 * 例如do_anonymous_page产生的匿名页面通过page_add_new_anon_rmap添加到反向映射rmap系统中时,
+				 * 会设置_mapcount为0,表明匿名页面当前只有父进程的pte映射了页面
+				 * handle_mm_fault
+				 *     __handle_mm_fault
+				 *         handle_pte_fault
+				 *             do_anonymous_page
+				 *                 page_add_new_anon_rmap
+				 *                     atomic_set(&page->_mapcount, 0)
+				 * _mapcount > 0,表示除了父进程外还有其他进程映射了这个页面.
+				 * 同样以子进程被创建时共享父进程地址空间为例,设置父进程的pte页表项内容到子进程中并增加该页面的_mapcount计数
+				 * do_fork
+				 *     copy_process
+				 *         copy_mm
+				 *             dup_mm
+				 *                 dup_mmap
+				 *                     copy_page_range
+				 *                             copy_p4d_range
+				 *                                 copy_pud_range
+				 *                                     copy_pmd_range
+				 *                                         copy_pte_range
+				 *                                             copy_one_pte
+				 *                                                 page_dup_rmap
+				 *                                                     atomic_inc(compound ? compound_mapcount_ptr(page) : &page->_mapcount)
 				 */
 				atomic_t _mapcount;
 				/* 用于SLAB时描述当前SLAB已经使用的对象数,然后通过它也可以得到下一次分配的对象在freelist的下标 */
@@ -106,6 +143,58 @@ struct page {
 			/*
 			 * Usage count, *USE WRAPPER FUNCTION* when manual
 			 * accounting. See page_ref.h
+			 */
+			/* _refcount表示内核中的引用该页面的次数,当_count的值为0时,表示该page页面为空闲或即将要被释放的页面.
+			 * 当_refcount的值大于0时,表示该page页面已经被分配且内核正在使用,暂时不会被释放
+			 * get_page首先利用VM_BUG_ON_PAGE判断页面的_count的值不能小于等于0,
+			 * 这是因为页面伙伴分配系统分配好的页面初始值为1,然后直接使用atomic_inc函数原子地增加引用计数
+			 *
+			 * put_page首先也会使用VM_BUG_ON_PAGE判断_refcount计数不能为0,如果为0,说明该页面已经被释放了.
+			 * 如果_refcount计数减1之后等于0,就会调用__put_single_page来释放这个页面
+			 *
+			 * _refcount引用计数通常在内核中用于跟踪page页面的使用情况,常见的用法归纳总结如下.
+			 * (1) 分配页面时_refcount引用计数会变成1.分配页面函数alloc_pages在成功分配页面后,
+			 *     _refcount引用计数应该为0,这里使用VM_BUG_ON_PAGE做判断,然后再设置这些页面的_refcount引用计数为1,
+			 *     见set_page_count函数.
+			 *     alloc_pages
+			 *         __alloc_pages_node
+			 *             get_page_from_freelist
+			 *                 prep_new_page
+			 *                     post_alloc_hook
+			 *                         set_page_refcounted
+			 *                             set_page_count(page, 1);
+			 * (2) 加入LRU链表时,page页面会被kswapd内核线程使用,因此_count引用计数会加1.
+			 *     以malloc为用户程序分配内存为例,发生缺页中断后do_anonymous_page函数成功分配出来一个页面,
+			 *     在设置硬件pte表项之前,调用lru_cache_add函数把匿名页面添加到LRU链表中,在这个过程中,使用page_cache_get宏来增加count引用计数.
+			 *     handle_mm_fault
+			 *         __handle_mm_fault
+			 *             handle_pte_fault
+			 *                 do_anonymous_page
+			 *                     lru_cache_add_active_or_unevictable
+			 *                         lru_cache_add
+			 *                             get_page
+			 *                                 page_ref_inc(page)
+			 * (3) 被映射到其他用户进程pte时,_count引用计数会加1.
+			 *     例如,子进程在被创建时共享父进程的地址空间,设置父进程的pte页表项内容到子进程中并增加该页面的_refcount计数.
+			 *     do_fork
+			 *         copy_process
+			 *             copy_mm
+			 *                 dup_mm
+			 *                     dup_mmap
+			 *                         copy_page_range
+			 *                             copy_p4d_range
+			 *                                 copy_pud_range
+			 *                                     copy_pmd_range
+			 *                                         copy_pte_range
+			 *                                             copy_one_pte
+			 *                                                 get_page
+			 * (4) 页面的private中有私有数据
+			 *     对于PG_swapable的页面,__add_to_swap_cache函数会增加_refcount引用计数
+			 *     对于PG_private的页面,主要是在block模块中buffer_head中使用,例如buffer_migrate_page函数中会增加_refcount引用计数
+			 * (5) 内核对页面进行操作等关键路径上也会使_refcount引用计数加1.
+			 *     例如内核的follo_page函数和get_user_pages的函数.
+			 *     以follow_page为例,调用者通常需要设置FOLL_GET标志位来使其增加_refcount引用计数.
+			 *     例如KSN中获取可合并的页面函数get_mergeable_page,另外一个例子是Direct IO,见write_protect_page函数
 			 */
 			atomic_t _refcount;
 		};

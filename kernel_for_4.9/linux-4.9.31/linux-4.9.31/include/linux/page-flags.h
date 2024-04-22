@@ -88,12 +88,18 @@ enum pageflags {
 	PG_active,
 	/* 该page属于slab分配器 */
 	PG_slab,
+	/* 页面所有者使用,如果是pagecache页面,文件系统可能使用 */
 	PG_owner_priv_1,	/* Owner use. If pagecache, fs may use*/
+	/* 与体系结构相关的页面状态位 */
 	PG_arch_1,
-	/* 设置该标志，防止该page被交换到swap。*/
+	/* 设置该标志,防止该page被交换到swap */
 	PG_reserved,
 	/* 页描述符中的page->private保存有数据 */
+	/* 表示该页是有效的,当page->private包含有效值时会设置该标志位.
+	 * 如果页面是pagecache,那么包含一些文件系统相关的数据信息
+	 */
 	PG_private,		/* If pagecache, has fs-private data */
+	/* 如果是pagecache,可能包含fs aux data */
 	PG_private_2,		/* If pagecache, has fs aux data */
 	/* page中的数据正在被回写到后备存储器。*/
 	PG_writeback,		/* Page is under writeback */
@@ -387,6 +393,25 @@ PAGEFLAG(Idle, idle, PF_ANY)
  * Please note that, confusingly, "page_mapping" refers to the inode
  * address_space which maps the page from disk; whereas "page_mapped"
  * refers to user virtual address space into which the page is mapped.
+ *
+ * 在映射到用户虚拟内存区域的匿名页面上,page->mapping 指向其anon_vm,而不是一个struct address_space;
+ * 其中设置了PAGE_APPING_ANON位来区分它. 请参见rmap.h.
+ *
+ * 在VM_MERGEABLE区域中的匿名页面上,如果CONFIG_KSM被启用,则可以将PAGE_MAPPING_MOVABLE位与PAGE_MAPPING_ANON位一起设置;
+ * 然后page->mapping指向的不是anon_vm,而是KSM与合并页面关联的私有结构. 参见ksm.h.
+ *
+ * 不带PAGE_MAPPING_ANON的PAGE_MAPPING_KSM用于non-lru movable的页面,然后page->mapping指向struct address_space.
+ *
+ * 请注意,令人困惑的是,"page_mapping"指的是从磁盘映射页面的索引节点地址空间;
+ * 而"page_mapped"是指页面被映射到的用户虚拟地址空间.
+ */
+
+/* struct page数据结构定义中,mapping成员表示页面所指向的地址空间(address_space).
+ * 内核中的地址空间通常有两个不同的地址空间,一个用于文件映射页面,例如在读取文件时,
+ * 地址空间用于将文件的内容数据与装载数据的存储介质区关联起来;
+ * 另一个是匿名映射.
+ * 内核使用了一个简单直接的方式实现了“一个指针,两种用途”,mapping指针地址的最低两位用于判断是否指向匿名页面或KSM页面的地址空间,
+ * 如果是匿名页面,那么mapping指向匿名页面的地址空间数据结构struct anon_vma
  */
 #define PAGE_MAPPING_ANON	0x1
 #define PAGE_MAPPING_MOVABLE	0x2
