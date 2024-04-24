@@ -427,7 +427,9 @@ static inline pgoff_t linear_page_index(struct vm_area_struct *vma,
 	pgoff_t pgoff;
 	if (unlikely(is_vm_hugetlb_page(vma)))
 		return linear_hugepage_index(vma, address);
+	/* 算出address相对于vma->vm_start的页面偏移 */
 	pgoff = (address - vma->vm_start) >> PAGE_SHIFT;
+	/* 加上vma->vm_pgoff就是address地址空间的偏移 */
 	pgoff += vma->vm_pgoff;
 	return pgoff;
 }

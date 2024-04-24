@@ -23,9 +23,30 @@
  * After unlinking the last vma on the list, we must garbage collect
  * the anon_vma object itself: we're guaranteed no page can be
  * pointing to this anon_vma once its vma list is empty.
+ *
+ * anon_vma是私有"related" vma列表的头,用于扫描是否需要取消映射指向该anon_vm的匿名页面:
+ * 列表上的vma将依赖于forking或者拆分,
+ *
+ * 由于vma是在拆分和合并时出现和消失的(特别是在mprotect中),因此匿名页面的映射字段不能直接指向vma: 相反,它指向一个anon_vm,
+ * 相关的vma可以很容易地在其列表上链接或取消链接。
+ *
+ * 在取消列表上最后一个vma的链接后,我们必须对anon_vm对象本身进行垃圾收集: 我们保证一旦其vma列表为空,就没有页面可以指向该anon_vm.
+ *
+ * 用户进程在使用虚拟内存过程中,从虚拟内存页面映射到物理内存页面,PTE页表项保留着这个记录,
+ * page 数据结构中的_mapcount成员记录有多少个用户PTE页表项映射了物理页面.
+ * 用户PTE页表项是指用户进程地址空间和物理页面建立映射的PTE页表项,不包括内核地址空间映射物理页面产生的PTE页表项.
+ * 有的页面需要被迁移,有的页面长时间不适用需要被交换到磁盘.
+ * 在交换之前,必须找出哪些进程使用这个页面,然后断开这些映射的PTE.
+ * 一个物理页面可以同时被多个进程的虚拟内存映射,一个虚拟页面同时只有有一个物理页面与之映射.
+ */
+
+/* RMAP反向映射系统中有两个重要的数据结构,一个是anon_vma,简称AV;
+ * 另一个是anon_vma_chain,简称AVC.
  */
 struct anon_vma {
+	/* 指向anon_vma数据结构中的根节点 */
 	struct anon_vma *root;		/* Root of this anon_vma tree */
+	/* 保护anon_vma中链表的读写信号量 */
 	struct rw_semaphore rwsem;	/* W: modification, R: walking the list */
 	/*
 	 * The refcount is taken on an anon_vma when there is no
@@ -33,7 +54,12 @@ struct anon_vma {
 	 * the duration of the operation. A caller that takes
 	 * the reference is responsible for clearing up the
 	 * anon_vma if they are the last user on release
+	 *
+	 * 当不能保证页表的vma在操作期间存在时,refcount是在anon_vm上获取的.
+	 * 如果调用方是release时的最后一个用户,则接受引用的调用方负责清除anon_vm.
 	 */
+
+	/* 引用计数 */
 	atomic_t refcount;
 
 	/*
@@ -41,9 +67,14 @@ struct anon_vma {
 	 *
 	 * This counter is used for making decision about reusing anon_vma
 	 * instead of forking new one. See comments in function anon_vma_clone.
+	 *
+	 * 指向此anon_vm的子anon_vm和vma的计数.
+	 *
+	 * 此计数器用于决定是否重用anon_vm,而不是forking新的.
+	 * 请参见函数anon_vma_clone中的注释.
 	 */
 	unsigned degree;
-
+	/* 指向父anon_vma数据结构 */
 	struct anon_vma *parent;	/* Parent of this anon_vma */
 
 	/*
@@ -53,7 +84,13 @@ struct anon_vma {
 	 * to be sure to see a valid next pointer. The LSB bit itself
 	 * is serialized by a system wide lock only visible to
 	 * mm_take_all_locks() (mm_all_locks_mutex).
+	 *
+	 * 注意: rb_root.rb_node的LSB是通过mm_take_all_locks()_after_ 获取上述锁来设置的.
+	 * 因此,rb_root必须在获取上述锁之后才能进行读/写以确保看到有效的下一个指针.
+	 * LSB位本身由仅对mm_take_all_locks()可见的系统范围锁(mm_all_lacks_mutex)序列化.
 	 */
+
+	/* 红黑树根节点. anon_vma内部有一课红黑树 */
 	struct rb_root rb_root;	/* Interval tree of private "related" vmas */
 };
 
@@ -69,10 +106,21 @@ struct anon_vma {
  * all the anon_vmas associated with this VMA.
  * The "rb" field indexes on an interval tree the anon_vma_chains
  * which link all the VMAs associated with this anon_vma.
+ *
+ * fork的copy-on-write 语义意味着一个anon_vm可以与多个进程相关联.此外,每个子进程都将有自己的anon_vm,在其中实例化该进程的新页面.
+ *
+ * 该结构允许我们找到与VMA相关联的anon_vm,或与anon_vm相关联的VMA.
+ * "same_vma" 列表包含链接与此vma关联的所有anon_vma的anon_vma_chains.
+ * "rb"字段在区间树上索引anon_vma_chains,该链链接与该anon_vma相关联的所有vma.
  */
+
+/* struct anon_vma_chain数据结构是连接父子进程中的枢纽,定义如下: */
 struct anon_vma_chain {
+	/* 指向VMA,可以指向父进程的VMA,也可以指向子进程的VMA,具体情况需要具体分析 */
 	struct vm_area_struct *vma;
+	/* anon_vma: 指向anon_vam数据结构,可以指向父进程的anon_vma数据结构,也可以指向子进程的anon_vma数据结构,具体问题需要具体分析 */
 	struct anon_vma *anon_vma;
+	/* 链表节点,通常把anon_vma_chain添加到anon_vma->rb_root的红黑树中 */
 	struct list_head same_vma;   /* locked by mmap_sem & page_table_lock */
 	struct rb_node rb;			/* locked by anon_vma->rwsem */
 	unsigned long rb_subtree_last;

@@ -1403,9 +1403,20 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
  * there is a vm_ops->close() function, because that indicates that the
  * driver is doing some kind of reference counting. But that doesn't
  * really matter for the anon_vma sharing case.
+ *
+ * 粗略的兼容性检查,快速查看是否值得考虑共享anon_vm.
+ *
+ * 它们需要具有相同的vm_file,并且flags只能在mprotect可能更改的方面有所不同.
+ *
+ * 注意! 我们共享一个anon_vma的事实并不意味着我们可以合并两个vma.
+ * 例如,如果有vm_ops->close()函数,我们拒绝合并一个vma,因为这表明驱动程序正在进行某种引用计数.但这对anon_vm共享案例来说并不重要.
  */
 static int anon_vma_compatible(struct vm_area_struct *a, struct vm_area_struct *b)
 {
+	/* 这里需要a和b是连续的,a和b的内存policy也必须相同,具有相同的vm_file
+	 * a和b的vm_flags的VM_READ | VM_WRITE | VM_EXEC | VM_SOFTDIRTY要相同
+	 * vm_pgoff也要相邻
+	 */
 	return a->vm_end == b->vm_start &&
 		mpol_equal(vma_policy(a), vma_policy(b)) &&
 		a->vm_file == b->vm_file &&
@@ -1434,12 +1445,23 @@ static int anon_vma_compatible(struct vm_area_struct *a, struct vm_area_struct *
  * We also make sure that the two vma's are compatible (adjacent,
  * and with the same memory policies). That's all stable, even with just
  * a read lock on the mm_sem.
+ *
+ * 做一些基本的健全性检查,看看我们是否可以重用“old”中的anon_vm.
+ * 'a'/'b' vma按VM顺序排列.其中一个将与“old”相同,另一个将是试图共享anon_vm的新vma.
+ *
+ * 注意! 这是在mm_sem为读取而拿到的情况下运行的,因此'old'的anon_vma可能同时处于另一个试图合并_that_的页面错误设置过程中.
+ * 但没关系: 如果它正在被设置,这自动意味着它将是一个可以接受合并的单例,所以我们可以乐观地完成所有这些.
+ * 但我们执行READ_ONCE()是为了确保永远不会重新加载指针.
+ *
+ * IOW: anon_vma_chain上的“list_is_singular()”测试只对'stable anon_vma'情况重要(即,我们想避免的是返回一个由于经过fork而"complex"的anon_vma).
+ *
+ * 我们还确保这两个vma是兼容的(相邻的,并且具有相同的内存策略).即使只有mm_sem上的读锁,这一切都是稳定的.
  */
 static struct anon_vma *reusable_anon_vma(struct vm_area_struct *old, struct vm_area_struct *a, struct vm_area_struct *b)
 {
 	if (anon_vma_compatible(a, b)) {
 		struct anon_vma *anon_vma = READ_ONCE(old->anon_vma);
-
+		/* list_is_singular 表示单一的,也就是没有经过fork的,也就是注释说得那种情况 */
 		if (anon_vma && list_is_singular(&old->anon_vma_chain))
 			return anon_vma;
 	}
@@ -1453,24 +1475,35 @@ static struct anon_vma *reusable_anon_vma(struct vm_area_struct *old, struct vm_
  * sequence of mprotects and faults may otherwise lead to distinct
  * anon_vmas being allocated, preventing vma merge in subsequent
  * mprotect.
+ *
+ * find_mergeable_anon_vma由anon_vma_prepare使用,在它开始分配新的anon_vma之前,检查相邻的vma是否有合适的anon_vm.
+ * 它进行检查是因为mprotects和faults的重复序列可能会导致不同的正在分配anon_vm，从而阻止vma在随后的mprotect中合并.
  */
 struct anon_vma *find_mergeable_anon_vma(struct vm_area_struct *vma)
 {
 	struct anon_vma *anon_vma;
 	struct vm_area_struct *near;
 
+	/* 先找到后续的vma */
 	near = vma->vm_next;
 	if (!near)
 		goto try_prev;
 
+	/* 看看能否复用后继的anon_vma
+	 * 如果能复用,那就返回后继的anon_vma
+	 */
 	anon_vma = reusable_anon_vma(near, vma, near);
 	if (anon_vma)
 		return anon_vma;
 try_prev:
+	/* 这里就是去得到前继的vma */
 	near = vma->vm_prev;
 	if (!near)
 		goto none;
 
+	/* 看看能否复用前继的anon_vma
+	 * 如果能复用,那就返回前继的anon_vma
+	 */
 	anon_vma = reusable_anon_vma(near, near, vma);
 	if (anon_vma)
 		return anon_vma;
@@ -1482,6 +1515,10 @@ none:
 	 * or lead to too many vmas hanging off the same anon_vma.
 	 * We're trying to allow mprotect remerging later on,
 	 * not trying to minimize memory used for anon_vmas.
+	 *
+	 * 没有绝对的必要只关注接触的邻居: 我们可以在更远的地方搜索“compatible”的anon_vma.
+	 * 但这可能只是浪费时间搜索,或者导致太多vma挂在同一个anon_vma上.
+	 * 我们稍后将尝试允许mprotect重新合并,而不是尝试最小化用于anon_vma的内存
 	 */
 	return NULL;
 }
