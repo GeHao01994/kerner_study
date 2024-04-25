@@ -197,16 +197,31 @@ enum node_stat_item {
  *
  * This has to be kept in sync with the statistics in zone_stat_item
  * above and the descriptions in vmstat_text in mm/vmstat.c
+ *
+ * 我们对代码中不同位置的LRU列表进行算术运算,因此重要的是保持数组中的活动列表LRU_ACTIVE高于相应的非活动列表,
+ * 并保持*_FILE列表LRU_FILE高于相应的_ANON列表.
+ *
+ * 这必须与上面zone_stat_item中的统计信息以及mm/vmstat.c中vmstat_text中的描述保持同步
  */
 #define LRU_BASE 0
 #define LRU_ACTIVE 1
 #define LRU_FILE 2
 
+/* LRU是least recently used(最近最少使用)的缩写,LRU假定最近不适用的页在较短的时间内也不会频繁使用.
+ * 在内存不足时,这些页面将成为被换出的候选者.
+ * 内核使用双向链表来定义LRU链表,并且根据页面的类型分为LRU_ANON和LRU_FILE.
+ * 每种类型根据页面的活跃性分为活跃LRU和不活跃LRU,所以内核中一共有如下5个LRU链表.
+ */
 enum lru_list {
+	/* 不活跃匿名页面链表 */
 	LRU_INACTIVE_ANON = LRU_BASE,
+	/* 活跃匿名页面链表 */
 	LRU_ACTIVE_ANON = LRU_BASE + LRU_ACTIVE,
+	/* 不活跃文件映射页面链表 */
 	LRU_INACTIVE_FILE = LRU_BASE + LRU_FILE,
+	/* 活跃文件映射页面链表 */
 	LRU_ACTIVE_FILE = LRU_BASE + LRU_FILE + LRU_ACTIVE,
+	/* 不可回收页面链表 */
 	LRU_UNEVICTABLE,
 	NR_LRU_LISTS
 };

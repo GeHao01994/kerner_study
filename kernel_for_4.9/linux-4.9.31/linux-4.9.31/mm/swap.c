@@ -426,9 +426,12 @@ EXPORT_SYMBOL(mark_page_accessed);
 
 static void __lru_cache_add(struct page *page)
 {
+	/* 拿到本地CPU的lru_add_pvec */
 	struct pagevec *pvec = &get_cpu_var(lru_add_pvec);
 
+	/* 将该page的_refcount + 1 */
 	get_page(page);
+	/* pagevec_add就是把该page添加到向量pagevec中,如果没有空间了,那么就调用__pagevec_lru_add函数把原有的page加入到LRU链表中 */
 	if (!pagevec_add(pvec, page) || PageCompound(page))
 		__pagevec_lru_add(pvec);
 	put_cpu_var(lru_add_pvec);
@@ -975,6 +978,9 @@ static void __pagevec_lru_add_fn(struct page *page, struct lruvec *lruvec,
 /*
  * Add the passed pages to the LRU, then drop the caller's refcount
  * on them.  Reinitialises the caller's pagevec.
+ *
+ * 将传递的页面添加到LRU,然后将调用方的refcount丢弃在这.
+ * 重新初始化调用者的pagevec。
  */
 void __pagevec_lru_add(struct pagevec *pvec)
 {

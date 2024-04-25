@@ -2134,18 +2134,35 @@ int total_mapcount(struct page *page)
  * page_trans_huge_mapcount() in the copy-on-write faults where we
  * need full accuracy to avoid breaking page pinning, because
  * page_trans_huge_mapcount() is slower than page_mapcount().
+ *
+ * 这可以准确地计算一个transparent hugepage有多少映射(不像page_mapcount()那样不完全准确).
+ * 这种完全的准确性主要是为了知道copy-on-write faults 是否可以重用页面并更改映射为读写而不是复制它们.
+ * 同时,这也会返回total_mapcount.
+ *
+ * 该函数返回任何一个子页面具有的最高mapcount.如果返回值为1,即使不同的进程映射transparent hugepage的不同子页面,它们也可以重用它,因为每个进程都在重用不同的子页面.
+ *
+ * total_mapcount计算的是子页面的所有虚拟映射.如果total_mapcount等于“1”,则它会告诉调用方所有映射都属于同一个“mm”.而transparent hugepage的anon_vma可以变成本地vma->anon_vm
+ * 因为没有其他进程可以映射任何子页.
+ *
+ * 将page_mapcount()替换为page_trans_huge_mapcount()会更准确,但是我们只在copy-on-write fault 中使用page_trans_huge_mapount,我们需要完全准确地避免破坏页面固定,
+ * 因为page_trans_huge_mapcount()比page_mapcount()慢
  */
 int page_trans_huge_mapcount(struct page *page, int *total_mapcount)
 {
 	int i, ret, _total_mapcount, mapcount;
 
 	/* hugetlbfs shouldn't call it */
+	/* hugetlbfs不应该调用它  */
 	VM_BUG_ON_PAGE(PageHuge(page), page);
 
+	/* 如果不是THP的页面 */
 	if (likely(!PageTransCompound(page))) {
+		/* 那么mapcount等于page->_mapcount + 1 */
 		mapcount = atomic_read(&page->_mapcount) + 1;
+		/* 将mapcount的值赋值给total_mapcount */
 		if (total_mapcount)
 			*total_mapcount = mapcount;
+		/* 返回mapcount */
 		return mapcount;
 	}
 

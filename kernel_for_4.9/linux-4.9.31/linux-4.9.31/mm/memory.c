@@ -2289,6 +2289,11 @@ static int do_page_mkwrite(struct vm_area_struct *vma, struct page *page,
  * or due to us being the last reference standing to the page. In either
  * case, all we need to do here is to mark the page as writable and update
  * any related book-keeping.
+ *
+ * 处理可在当前vma中重用的页面的写入页面错误
+ *
+ * 这可能是由于映射带有VM_SHARED标志,也可能是由于我们是页面的最后一个引用.
+ * 无论哪种情况,我们在这里所需要做的就是将页面标记为可写,并更新任何相关的记账.
  */
 static inline int wp_page_reuse(struct fault_env *fe, pte_t orig_pte,
 			struct page *page, int page_mkwrite, int dirty_shared)
@@ -2300,17 +2305,31 @@ static inline int wp_page_reuse(struct fault_env *fe, pte_t orig_pte,
 	 * Clear the pages cpupid information as the existing
 	 * information potentially belongs to a now completely
 	 * unrelated process.
+	 *
+	 * 清除页面cpupid信息.因为现有信息可能属于现在完全不相关的进程.
 	 */
 	if (page)
 		page_cpupid_xchg_last(page, (1 << LAST_CPUPID_SHIFT) - 1);
 
 	flush_cache_page(vma, fe->address, pte_pfn(orig_pte));
+	/* pte_mkyoung设置pte的访问位,x86处理器是_PAGE_ACCESSED,
+	 * ARM32处理器中是Linux版本的页面项中的L_PTE_YOUNG位,
+	 * ARM64处理器是PTE_AF.
+	 */
 	entry = pte_mkyoung(orig_pte);
+	/* pte_mkdirty设置pte中的DIRTY位.
+	 * maybe_mkwrite根据VMA属性是否具有可写属性来设置pte中的可写标志位,ARM32处理器清空linux版本页表的L_PTE_RDONLY位,ARM64处理器设置PTE_WRITE位 */
 	entry = maybe_mkwrite(pte_mkdirty(entry), vma);
+	/* ptep_set_access_flags把PTE entry设置到硬件的页表项pte中 */
 	if (ptep_set_access_flags(vma, fe->address, fe->pte, entry, 1))
 		update_mmu_cache(vma, fe->address, fe->pte);
 	pte_unmap_unlock(fe->pte, fe->ptl);
 
+	/* 这里用于处理drity_shared,有如下两种情况不处理页面的DIRTY情况
+	 * 1、可写且共享的special mapping页面
+	 * 2、最多只有一个进程映射的匿名页面
+	 * 因为special mapping的页面不参与系统的回写操作,另外只有一个进程匿名页面也只设置pte的可写标志位
+	 */
 	if (dirty_shared) {
 		struct address_space *mapping;
 		int dirtied;
@@ -2318,6 +2337,7 @@ static inline int wp_page_reuse(struct fault_env *fe, pte_t orig_pte,
 		if (!page_mkwrite)
 			lock_page(page);
 
+		/* 设置page的DIRTY状态,然后调用balance_dirty_pages_ratelimited 函数去平衡并回写一部分脏页 */
 		dirtied = set_page_dirty(page);
 		VM_BUG_ON_PAGE(PageAnon(page), page);
 		mapping = page->mapping;
@@ -2354,6 +2374,18 @@ static inline int wp_page_reuse(struct fault_env *fe, pte_t orig_pte,
  *   relevant references. This includes dropping the reference the page-table
  *   held to the old page, as well as updating the rmap.
  * - In any case, unlock the PTL and drop the reference we took to the old page.
+ *
+ * 处理我们实际需要复制到新页面的页面的情况.
+ *
+ * 在mmap_sem被锁定并且引用了旧页面的情况下调用,但没有拿到ptl的锁
+ *
+ * 高级逻辑流程:
+ *
+ * - 分配一个页面,将旧页面的内容复制到新页面。
+ * - 处理记账和会计 - cgroups、mmu-notifiers等.
+ * - 拿到PTL. 如果pte已更改,请退出并释放分配的页面
+ * - 如果pte仍然是我们记忆中的方式,请更新页面表和所有相关引用.这包括删除页面表对旧页面的引用,以及更新rmap.
+ * - 在任何情况下,请解锁PTL并将我们释放旧页面到reference
  */
 static int wp_page_copy(struct fault_env *fe, pte_t orig_pte,
 		struct page *old_page)
@@ -2363,34 +2395,45 @@ static int wp_page_copy(struct fault_env *fe, pte_t orig_pte,
 	struct page *new_page = NULL;
 	pte_t entry;
 	int page_copied = 0;
+	/* 拿到fault 地址的页面起始地址 */
 	const unsigned long mmun_start = fe->address & PAGE_MASK;
+	/* 拿到这块page的结束地址 */
 	const unsigned long mmun_end = mmun_start + PAGE_SIZE;
 	struct mem_cgroup *memcg;
 
+	/* 分配一个anon_vma到相应的vma中 */
 	if (unlikely(anon_vma_prepare(vma)))
 		goto oom;
 
+	/* 如果pte为系统零页面,调用alloc_zeroed_user_highpage_movable分配一个内容全是0的页面,分配掩码是__GFP_MOVABLE | GFP_HIGHUSER
+	 * 也就是优先分配高端内存HIGHMEM
+	 */
 	if (is_zero_pfn(pte_pfn(orig_pte))) {
 		new_page = alloc_zeroed_user_highpage_movable(vma, fe->address);
 		if (!new_page)
 			goto oom;
-	} else {
+	} else { /* 如果不是系统零页面,使用alloc_page_vma来分配一个页面 */
 		new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma,
 				fe->address);
 		if (!new_page)
 			goto oom;
+		/* 把old_page页面的内容复制到这个新的页面new_page中 */
 		cow_user_page(new_page, old_page, fe->address, vma);
 	}
 
 	if (mem_cgroup_try_charge(new_page, mm, GFP_KERNEL, &memcg, false))
 		goto oom_free_new;
 
+	/* 设置new_page的PG_uptodate,表示内容有效 */
 	__SetPageUptodate(new_page);
 
 	mmu_notifier_invalidate_range_start(mm, mmun_start, mmun_end);
 
 	/*
 	 * Re-check the pte - we dropped the lock
+	 */
+	/* 重新读取pte,并且判断pte的内容是否被修改过.
+	 * 如果old_page是文件映射页面,那么需要增加系统匿名页面的计数且减少一个文件映射页面计数,因为刚才新建了一个匿名页面
 	 */
 	fe->pte = pte_offset_map_lock(mm, fe->pmd, fe->address, &fe->ptl);
 	if (likely(pte_same(*fe->pte, orig_pte))) {
@@ -2404,7 +2447,9 @@ static int wp_page_copy(struct fault_env *fe, pte_t orig_pte,
 			inc_mm_counter_fast(mm, MM_ANONPAGES);
 		}
 		flush_cache_page(vma, fe->address, pte_pfn(orig_pte));
+		/* 利用新建new_page和VMA的属性新生成一个PTE entry */
 		entry = mk_pte(new_page, vma->vm_page_prot);
+		/* 设置PTE entry的DIRTY和WRITEABLE位 */
 		entry = maybe_mkwrite(pte_mkdirty(entry), vma);
 		/*
 		 * Clear the pte entry and flush it first, before updating the
@@ -2413,14 +2458,17 @@ static int wp_page_copy(struct fault_env *fe, pte_t orig_pte,
 		 * thread doing COW.
 		 */
 		ptep_clear_flush_notify(vma, fe->address, fe->pte);
+		/* 把new page添加到RMAP反向映射机制,设置新页面的_mapcount计数为0 */
 		page_add_new_anon_rmap(new_page, vma, fe->address, false);
 		mem_cgroup_commit_charge(new_page, memcg, false, false);
+		/* 把new_page添加到活跃LRU链表中 */
 		lru_cache_add_active_or_unevictable(new_page, vma);
 		/*
 		 * We call the notify macro here because, when using secondary
 		 * mmu page tables (such as kvm shadow page tables), we want the
 		 * new page to be mapped directly into the secondary page table.
 		 */
+		/* 把新建的pte entry设置到硬件页表项中 */
 		set_pte_at_notify(mm, fe->address, fe->pte, entry);
 		update_mmu_cache(vma, fe->address, fe->pte);
 		if (old_page) {
@@ -2528,6 +2576,7 @@ static int wp_page_shared(struct fault_env *fe, pte_t orig_pte,
 
 	get_page(old_page);
 
+	/* 如果vma的操作函数定义了page_mkwrite指针,那么调用do_page_mkwrite函数. page_mkwrite函数用于通知之前只读页面现在要变成可写页面了 */
 	if (vma->vm_ops && vma->vm_ops->page_mkwrite) {
 		int tmp;
 
@@ -2628,7 +2677,7 @@ static int do_wp_page(struct fault_env *fe, pte_t orig_pte)
 	if (PageAnon(old_page) && !PageKsm(old_page)) {
 		int total_mapcount;
 		/* trylock_page(old_page)函数判断当前old_page是否已经加锁,
-		 * trylock_pages返回false,说明这个页面已经被别的进程加锁,所以第38行代码会使用lock_page等待其他进程释放了锁才有机会获取锁
+		 * trylock_pages返回false,说明这个页面已经被别的进程加锁,所以下面会使用lock_page等待其他进程释放了锁才有机会获取锁
 		 */
 		if (!trylock_page(old_page)) {
 			/* page->_refcount +1 */
@@ -2640,7 +2689,7 @@ static int do_wp_page(struct fault_env *fe, pte_t orig_pte)
 			 * } while (0)
 			 */
 			pte_unmap_unlock(fe->pte, fe->ptl);
-			/* 等到old_page的锁直到获取到该锁 */
+			/* 等old_page的锁直到获取到该锁 */
 			lock_page(old_page);
 			/* 拿到pte,并且锁上fe->ptl */
 			fe->pte = pte_offset_map_lock(vma->vm_mm, fe->pmd,
@@ -2654,6 +2703,9 @@ static int do_wp_page(struct fault_env *fe, pte_t orig_pte)
 			}
 			put_page(old_page);
 		}
+		/* reuse_swap_page函数判断old_page页面是否只有一个进程映射匿名页面.
+		 * 如果只是单独映射,那么可以继续使用这个页面并且不需要写时复制
+		 */
 		if (reuse_swap_page(old_page, &total_mapcount)) {
 			if (total_mapcount == 1) {
 				/*
@@ -2662,13 +2714,19 @@ static int do_wp_page(struct fault_env *fe, pte_t orig_pte)
 				 * not search our parent or siblings.
 				 * Protected against the rmap code by
 				 * the page lock.
+				 *
+				 * 这一页都是我们的.
+				 * 将它移到我们的anon_vma中,这样rmap代码就不会搜索我们的parent或siblings.
+				 * 通过页面锁定防止rmap代码.
 				 */
+				/* 这里就是让page->mapping指向我们的(void *) vma->anon_vma + PAGE_MAPPING_ANON */
 				page_move_anon_rmap(old_page, vma);
 			}
 			unlock_page(old_page);
 			return wp_page_reuse(fe, orig_pte, old_page, 0, 0);
 		}
 		unlock_page(old_page);
+		/* 到了这个位置,我们可以考虑的页面只剩下page cache页面和KSM页面了,这里处理可写且可共享的上述两种页面 */
 	} else if (unlikely((vma->vm_flags & (VM_WRITE|VM_SHARED)) ==
 					(VM_WRITE|VM_SHARED))) {
 		return wp_page_shared(fe, orig_pte, old_page);
