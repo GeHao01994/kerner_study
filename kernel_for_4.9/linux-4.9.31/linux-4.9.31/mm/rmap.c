@@ -99,6 +99,7 @@ static inline struct anon_vma *anon_vma_alloc(void)
 
 static inline void anon_vma_free(struct anon_vma *anon_vma)
 {
+	/* 如果anon_vma->refcount还有值,那么报个BUG吧 */
 	VM_BUG_ON(atomic_read(&anon_vma->refcount));
 
 	/*
@@ -117,6 +118,18 @@ static inline void anon_vma_free(struct anon_vma *anon_vma)
 	 *
 	 * LOCK should suffice since the actual taking of the lock must
 	 * happen _before_ what follows.
+	 *
+	 * 根据page_lock_anon_vma_read()进行同步,这样我们就可以安全地持有锁,而不会释放anon_vma.
+	 *
+	 * 依靠put_anon_vma()的atomic_dec_and_test()所暗示的完整mb,对抗page_lock_an_vma_read()的down_read_trylock()所隐含的获取屏障.
+	 * 此命令:
+	 *
+	 * page_lock_anon_vma_read()	VS	put_anon_vma()
+	 * 	down_read_trylock()			atomic_dec_and_test（）
+	 *	LOCK					MB
+	 *	atomic_read()				rwsem_is_locked（）
+	 *
+	 * LOCK应该足够了,因为锁的实际获取必须在下面的事情之前发生.
 	 */
 	might_sleep();
 	if (rwsem_is_locked(&anon_vma->root->rwsem)) {
@@ -124,6 +137,7 @@ static inline void anon_vma_free(struct anon_vma *anon_vma)
 		anon_vma_unlock_write(anon_vma);
 	}
 
+	/* 释放anon_vma */
 	kmem_cache_free(anon_vma_cachep, anon_vma);
 }
 
@@ -607,6 +621,11 @@ out:
  * Its a little more complex as it tries to keep the fast path to a single
  * atomic op -- the trylock. If we fail the trylock, we fall back to getting a
  * reference like with page_get_anon_vma() and then block on the mutex.
+ *
+ * 类似于page_get_anon_vma(),只是它锁定了anon_vma.
+ *
+ * 它有点复杂,因为它试图保持到单个原子操作的快速路径 -- trylock.
+ * 如果trylock失败,我们将返回到获取引用,如page_get_an_vma(),然后阻塞互斥体.
  */
 struct anon_vma *page_lock_anon_vma_read(struct page *page)
 {
@@ -615,20 +634,32 @@ struct anon_vma *page_lock_anon_vma_read(struct page *page)
 	unsigned long anon_mapping;
 
 	rcu_read_lock();
+	/* 拿到anon_mapping */
 	anon_mapping = (unsigned long)READ_ONCE(page->mapping);
+	/* 如果不是匿名映射,那么直接goto out */
 	if ((anon_mapping & PAGE_MAPPING_FLAGS) != PAGE_MAPPING_ANON)
 		goto out;
+	/*
+	 * page_mapped的作用如下解释:
+	 * page_mapped(): Return true if this page is mapped into pagetables.
+	 */
 	if (!page_mapped(page))
 		goto out;
 
+	/* 拿到该page的anon_vma */
 	anon_vma = (struct anon_vma *) (anon_mapping - PAGE_MAPPING_ANON);
+	/* 拿到该anon_vma的root_anon_vma */
 	root_anon_vma = READ_ONCE(anon_vma->root);
+	/* 尝试去拿到root_anon_vma->rwsem */
 	if (down_read_trylock(&root_anon_vma->rwsem)) {
 		/*
 		 * If the page is still mapped, then this anon_vma is still
 		 * its anon_vma, and holding the mutex ensures that it will
 		 * not go away, see anon_vma_free().
+		 *
+		 * 如果页面仍然被映射,那么这个anon_vma仍然是它的anon_vm,并且拿到mutex可以确保它不会消失,请参见anon_vma _free()
 		 */
+		/* 如果page已经没有映射进页表了,那么update_read之后把anon_vma设置为NULL之后返回 */
 		if (!page_mapped(page)) {
 			up_read(&root_anon_vma->rwsem);
 			anon_vma = NULL;
@@ -636,33 +667,57 @@ struct anon_vma *page_lock_anon_vma_read(struct page *page)
 		goto out;
 	}
 
-	/* trylock failed, we got to sleep */
+	/* trylock failed, we got to sleep
+	 * trylock失败,我们准备去睡眠
+	 */
+
+	/* 如果anon_vma->refcount不是0,那么就+1
+	 * 如果是0,赋值anon_vma = NULL后直接返回
+	 */
 	if (!atomic_inc_not_zero(&anon_vma->refcount)) {
 		anon_vma = NULL;
 		goto out;
 	}
 
+	/*
+	 * page_mapped的作用如下解释:
+	 * page_mapped(): Return true if this page is mapped into pagetables.
+	 */
 	if (!page_mapped(page)) {
+		/* 解锁 */
 		rcu_read_unlock();
+		/* 释放anon_vma */
 		put_anon_vma(anon_vma);
 		return NULL;
 	}
 
 	/* we pinned the anon_vma, its safe to sleep */
 	rcu_read_unlock();
+	/*
+	 *  static inline void anon_vma_lock_read(struct anon_vma *anon_vma)
+	 * {
+	 *	down_read(&anon_vma->root->rwsem);
+	 * }
+	 */
 	anon_vma_lock_read(anon_vma);
 
+	/* 将anon_vma->refcount -1之后判断它等不等于0 */
 	if (atomic_dec_and_test(&anon_vma->refcount)) {
 		/*
 		 * Oops, we held the last refcount, release the lock
 		 * and bail -- can't simply use put_anon_vma() because
 		 * we'll deadlock on the anon_vma_lock_write() recursion.
+		 *
+		 * Oops,我们保留了最后一个refcount,释放了锁和保释 -- 不能简单地使用put_anon_vma(),
+		 * 因为我们会在anon_vma_lock_write()递归上死锁.
 		 */
 		anon_vma_unlock_read(anon_vma);
+		/* 释放anon_vma */
 		__put_anon_vma(anon_vma);
 		anon_vma = NULL;
 	}
 
+	/* 返回anon_vma */
 	return anon_vma;
 
 out:
@@ -899,6 +954,12 @@ int page_mapped_in_vma(struct page *page, struct vm_area_struct *vma)
  *
  * On success returns true with pte mapped and locked. For PMD-mapped
  * transparent huge pages *@ptep is set to NULL.
+ *
+ * 检查@page是否在@address映射到@mm.
+ * 与page_check_address()不同,此函数可以处理透明的巨大页面.
+ *
+ * 成功时,pte映射并锁定后返回true.
+ * 对于PMD-mapped的透明大页,*@ptep设置为NULL.
  */
 bool page_check_address_transhuge(struct page *page, struct mm_struct *mm,
 				  unsigned long address, pmd_t **pmdp,
@@ -910,6 +971,7 @@ bool page_check_address_transhuge(struct page *page, struct mm_struct *mm,
 	pte_t *pte;
 	spinlock_t *ptl;
 
+	/* 这是HUGETLB的case */
 	if (unlikely(PageHuge(page))) {
 		/* when pud is not present, pte will be NULL */
 		pte = huge_pte_offset(mm, address);
@@ -921,56 +983,83 @@ bool page_check_address_transhuge(struct page *page, struct mm_struct *mm,
 		goto check_pte;
 	}
 
+	/* 通过mm和address获取pgd */
 	pgd = pgd_offset(mm, address);
+	/* 如果pgd不在内存中,那么返回false */
 	if (!pgd_present(*pgd))
 		return false;
+	/* 通过pgd和address获取pud */
 	pud = pud_offset(pgd, address);
+	/* 如果pud不在内存中,那么也返回false */
 	if (!pud_present(*pud))
 		return false;
+	/* 通过pud和address获得pmd */
 	pmd = pmd_offset(pud, address);
 
+	/* 如果pmd是块映射,也就是THP */
 	if (pmd_trans_huge(*pmd)) {
+		/* 获取锁 */
 		ptl = pmd_lock(mm, pmd);
+		/* 如果pmd没在内存中,那么goto unlock_pmd */
 		if (!pmd_present(*pmd))
 			goto unlock_pmd;
+		/* 如果不是THP,那么解锁之后跳到map_pte处 */
 		if (unlikely(!pmd_trans_huge(*pmd))) {
 			spin_unlock(ptl);
 			goto map_pte;
 		}
 
+		/* 如果page不一致,那么也去unlock_pmd */
 		if (pmd_page(*pmd) != page)
 			goto unlock_pmd;
 
+		/* 否则设置pte为NULL之后goto found */
 		pte = NULL;
 		goto found;
 unlock_pmd:
+		/* 解锁之后返回false */
 		spin_unlock(ptl);
 		return false;
 	} else {
 		pmd_t pmde = *pmd;
 
 		barrier();
+		/* 如果pmd不在内存中,或者说是THP,那么返回false */
 		if (!pmd_present(pmde) || pmd_trans_huge(pmde))
 			return false;
 	}
 map_pte:
+	/* 通过pmd和address算出pte */
 	pte = pte_offset_map(pmd, address);
+	/* 如果pte不在内存中 */
 	if (!pte_present(*pte)) {
+		/* arm64,此处为空函数 */
 		pte_unmap(pte);
+		/* 返回false */
 		return false;
 	}
 
+	/* 拿到锁 */
 	ptl = pte_lockptr(mm, pmd);
 check_pte:
+	/* 锁上 */
 	spin_lock(ptl);
 
+	/* 如果pte不在内存中 */
 	if (!pte_present(*pte)) {
+		/* 这边是unlock之后返回NULL */
 		pte_unmap_unlock(pte, ptl);
 		return false;
 	}
 
-	/* THP can be referenced by any subpage */
+	/* THP can be referenced by any subpage
+	 * THP能被任何子页引用
+	 */
+	/* 用pte的页帧号 - page的页帧号大于THP的page,那么不就出去了吗?
+	 * 实际上说的就是有THP引用了你的子页面
+	 */
 	if (pte_pfn(*pte) - page_to_pfn(page) >= hpage_nr_pages(page)) {
+		/* unlock之后返回false */
 		pte_unmap_unlock(pte, ptl);
 		return false;
 	}
@@ -990,6 +1079,8 @@ struct page_referenced_arg {
 };
 /*
  * arg: page_referenced_arg will be passed
+ *
+ * arg: page_referenced_arg将被传递
  */
 static int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 			unsigned long address, void *arg)
@@ -1001,18 +1092,28 @@ static int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 	spinlock_t *ptl;
 	int referenced = 0;
 
+	/* page_check_address_transhuge: Check that @page is mapped at @address into @mm.
+	 * 如果返回false,那么直接返回SWAP_AGAIN
+	 */
 	if (!page_check_address_transhuge(page, mm, address, &pmd, &pte, &ptl))
 		return SWAP_AGAIN;
 
+	/* 如果vma->vm_flags带了VM_LOCKED */
 	if (vma->vm_flags & VM_LOCKED) {
+		/* 如果有pte,那么调用pte_unmap */
 		if (pte)
 			pte_unmap(pte);
+		/* 解锁 */
 		spin_unlock(ptl);
+		/* 将pra->vm_flags带上VM_LOCKED */
 		pra->vm_flags |= VM_LOCKED;
+		/* 返回SWAP_FAIL会跳出循环的 */
 		return SWAP_FAIL; /* To break the loop */
 	}
 
+	/* 如果是常规page 映射 */
 	if (pte) {
+		/* 清除pte的YOUNG bit */
 		if (ptep_clear_flush_young_notify(vma, address, pte)) {
 			/*
 			 * Don't treat a reference through a sequentially read
@@ -1020,31 +1121,50 @@ static int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 			 * another mapping, we will catch it; if this other
 			 * mapping is already gone, the unmap path will have
 			 * set PG_referenced or activated the page.
+			 *
+			 * 不要这样对待通过顺序读取映射的引用.
+			 * 如果该页面已在另一个映射中使用,我们将捕获它;
+			 * 如果其他映射已经消失,则取消映射路径将设置PG_referenced或将页面放入活跃链表里面.
 			 */
+
+			/* 如果vma->vm_flags不是顺序读,那么referenced++ */
 			if (likely(!(vma->vm_flags & VM_SEQ_READ)))
 				referenced++;
 		}
+		/* 调用pte_unmap */
 		pte_unmap(pte);
+		/* 如果定义了THP */
 	} else if (IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE)) {
+		/* 清除pmd的young bit位,referenced++ */
 		if (pmdp_clear_flush_young_notify(vma, address, pmd))
 			referenced++;
 	} else {
-		/* unexpected pmd-mapped page? */
+		/* unexpected pmd-mapped page?
+		 * 不预期的pmd-mapped的页面?
+		 */
 		WARN_ON_ONCE(1);
 	}
+	/* 解锁 */
 	spin_unlock(ptl);
 
+	/* 如果有referenced,清除PG_idle,PG_idle应该说的是page是idle的,也就是空闲页面 */
 	if (referenced)
 		clear_page_idle(page);
+
+	/* 这边就是还想清除page的young */
 	if (test_and_clear_page_young(page))
 		referenced++;
 
+	/* 如果有referenced,那么将pra->referenced++
+	 * 然后将pra->vm_flags 并上 vma->vm_flags
+	 */
 	if (referenced) {
 		pra->referenced++;
 		pra->vm_flags |= vma->vm_flags;
 	}
-
+	/* 将pra->mapcount-- */
 	pra->mapcount--;
+	/* 如果都走完了,那么就可以跳出循环了 */
 	if (!pra->mapcount)
 		return SWAP_SUCCESS; /* To break the loop */
 
@@ -1054,8 +1174,10 @@ static int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 static bool invalid_page_referenced_vma(struct vm_area_struct *vma, void *arg)
 {
 	struct page_referenced_arg *pra = arg;
+	/* 获得mem_cgroup */
 	struct mem_cgroup *memcg = pra->memcg;
 
+	/* 判断是不是一样的group */
 	if (!mm_match_cgroup(vma->vm_mm, memcg))
 		return true;
 
@@ -1071,6 +1193,15 @@ static bool invalid_page_referenced_vma(struct vm_area_struct *vma, void *arg)
  *
  * Quick test_and_clear_referenced for all mappings to a page,
  * returns the number of ptes which referenced the page.
+ *
+ * page_referenced - 测试页面是否被引用
+ *
+ * @page: 要测试的页面
+ * @is_locked: 调用方在页面上拿到了锁
+ * @memcg: target memory cgroup
+ * @vm_flags: 收集遇到的实际引用页面的vma->vm_flags
+ *
+ * 快速 test_and_clear_referenced 用于指向页面的所有映射,返回引用该页面的pte数.
  */
 int page_referenced(struct page *page,
 		    int is_locked,
@@ -1080,6 +1211,7 @@ int page_referenced(struct page *page,
 	int ret;
 	int we_locked = 0;
 	struct page_referenced_arg pra = {
+		/* 拿到page->_mapcount + 1 */
 		.mapcount = total_mapcount(page),
 		.memcg = memcg,
 	};
@@ -1089,14 +1221,19 @@ int page_referenced(struct page *page,
 		.anon_lock = page_lock_anon_vma_read,
 	};
 
+	/* 将vm_flags的值设置为0 */
 	*vm_flags = 0;
+	/* 如果该page没有映射进页表那么返回0 */
 	if (!page_mapped(page))
 		return 0;
 
+	/* 如果page->mapping指向空,那么也返回0 */
 	if (!page_rmapping(page))
 		return 0;
 
+	/* 如果is_locked等于0,也就是没有被locked且不是匿名页面或者是ksm页面 */
 	if (!is_locked && (!PageAnon(page) || PageKsm(page))) {
+		/* 试图获得这个page的锁 */
 		we_locked = trylock_page(page);
 		if (!we_locked)
 			return 1;
@@ -1106,17 +1243,21 @@ int page_referenced(struct page *page,
 	 * If we are reclaiming on behalf of a cgroup, skip
 	 * counting on behalf of references from different
 	 * cgroups
+	 *
+	 * 如果我们代表一个cgroup回收,请跳过代表不同cgroup的引用计数
 	 */
 	if (memcg) {
 		rwc.invalid_vma = invalid_page_referenced_vma;
 	}
 
+	/* 这里就是轮询这个page,并调用page_referenced_one
+	 */
 	ret = rmap_walk(page, &rwc);
 	*vm_flags = pra.vm_flags;
 
 	if (we_locked)
 		unlock_page(page);
-
+	/* 返回referenced,即引用这个page的进程个数 */
 	return pra.referenced;
 }
 
@@ -1879,9 +2020,11 @@ int try_to_munlock(struct page *page)
 
 void __put_anon_vma(struct anon_vma *anon_vma)
 {
+	/* 获得anon_vma的根anon_vma */
 	struct anon_vma *root = anon_vma->root;
-
+	/* free掉anon_vma */
 	anon_vma_free(anon_vma);
+	/* 如果root != anon_vma && 并且把root->refcount - 1 之后等于0,那么也把root个free掉 */
 	if (root != anon_vma && atomic_dec_and_test(&root->refcount))
 		anon_vma_free(root);
 }
@@ -1891,6 +2034,7 @@ static struct anon_vma *rmap_walk_anon_lock(struct page *page,
 {
 	struct anon_vma *anon_vma;
 
+	/* 如果有rwc->anon_lock,那么就调用rwc->anon_lock */
 	if (rwc->anon_lock)
 		return rwc->anon_lock(page);
 
@@ -1899,11 +2043,21 @@ static struct anon_vma *rmap_walk_anon_lock(struct page *page,
 	 * because that depends on page_mapped(); but not all its usages
 	 * are holding mmap_sem. Users without mmap_sem are required to
 	 * take a reference count to prevent the anon_vma disappearing
+	 *
+	 * 注意: remove_migration_ptes() 不能使用page_lock_anon_vma_read().
+	 * 因为这取决于page_mapped(); 但并不是所有的用法都拿到mmap_sem.
+	 * 没有mmap_sem的用户需要进行拿到引用计数,以防止anon_vma消失.
 	 */
+	/* 拿到page的anon_vma */
 	anon_vma = page_anon_vma(page);
+	/* 如果anon_vma为NULL,那么直接返回NULL */
 	if (!anon_vma)
 		return NULL;
-
+	/* static inline void anon_vma_lock_read(struct anon_vma *anon_vma)
+	 * {
+	 *	down_read(&anon_vma->root->rwsem);
+	 * }
+	 */
 	anon_vma_lock_read(anon_vma);
 	return anon_vma;
 }
@@ -1921,6 +2075,18 @@ static struct anon_vma *rmap_walk_anon_lock(struct page *page,
  * where the page was found will be held for write.  So, we won't recheck
  * vm_flags for that VMA.  That should be OK, because that vma shouldn't be
  * LOCKED.
+ *
+ * rmap_walk_anon - 使用基于对象的匿名页面执行某些操作
+ *
+ * rmap方法
+ * @page: 要处理的页面
+ * @rwc: 根据每种walk类型的控制变量
+ *
+ * 使用映射指针和它所指向的anon_vm结构中包含的vma chains来查找页面的所有映射.
+ *
+ * 当从try_to_munlock()调用时,包含找到页面的vma的mm的mmap_sem将被保留以进行写入.
+ * 因此,我们不会重新检查VMA的vm_flags.
+ * 这应该没问题,因为vma不应该被锁定.
  */
 static int rmap_walk_anon(struct page *page, struct rmap_walk_control *rwc,
 		bool locked)
@@ -1930,33 +2096,52 @@ static int rmap_walk_anon(struct page *page, struct rmap_walk_control *rwc,
 	struct anon_vma_chain *avc;
 	int ret = SWAP_AGAIN;
 
+	/* 看传进来的参数locked是否为 true,也就是外面有没有拿到锁 */
 	if (locked) {
+		/* 拿到该page的anon_vma */
 		anon_vma = page_anon_vma(page);
 		/* anon_vma disappear under us? */
 		VM_BUG_ON_PAGE(!anon_vma, page);
 	} else {
+		/* 如果没拿到锁,那么调用下面这个去拿到锁且得到它的anon_vma */
 		anon_vma = rmap_walk_anon_lock(page, rwc);
 	}
+
+	/* 如果anon_vma等于NULL,那么直接返回吧 */
 	if (!anon_vma)
 		return ret;
 
+	/* 拿到page的index */
 	pgoff = page_to_pgoff(page);
+	/* 这里就是对每个映射到这个page的vma进行操作
+	 * 包括子进程的子进程,因为这里回去循环到subtree
+	 */
 	anon_vma_interval_tree_foreach(avc, &anon_vma->rb_root, pgoff, pgoff) {
 		struct vm_area_struct *vma = avc->vma;
+		/* 通过给定vma和page,获取相应的虚拟地址
+		 * 很经典哦
+		 */
 		unsigned long address = vma_address(page, vma);
 
 		cond_resched();
 
+		/* 如果有invalid_vma那么就调用invaild_vma */
 		if (rwc->invalid_vma && rwc->invalid_vma(vma, rwc->arg))
 			continue;
 
+		/* 调用rwc->rmap_one函数 */
 		ret = rwc->rmap_one(page, vma, address, rwc->arg);
+		/* 如果返回值不是SWAP_AGAIN,那么直接break */
 		if (ret != SWAP_AGAIN)
 			break;
+		/* 如果有rwc->done,那么调用rwc->done函数 */
 		if (rwc->done && rwc->done(page))
 			break;
 	}
 
+	/* 如果进来的时候没有带锁,我们rmap_walk_anon_lock回去带
+	 * 所以这里需要解锁
+	 */
 	if (!locked)
 		anon_vma_unlock_read(anon_vma);
 	return ret;
@@ -2020,11 +2205,12 @@ done:
 
 int rmap_walk(struct page *page, struct rmap_walk_control *rwc)
 {
+	/* 如果是ksm页面,那么调用rmap_walk_ksm */
 	if (unlikely(PageKsm(page)))
 		return rmap_walk_ksm(page, rwc);
-	else if (PageAnon(page))
+	else if (PageAnon(page))/* 如果是匿名页面,调用rmap_walk_anon */
 		return rmap_walk_anon(page, rwc, false);
-	else
+	else/* 如果是page cache,那么调用rmap_walk_file */
 		return rmap_walk_file(page, rwc, false);
 }
 

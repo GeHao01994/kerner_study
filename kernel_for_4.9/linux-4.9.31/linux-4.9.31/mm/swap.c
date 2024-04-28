@@ -306,8 +306,9 @@ static void __activate_page(struct page *page, struct lruvec *lruvec,
 		/* 添加到ACTIVE链表中 */
 		add_page_to_lru_list(page, lruvec, lru);
 		trace_mm_lru_activate(page);
-
+		/* vm_event_states.event[PGACTIVATE] + 1 */
 		__count_vm_event(PGACTIVATE);
+		/* 更新对应lruvec的reclaim_stat */
 		update_page_reclaim_stat(lruvec, file, 1);
 	}
 }
@@ -315,8 +316,15 @@ static void __activate_page(struct page *page, struct lruvec *lruvec,
 #ifdef CONFIG_SMP
 static void activate_page_drain(int cpu)
 {
+	/* 这里拿到本CPU的activate_page_pvecs向量,这里是将非活跃lru链表的页移动到活跃lru链表 */
 	struct pagevec *pvec = &per_cpu(activate_page_pvecs, cpu);
-
+	/*
+	 * 如果里面有东西,也不管满不满,都给他移动到活跃链表里面去
+	 *  static inline unsigned pagevec_count(struct pagevec *pvec)
+	 * {
+	 *	return pvec->nr;
+	 * }
+	 */
 	if (pagevec_count(pvec))
 		pagevec_lru_move_fn(pvec, __activate_page, NULL);
 }
@@ -362,6 +370,9 @@ void activate_page(struct page *page)
 
 static void __lru_cache_activate_page(struct page *page)
 {
+	/* lru_add_pvec 将不处于lru链表的新页放入到lru链表中
+	 * 所以这里拿到本都CPU的lru_add_pvec
+	 */
 	struct pagevec *pvec = &get_cpu_var(lru_add_pvec);
 	int i;
 
@@ -374,6 +385,14 @@ static void __lru_cache_activate_page(struct page *page)
 	 * a remote pagevec's page PageActive potentially hits a race where
 	 * a page is marked PageActive just after it is added to the inactive
 	 * list causing accounting errors and BUG_ON checks to trigger.
+	 *
+	 * 在乐观的假设下向后搜索,即正在激活的页面刚刚添加到此页面vec.
+	 * 请注意,只有本地pagevec被检查为!PageLRU页面可能正在被释放、回收、迁移或在远程当前正在drained的pagevec.
+	 * 此外,标记一个远程的pagevec的页面PageActive可能会引发静态,即页面在添加到非活动列表后立即被标记为PageActive,从而引发计数错误和BUG_ON检查,
+	 */
+
+	/* 从pagevec的最后一个开始查询,看我们的目标page有没有在这里面
+	 * 如果有把它设置为active
 	 */
 	for (i = pagevec_count(pvec) - 1; i >= 0; i--) {
 		struct page *pagevec_page = pvec->pages[i];
@@ -396,10 +415,18 @@ static void __lru_cache_activate_page(struct page *page)
  *
  * When a newly allocated page is not yet visible, so safe for non-atomic ops,
  * __SetPageReferenced(page) may be substituted for mark_page_accessed(page).
+ *
+ * inactive,unreferenced	->	inactive,referenced
+ * inactive,referenced		->	active,unreferenced
+ * active,unreferenced		->	active,referenced
+ *
+ * 当新分配的页面还不可见(因此对于非原子操作是安全的)时,__SetPageReferenced(page)可以代替mark_page_accessed(page)
  */
 void mark_page_accessed(struct page *page)
 {
+	/* 拿到复合页面的头 */
 	page = compound_head(page);
+	/* 如果这个page不是活跃的,不是不可回收的并且PG_referenced是被置位的 */
 	if (!PageActive(page) && !PageUnevictable(page) &&
 			PageReferenced(page)) {
 
@@ -408,14 +435,20 @@ void mark_page_accessed(struct page *page)
 		 * activate_page_pvecs. Otherwise, assume the page is on a
 		 * pagevec, mark it active and it'll be moved to the active
 		 * LRU on the next drain.
+		 *
+		 * 如果页面在LRU上,则通过activate_page_pvecs将其排队进活跃链表里.
+		 * 否则,假设页面在pagevec上,将其标记为活跃页面,并在下一个drain的时候将其移动到活跃LRU上
 		 */
 		if (PageLRU(page))
 			activate_page(page);
 		else
 			__lru_cache_activate_page(page);
+		/* 清除PG_referenced */
 		ClearPageReferenced(page);
+		/* 如果是pagecache,调用workingset_activation函数增加zone->inactive_page计数 */
 		if (page_is_file_cache(page))
 			workingset_activation(page);
+	/* 如果没有PG_referenced,那么设置PG_referenced */
 	} else if (!PageReferenced(page)) {
 		SetPageReferenced(page);
 	}

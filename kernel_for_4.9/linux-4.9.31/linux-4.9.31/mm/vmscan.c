@@ -1005,24 +1005,43 @@ enum page_references {
 	PAGEREF_ACTIVATE,
 };
 
+/* 在扫描不活跃LRU链表时,page_check_references会被调用,返回值是一个page_references的枚举类型.
+ * PAGEREF_ACTIVATE表示该页面会迁移到活跃链表
+ * PAGEREF_KEEP表示会继续保留在不活跃链表中
+ * PAGEREF_RECLAIM和PAGEREF_RECLAIM_CLEAN表示可以尝试回收该页面.
+ */
 static enum page_references page_check_references(struct page *page,
 						  struct scan_control *sc)
 {
 	int referenced_ptes, referenced_page;
 	unsigned long vm_flags;
 
+	/* page_referenced检查该页有多少个访问引用pte(referenced_ptes) */
 	referenced_ptes = page_referenced(page, 1, sc->target_mem_cgroup,
 					  &vm_flags);
+	/* TestClearPageReferenced函数返回该页面PG_referenced标志位的值,并清除该标志位 */
 	referenced_page = TestClearPageReferenced(page);
 
 	/*
 	 * Mlock lost the isolation race with us.  Let try_to_unmap()
 	 * move the page to the unevictable list.
+	 *
+	 * Mlock在我们隔离竞争中输了.
+	 * 让try_to_unmap把页面移动到不可回收链表中去
 	 */
 	if (vm_flags & VM_LOCKED)
 		return PAGEREF_RECLAIM;
 
+	/* 接下来的代码根据访问引用pte的数目(referenced_ptes变量)和PG_referenced标志位状态(referenced_page变量)来判断该页是留在活跃LRU、不活跃LRU,还是可以被回收.
+	 * 当该页有访问引用pte时,要被放回到活跃LRU链表中的情况如下
+	 * 1、该页是匿名页面(PageSwapBacked(page)).
+	 * 2、最近第二次访问的page cache或者共享的page cache.
+	 * 3、可执行文件的page cache
+	 *
+	 * 其余的有访问引用的页面将会继续保持在不活跃LRU链表中,最后剩下的页面就是可以回收页面的最佳候选者
+	 */
 	if (referenced_ptes) {
+		/* 匿名页面,放到活跃LRU链表中 */
 		if (PageSwapBacked(page))
 			return PAGEREF_ACTIVATE;
 		/*
@@ -1038,6 +1057,30 @@ static enum page_references page_check_references(struct page *page,
 		 * Note: the mark is set for activated pages as well
 		 * so that recently deactivated but used pages are
 		 * quickly recovered.
+		 *
+		 *
+		 * 所有映射的页面都是从实例化fault的页表引用开始的,因此如果映射的文件页面被多次使用,我们需要仔细查看两次.
+		 *
+		 * 标记它,并将其备用以备下次围绕非活动列表使用.
+		 * 另一个页表引用将导致其激活.
+		 *
+		 * 注意: 该标记也为激活的页面设置,以便快速恢复最近停用但使用过的页面。
+		 */
+
+		/* 如果有大量只访问一次的page cache充斥在活跃LRU链表中,那么在负载比较重的情况下,选择一个合适回收的候选者会变得越来越困难,
+		 * 并且引发分配内存的高延迟,将错误的页面换出.
+		 * 这里的设计是为了优化系统充斥着大量只使用一次的page cache页面的情况(通常是mmap映射的文件访问),
+		 * 在这种情况下,只访问一次的page chech页面会大量涌入活跃LRU链表中,
+		 * 因为shrink_inactive_list会把这些页面迁移到活跃链表,不利于页面回收.
+		 * mmap映射的文件访问通常通过filemap_fault函数来产生page cache,在Linux 2.6.29以后的版本中,这些page cache将不会再调用mark_page_accessed来设置PG_referenced,因为对于这种页面,第一次访问的状态是有访问引用pte,
+		 * 但是PG_referenced=0,所以扫描不活跃链表时设置该页为PG_referenced,并且继续保留在不活跃链表中而没有被放入活跃链表.
+		 *
+		 * 在第二次访问时,发现有访问引用pte但PG_referenced=1,这时才把该页加入到活跃链表中.
+		 * 因此利用PG_referenced做了一个page cache的访问次数的过滤器,过滤掉大量短时间(多给了一个不活跃链表老化的时间)只访问一次的page cache.
+		 * 这样在内存短缺的情况下,kswapd就巧妙地释放了大量短时间只访问一次的page cache.
+		 * 这样大量只访问一次的page cache在不活跃链表中多待一点时间,就越有利于在系统内存短缺时首先把它们释放了,否则这些页面跑到活跃LRU链表,再想把它们释放,那么要经历一个“活跃LRU链表遍历时间 + 不活跃LRU链表遍历时间 ".
+		 *
+		 * referenced_ptes > 1表示那些第一次在不活跃LRU链表中的shared page cache,也就是说,如果有多个文件同时映射到该页面,它们应该晋升到活跃LRU链表中,因为它们应该多在LRU链表中一点时间,以便其他用户可以在此访问到
 		 */
 		SetPageReferenced(page);
 
@@ -1047,6 +1090,8 @@ static enum page_references page_check_references(struct page *page,
 		/*
 		 * Activate file-backed executable pages after first usage.
 		 */
+
+		/* 可执行文件的page cache,则加入活跃链表 */
 		if (vm_flags & VM_EXEC)
 			return PAGEREF_ACTIVATE;
 
@@ -1054,6 +1099,10 @@ static enum page_references page_check_references(struct page *page,
 	}
 
 	/* Reclaim if clean, defer dirty pages to writeback */
+	/* 如果没有访问引用pte,则表示可以尝试回收它 */
+	/* 如果没有访问引用pte,也没有PG_referenced,也不是匿名页面
+	 * https://www.cnblogs.com/liuhailong0112/p/14426096.html
+	 */
 	if (referenced_page && !PageSwapBacked(page))
 		return PAGEREF_RECLAIM_CLEAN;
 

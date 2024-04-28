@@ -355,11 +355,15 @@ extern pmd_t maybe_pmd_mkwrite(pmd_t pmd, struct vm_area_struct *vma);
 
 /*
  * At what user virtual address is page expected in @vma?
+ *
+ * 在@vma中,页面应位于哪个用户虚拟地址?
  */
 static inline unsigned long
 __vma_address(struct page *page, struct vm_area_struct *vma)
 {
+	/* 得到page的index */
 	pgoff_t pgoff = page_to_pgoff(page);
+	/* 通过vma->vm_start + pgoff->vma->vm_pgoff << PAGE_SHIFT可以得到这块page的起始地址 */
 	return vma->vm_start + ((pgoff - vma->vm_pgoff) << PAGE_SHIFT);
 }
 
@@ -369,6 +373,7 @@ vma_address(struct page *page, struct vm_area_struct *vma)
 	unsigned long address = __vma_address(page, vma);
 
 	/* page should be within @vma mapping range */
+	/* 如果小于vma->vm_start或者大于vma->vm_end就报个BUG吧 */
 	VM_BUG_ON_VMA(address < vma->vm_start || address >= vma->vm_end, vma);
 
 	return address;

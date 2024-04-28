@@ -31,7 +31,7 @@
  * 出现新故障的页面(新的文件页)放到不活跃链表的头
  * 页面回收从尾部开始扫描.
  * 在非活跃列表中多次访问的页面将移动到活跃列表,以保护它们不被回收，
- * 而当atcive列表增长过大，那么活跃链表会被降级到非活跃链表
+ * 而当atcive列表增长过大,那么活跃链表会被降级到非活跃链表
  *
  *   fault ------------------------+
  *                                 |
@@ -48,8 +48,8 @@
  * are evicted from the inactive list every time before another access
  * would have promoted them to the active list.
  *
- * 当它的页面频繁使用，但是在其他人访问访问让他们升级到活跃链表之前它们从不活跃链表逐出
- * 该工作负载就会剧烈波动.
+ * 当工作负载的页面频繁使用,但是在其他人访问让他们升级到活跃链表之前它们从不活跃链表逐出
+ * 该工作负载就会颠簸.
  *
  * In cases where the average access distance between thrashing pages
  * is bigger than the size of memory there is nothing that can be
@@ -57,17 +57,17 @@
  * circumstance.
  *
  *
- * 在颠簸页面之间的平均访问距离大于内存大小的情况下，无法采取任何措施
- * - 在任何情况下，颠簸集都无法放入内存.
+ * 在颠簸页面之间的平均访问距离大于内存大小的情况下,无法采取任何措施
+ * -在任何情况下,颠簸集都无法放入内存.
  *
  * However, the average access distance could be bigger than the
  * inactive list, yet smaller than the size of memory.  In this case,
  * the set could fit into memory if it weren't for the currently
  * active pages - which may be used more, hopefully less frequently:
  *
- * 然而，平均访问距离可能大于非活动列表，但小于内存大小.
- * 在这种情况下，如果不是针对当前活动的页面，该集可能会被放入内存中
- * - 这些页面可能会被更多地使用，希望不那么频繁:
+ * 然而,平均访问距离可能大于非活动列表,但小于内存大小.
+ * 在这种情况下,如果不是针对当前活动的页面,该集可能会被放入内存中
+ * - 这些页面可能会被更多地使用,希望不那么频繁:
  *
  *      +-memory available to cache-+
  *      |                           |
@@ -81,8 +81,8 @@
  * activated optimistically to compete with the existing active pages.
  *
  * 准确跟踪页面的访问频率是非常昂贵的.
- * 但是，可以进行合理的近似来测量非活动列表上的颠簸,
- * 之后可以乐观地激活重新检查页面，以与现有的活动页面竞争.
+ * 但是,可以进行合理的近似来测量非活动列表上的颠簸,
+ * 之后可以乐观地激活重新检查页面,以与现有的活动页面竞争.
  *
  * Approximating inactive page access frequency - Observations:
  *
@@ -91,7 +91,9 @@
  *    towards the tail by one slot, and pushes the current tail page
  *    out of memory.
  *
- * 1.当一个页面第一次被访问时，它被添加到非活动列表的头部，将每个现有的非活动页面向尾部滑动一个插槽，并将当前的尾部页面挤出内存.
+ * 接近非活动页面访问频率 - 观察结果:
+ *
+ * 1.当一个页面第一次被访问时,它被添加到非活动列表的头部,将每个现有的非活动页面向尾部滑动一个插槽，并将当前的尾部页面挤出内存.
  *
  * 2. When a page is accessed for the second time, it is promoted to
  *    the active list, shrinking the inactive list by one slot.  This
@@ -99,9 +101,8 @@
  *    more recently than the activated page towards the tail of the
  *    inactive list.
  *
- * 2.当第二次访问页面时，它将被提升到活动列表，将非活动列表缩小一个插槽.
- * 这还会将最近出现故障的所有非活动页面滑入缓存这是活跃页面划入非活跃页面的尾部
- *
+ * 2.当第二次访问页面时,它将被提升到活动列表,将非活动列表回收一个插槽.
+ *   这还会将最近出现故障的所有非活动页面滑入缓存,而不是将激活页面滑入非活动列表的尾部.
  * Thus:
  *
  * 1. The sum of evictions and activations between any two points in
@@ -122,8 +123,8 @@
  *    inactive pages accessed while the page was in cache is at least
  *    the number of page slots on the inactive list.
  *
- * 1. 当一个页面最终从内存中移出时，该页面在cache中非活跃页面访问的数量
- *    至少非活跃链表的页面槽的数量
+ * 1. 当一个页面最终从内存中移出时,该页面在cache中非活跃页面访问的数量
+ *    至少是非活跃链表的页面槽的数量
  *
  * 2. In addition, measuring the sum of evictions and activations (E)
  *    at the time of a page's eviction, and comparing it to another
@@ -131,17 +132,17 @@
  *    the minimum number of accesses while the page was not cached.
  *    This is called the refault distance.
  *
- * 2. 额外的，一个页面被换出的时间估量为被驱逐(换出)和激活(E)的总和
- *    比较它和另外一个读者此时page faults 返回进内存 告诉这个最小访问数量
- *    当一个页面没有缓存，这个成为refault 距离
+ * 2. 额外的,一个页面被换出的时间估量为被驱逐(换出)和激活(E)的总和
+ *    比较这个时间和另外一个读者page faults 返回进内存的时间,告诉这个最小访问数量
+ *    当一个页面没有缓存,这个成为refault 距离
  *
  * Because the first access of the page was the fault and the second
  * access the refault, we combine the in-cache distance with the
  * out-of-cache distance to get the complete minimum access distance
  * of this page:
  *
- * 由于页面的第一次访问是fault，第二次访问是refault,
- * 我们将缓存内距离与缓存外距离相结合，得出该页面的完整最小访问距离：
+ * 由于页面的第一次访问是fault,第二次访问是refault,
+ * 我们将缓存内距离与缓存外距离相结合,得出该页面的完整最小访问距离：
  * R表示another reading (R)
  * E表示the sum of evictions and activations
  *      NR_inactive + (R - E)
@@ -197,40 +198,40 @@
  * refault distance will immediately activate the refaulting page.
  */
 
-/* 在学术界和linux内核社区，页面回收算法的优化一直没有停止过，其中Refault Distance算法在Linux 3.15版本中被加入，作为是社区专家johannes Weiner，该算法目前只针对page cache类型的页面.
- * 对于page cache类型的LRU链表来说，有两个链表值得关注，分别是活跃链表和不活跃链表.
- * 新产生的page总是加入到不活跃链表的头部，页面回收也总是从不活跃链表的尾部开始回收.
- * 不活跃链表的页面第二次访问时会升级(promote)到活跃链表，防止被回收;
- * 另一方面如果活跃链表增长太快，那么活跃的页面会被降级(demote)到不活跃链表中.
+/* 在学术界和linux内核社区,页面回收算法的优化一直没有停止过,其中Refault Distance算法在Linux 3.15版本中被加入,作为是社区专家johannes Weiner,该算法目前只针对page cache类型的页面.
+ * 对于page cache类型的LRU链表来说,有两个链表值得关注,分别是活跃链表和不活跃链表.
+ * 新产生的page总是加入到不活跃链表的头部,页面回收也总是从不活跃链表的尾部开始回收.
+ * 不活跃链表的页面第二次访问时会升级(promote)到活跃链表,防止被回收;
+ * 另一方面如果活跃链表增长太快,那么活跃的页面会被降级(demote)到不活跃链表中.
  *
- * 实际上有一些场景，某些页面经常被访问，但是它们在下一次被访问之前就在不活跃链表中被回收并释放了，
- * 那么又必须从存储系统中读取这些page cache页面，这些场景下产生颠簸现象(thrashing).
+ * 实际上有一些场景,某些页面经常被访问,但是它们在下一次被访问之前就在不活跃链表中被回收并释放了,
+ * 那么又必须从存储系统中读取这些page cache页面,这些场景下产生颠簸现象(thrashing).
  *
- * 当我们观察文件缓存不活跃链表的行为特征时，会发现如下有趣特征。
- * 1.有一个page cache页面第一次访问时，它加入到不活跃链表头，然后慢慢从链表头向链表尾移动，链表尾的page cache 会被踢出LRU链表并且释放页面，这个过程叫做eviction(移出)。
- * 2.当第二次访问时，page cache被升级到活跃LRU链表，这样不活跃链表也空出一个位置，这个过程叫作activation(激活).
- * 3.从宏观时间轴来看，eviction过程处理的页面数量与activation过程处理的页数量的和等于不活跃链表的长度NR_inactive。
- * 4.要从不活跃链表中释放一个页面，需要移动N个页面(N = 不活跃链表长度).
+ * 当我们观察文件缓存不活跃链表的行为特征时,会发现如下有趣特征.
+ * 1.有一个page cache页面第一次访问时,它加入到不活跃链表头,然后慢慢从链表头向链表尾移动,链表尾的page cache 会被踢出LRU链表并且释放页面,这个过程叫做eviction(移出).
+ * 2.当第二次访问时,page cache被升级到活跃LRU链表,这样不活跃链表也空出一个位置,这个过程叫作activation(激活).
+ * 3.从宏观时间轴来看,eviction过程处理的页面数量与activation过程处理的页数量的和等于不活跃链表的长度NR_INACTIVE.
+ * 4.要从不活跃链表中释放一个页面,需要移动N个页面(N = 不活跃链表长度).
  *
- * 综合上面的一些行为特征，定义了Refault Distance的概念.
- * 第一次访问page cache称为fault，第二次访问该页面称为refault.
- * page cache页面第一次被踢出LRU链表并回收(eviction)的时刻称为E，第二次再访问该页的时刻称为R，那么R-E的时间里需要移动的页面个数称为Refault Distance.
+ * 综合上面的一些行为特征,定义了Refault Distance的概念.
+ * 第一次访问page cache称为fault,第二次访问该页面称为refault.
+ * page cache页面第一次被踢出LRU链表并回收(eviction)的时刻称为E,第二次再访问该页的时刻称为R,那么R-E的时间里需要移动的页面个数称为Refault Distance.
  *
- * 把Refault Distance概念再加上第一次读的时刻，可以用一个公式来概括第一次和第二次读之间的距离(read_distance).
+ * 把Refault Distance概念再加上第一次读的时刻,可以用一个公式来概括第一次和第二次读之间的距离(read_distance).
  * 	read_distance = nr_inactive + (R-E)
  *
- * 如果page想一直保持在LRU链表中，那么read_distance不应该比内存的大小还长，否则该page永远都会被踢出LRU链表，因此公式可以推导为:
+ * 如果page想一直保持在LRU链表中,那么read_distance不应该比内存的大小还长,否则该page永远都会被踢出LRU链表,因此公式可以推导为:
  *
- *  NR_inactive+（R-E） <= NR_inactive+NR_active
- *  (R-E) <= NR_active
+ *  NR_INACTIVE + (R-E) <= NR_INACTIVE + NR_ACTIVE
+ *  (R-E) <= NR_ACTIVE
  *
- * 换句话说，Refault Distance 可以理解为不活跃链表的"财政赤字"，
- * 如果不活跃链表常熟至少再延长Refault Distance，那么就可以保证该page cache在第二次读之前不会被踢出LRU链表并释放内存，
- * 否则就要把该page cache重新加入活跃链表加以保护，以防内存颠簸.
- * 在理想情况下，page cache的平均访问距离要大于不活跃链表，小于总的内存大小。
- * 上述内容讨论了两次读的距离小于等于内存大小的情况，即NR_inactive+(R-E)<= NR_inactive+NR_active,如果两次读的距离大于内存大小呢？
- * 这种特殊情况不是Refault Distance算法能解决的问题，因为它在第二次读时永远已经被踢出LRU链表，因为可以假设第二次读发生在遥远的未来，但谁都无法保证它在LRU链表中.
- * 其实Refault Distance算法是为了解决前者，在第二次读时，
+ * 换句话说,Refault Distance可以理解为不活跃链表的"财政赤字",
+ * 如果不活跃链表常熟至少再延长Refault Distance,那么就可以保证该page cache在第二次读之前不会被踢出LRU链表并释放内存,
+ * 否则就要把该page cache重新加入活跃链表加以保护,以防内存颠簸.
+ * 在理想情况下,page cache的平均访问距离要大于不活跃链表,小于总的内存大小.
+ * 上述内容讨论了两次读的距离小于等于内存大小的情况,即NR_INACTIVE+(R-E)<= NR_INACTIVE+NR_ACTIVE,如果两次读的距离大于内存大小呢？
+ * 这种特殊情况不是Refault Distance算法能解决的问题,因为它在第二次读时永远已经被踢出LRU链表,因为可以假设第二次读发生在遥远的未来,但谁都无法保证它在LRU链表中.
+ * 其实Refault Distance算法是为了解决前者,在第二次读时,
  * 人为地把page cache添加到活跃链表从而防止该page cache被踢出LRU链表而带来的内存颠簸.
  *
  *  不活跃LRU长度              活跃LRU长度
@@ -247,13 +248,13 @@
  *                  的值的编码存放       说明该page的平均访问时间隙会导致page被提出LRU,
  *                  在shadow中           所以就actived该页面并且加入活跃链表
  *
- * 如上图，T0时刻表示一个page cache第一次访问，
- * 这时会调用 add_to_page_cache_lru()函数来分配一个shadow用来存储zone->inactive_age值，
- * 每当有页面被promote到活跃链表时，zone->inactive_age值会加1，每当有页面被踢出不活跃链表时,zone->inactive_age也会加1.
+ * 如上图T0时刻表示一个page cache第一次访问,
+ * 这时会调用add_to_page_cache_lru()函数来分配一个shadow用来存储zone->inactive_age值,
+ * 每当有页面被promote到活跃链表时,zone->inactive_age值会加1,每当有页面被踢出不活跃链表时,zone->inactive_age也会加1.
  * T1时刻表示该页被踢出LRU链表并从LRU链表中回收释放，
  * 这时把当前T1时刻的zone->inactive_age的值编码存放到shadow中.
- * T2时刻是该页第二次读，这时要计算Refault Distance，Refault Distance = T2 - T1,
- * 如果Refault Distance <= NR_active，
+ * T2时刻是该页第二次读,这时要计算Refault Distance,Refault Distance = T2 - T1,
+ * 如果Refault Distance <= NR_ACTIVE
  * 说明该page cache极有可能在下一次读时已经被踢出LRU链表，
  * 因此要人为地actived该页面并且加入活跃链表中
  */
@@ -422,6 +423,7 @@ void workingset_activation(struct page *page)
 	if (!mem_cgroup_disabled() && !memcg)
 		goto out;
 	lruvec = mem_cgroup_lruvec(page_pgdat(page), memcg);
+	/* 增加lru的lruvec->inactive_age */
 	atomic_long_inc(&lruvec->inactive_age);
 out:
 	rcu_read_unlock();

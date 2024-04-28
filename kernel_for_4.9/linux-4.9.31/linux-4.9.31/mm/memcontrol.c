@@ -712,10 +712,17 @@ struct mem_cgroup *mem_cgroup_from_task(struct task_struct *p)
 	 * mm_update_next_owner() may clear mm->owner to NULL
 	 * if it races with swapoff, page migration, etc.
 	 * So this can be called with p == NULL.
+	 *
+	 * 如果mm_update_next_owner()与swapoff、页面迁移等竞争,它可能会将mm->owner清除为NULL.
+	 *
+	 * 因此,这可以用p == NULL调用.
 	 */
+
+	/* 如果p == NULL,那么直接返回NULL */
 	if (unlikely(!p))
 		return NULL;
 
+	/* 拿到mem_cgourp */
 	return mem_cgroup_from_css(task_css(p, memory_cgrp_id));
 }
 EXPORT_SYMBOL(mem_cgroup_from_task);
