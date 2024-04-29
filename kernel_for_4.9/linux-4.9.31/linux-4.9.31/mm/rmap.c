@@ -1113,7 +1113,9 @@ static int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 
 	/* 如果是常规page 映射 */
 	if (pte) {
-		/* 清除pte的YOUNG bit */
+		/* 清除pte的YOUNG bit
+		 * 判断该pte entry最近是否被访问过,如果访问过,L_PTE_YOUNG比特位会被自动置位,并清空PTE中的L_PTE_YOUNG比特位.
+		 */
 		if (ptep_clear_flush_young_notify(vma, address, pte)) {
 			/*
 			 * Don't treat a reference through a sequentially read
@@ -1127,7 +1129,11 @@ static int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 			 * 如果其他映射已经消失,则取消映射路径将设置PG_referenced或将页面放入活跃链表里面.
 			 */
 
-			/* 如果vma->vm_flags不是顺序读,那么referenced++ */
+			/* 如果vma->vm_flags不是顺序读,那么referenced++
+			 * 这里会排除顺序读的情况,因为顺序读的page cache是被回收的最佳候选者,
+			 * 因此对这些page cache做了弱访问引用处理(weak references,linux commit 4917e5d),
+			 * 而其余的情况都当做pte被引用,最后增加pra->referenced计数和减少pra->mapcount的计数
+			 */
 			if (likely(!(vma->vm_flags & VM_SEQ_READ)))
 				referenced++;
 		}
