@@ -105,6 +105,7 @@ union swap_header {
 /*
  * current->reclaim_state points to one of these when a task is running
  * memory reclaim
+ * 当一个进程运行内存回收的时候,current->reclaim_state就指向这个
  */
 struct reclaim_state {
 	unsigned long reclaimed_slab;

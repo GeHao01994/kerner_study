@@ -3731,23 +3731,34 @@ static bool pfmemalloc_watermark_ok(pg_data_t *pgdat)
 	int i;
 	bool wmark_ok;
 
+	/* 从0到ZONE_NORMAL */
 	for (i = 0; i <= ZONE_NORMAL; i++) {
+		/* 拿到pgdat的zone[i] */
 		zone = &pgdat->node_zones[i];
+		/* 如果该zone没有page或者说该pgdat可回收的page等于0,那么continue */
 		if (!managed_zone(zone) ||
 		    pgdat_reclaimable_pages(pgdat) == 0)
 			continue;
 
+		/* 这里就是让pfmemalloc_reserve += min水位 */
 		pfmemalloc_reserve += min_wmark_pages(zone);
+		/* 这里就是加上zone的NR_FREE_PAGES */
 		free_pages += zone_page_state(zone, NR_FREE_PAGES);
 	}
 
-	/* If there are no reserves (unexpected config) then do not throttle */
+	/* If there are no reserves (unexpected config) then do not throttle
+	 * 如果没有reserves(不预期的配置),则不要节流
+	 */
 	if (!pfmemalloc_reserve)
 		return true;
 
+	/* 如果free_pages > pfmemalloc_reserve / 2; */
 	wmark_ok = free_pages > pfmemalloc_reserve / 2;
 
-	/* kswapd must be awake if processes are being throttled */
+	/* kswapd must be awake if processes are being throttled
+	 * 如果进程被节流,kswapd必须处于唤醒状态
+	 */
+	/* 如果wmark_ok等于false,并且pgdat->kswapd_wait还在等待队列里面,那么算出kswapd_classzone_idx之后唤醒kswapd */
 	if (!wmark_ok && waitqueue_active(&pgdat->kswapd_wait)) {
 		pgdat->kswapd_classzone_idx = min(pgdat->kswapd_classzone_idx,
 						(enum zone_type)ZONE_NORMAL);
@@ -3765,6 +3776,11 @@ static bool pfmemalloc_watermark_ok(pg_data_t *pgdat)
  *
  * Returns true if a fatal signal was delivered during throttling. If this
  * happens, the page allocator should not consider triggering the OOM killer.
+ *
+ * 如果后备存储由网络备份,并且首选节点的PFMEALLOC储备正在危险地耗尽,则限制直接回收器.
+ * kswapd将继续取得进展,并在达到低水位线时唤醒进程.
+  *
+ * 如果在节流期间传递了致命信号,则返回true.如果发生这种情况,页面分配器不应该考虑触发OOM杀手.
  */
 static bool throttle_direct_reclaim(gfp_t gfp_mask, struct zonelist *zonelist,
 					nodemask_t *nodemask)
@@ -3779,13 +3795,21 @@ static bool throttle_direct_reclaim(gfp_t gfp_mask, struct zonelist *zonelist,
 	 * progress. kjournald for example may enter direct reclaim while
 	 * committing a transaction where throttling it could forcing other
 	 * processes to block on log_wait_commit().
+	 *
+	 * 内核线程不应该被限制,因为它们可能间接负责清理回收所需的页面以向前推进.
+	 * 例如,kjournald可以在提交事务时进入直接回收,在该事务中节流可能会强制其他进程在log_wait_commit中block
 	 */
+
+	/* 如果当前进程是内核进程,那么直接goto out */
 	if (current->flags & PF_KTHREAD)
 		goto out;
 
 	/*
 	 * If a fatal signal is pending, this process should not throttle.
 	 * It should return quickly so it can exit and free its memory
+	 *
+	 * 如果一个致命信号处于挂起状态,则该进程不应进行节流.
+	 * 它应该很快返回,以便退出并释放内存
 	 */
 	if (fatal_signal_pending(current))
 		goto out;
@@ -3803,24 +3827,43 @@ static bool throttle_direct_reclaim(gfp_t gfp_mask, struct zonelist *zonelist,
 	 * More importantly, processes running on remote nodes will not compete
 	 * for remote pfmemalloc reserves and processes on different nodes
 	 * should make reasonable progress.
+	 *
+	 * 通过查找具有可用ZONE_NORMAL或更低区域的第一个节点,检查pfmemalloc保留是否正常.
+	 * 预期在网络上交换时需要GFP_KERNEL来分配网络缓冲区,因此ZONE_HIGHMEM不可用.
+	 *
+	 * 节流基于第一个可用节点,节流的进程在队列上等待,直到kswapd取得进展并唤醒它们.
+	 * 假设进程在同一节点上唤醒,则唤醒的进程与回收进程之间存在密切关系.
+	 * 更重要的是,在远程节点上运行的进程不会竞争远程pfmemalloc保留,不同节点上的进程应该取得合理的进展
 	 */
 	for_each_zone_zonelist_nodemask(zone, z, zonelist,
 					gfp_zone(gfp_mask), nodemask) {
+		/* 只遍历ZONE_NORMAL和ZONE_DMA区 */
 		if (zone_idx(zone) > ZONE_NORMAL)
 			continue;
 
-		/* Throttle based on the first usable node */
+		/* Throttle based on the first usable node
+		 * 基于第一个可用节点的节流
+		 */
 		pgdat = zone->zone_pgdat;
+		/* 判断node是否平衡,如果平衡,则返回真
+		 * 如果不平衡,如果此node的kswapd没有被唤醒,则唤醒,并且这里唤醒kswapd只会对ZONE_NORMAL以下的zone进行内存回收
+		 * node是否平衡的判断标准是:
+		 * 此node的ZONE_DMA和ZONE_NORMAL的总共空闲页框数量是否大于此node的ZONE_DMA和ZONE_NORMAL的平均min阀值数量,大于则说明node平衡
+		 */
 		if (pfmemalloc_watermark_ok(pgdat))
 			goto out;
 		break;
 	}
 
-	/* If no zone was usable by the allocation flags then do not throttle */
+	/* If no zone was usable by the allocation flags then do not throttle
+	 * 如果分配标志没有可用的区域,则不要节流
+	 */
 	if (!pgdat)
 		goto out;
 
-	/* Account for the throttling */
+	/* Account for the throttling
+	 * 节流计数
+	 */
 	count_vm_event(PGSCAN_DIRECT_THROTTLE);
 
 	/*
@@ -3830,19 +3873,39 @@ static bool throttle_direct_reclaim(gfp_t gfp_mask, struct zonelist *zonelist,
 	 * it is not safe to block on pfmemalloc_wait as kswapd could be
 	 * blocked waiting on the same lock. Instead, throttle for up to a
 	 * second before continuing.
+	 *
+	 * 如果调用方无法进入文件系统,则可能是由于调用方持有FS锁或在文件系统(如ext[3|4])的情况下执行日志事务.
+	 * 在这种情况下,在pfmemalloc_wait上进行阻塞是不安全的,因为kswapd可能会在等待同一个锁时被阻塞.
+	 * 相反,在继续之前先节流一秒钟。
 	 */
+
+	/* linux内核编程中经常用到wait_event_interruptible_timeout等待异步事件(event)完成,该函数会一直sleep到condition为真或者timeout时间超时 */
 	if (!(gfp_mask & __GFP_FS)) {
+
+	/* 如果分配标志禁止了文件系统操作,则将要进行内存回收的进程设置为TASK_INTERRUPTIBLE状态,
+	 * 然后加入到node的pgdat->pfmemalloc_wait,并且会设置超时时间为1s
+	 * 1.pfmemalloc_watermark_ok(pgdat)为真时被唤醒,而1s没超时,返回剩余timeout(jiffies)
+	 * 2.睡眠超过1s时会唤醒,而pfmemalloc_watermark_ok(pgdat)此时为真,返回1
+	 * 3.睡眠超过1s时会唤醒,而pfmemalloc_watermark_ok(pgdat)此时为假,返回0
+	 * 4.接收到信号被唤醒,返回-ERESTARTSYS
+	 */
 		wait_event_interruptible_timeout(pgdat->pfmemalloc_wait,
 			pfmemalloc_watermark_ok(pgdat), HZ);
 
 		goto check_pending;
 	}
 
-	/* Throttle until kswapd wakes the process */
+	/* Throttle until kswapd wakes the process
+	 * 节流直到kswapd唤醒进程
+	 */
+	/* 其他的情况把它放入到zone->zone_pgdat->pfmemalloc_wai,这里会把进程设置为TASK_KILLABLE
+	 * 除非被杀死或者说条件满足
+	 */
 	wait_event_killable(zone->zone_pgdat->pfmemalloc_wait,
 		pfmemalloc_watermark_ok(pgdat));
 
 check_pending:
+	/* 这里检查它有没有致命的信号,如果有的话返回true */
 	if (fatal_signal_pending(current))
 		return true;
 
@@ -3855,14 +3918,23 @@ unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
 {
 	unsigned long nr_reclaimed;
 	struct scan_control sc = {
+		/* 打算回收32个页框 */
 		.nr_to_reclaim = SWAP_CLUSTER_MAX,
 		.gfp_mask = (gfp_mask = memalloc_noio_flags(gfp_mask)),
 		.reclaim_idx = gfp_zone(gfp_mask),
+		/* 本次内存分配的order值 */
 		.order = order,
 		.nodemask = nodemask,
+		 /* 优先级为默认的12 */
 		.priority = DEF_PRIORITY,
+		/* 与/proc/sys/vm/laptop_mode文件有关
+		 * laptop_mode为0,则允许进行回写操作,即使允许回写,直接内存回收也不能对脏文件页进行回写
+		 * 不过允许回写时,可以对非文件页进行回写
+		 */
 		.may_writepage = !laptop_mode,
+		/* 允许进行unmap操作 */
 		.may_unmap = 1,
+		/* 允许进行非文件页的操作 */
 		.may_swap = 1,
 	};
 
@@ -3870,6 +3942,19 @@ unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
 	 * Do not enter reclaim if fatal signal was delivered while throttled.
 	 * 1 is returned so that the page allocator does not OOM kill at this
 	 * point.
+	 *
+	 * 如果在节流时传递了致命信号,请不要进入reclaim.返回1以至于页面分配器此时不会OOM终止.
+	 */
+
+	/* 当zonelist中获取到的第一个node平衡,则返回,如果获取到的第一个node不平衡,则将当前进程加入到pgdat->pfmemalloc_wait这个等待队列中
+	 * 这个等待队列会在kswapd进行内存回收时,如果让node平衡了,则会唤醒这个等待队列中的进程
+	 * 判断node平衡的标准:
+	 * 	此node的ZONE_DMA和ZONE_NORMAL的总共空闲页框数量是否大于此node的ZONE_DMA和ZONE_NORMAL的平均min阀值数量,大于则说明node平衡
+	 * 加入pgdat->pfmemalloc_wait的情况
+	 * 1.如果分配标志禁止了文件系统操作,则将要进行内存回收的进程设置为TASK_INTERRUPTIBLE状态,然后加入到node的pgdat->pfmemalloc_wait,并且会设置超时时间为1s
+	 * 2.如果分配标志没有禁止了文件系统操作,则将要进行内存回收的进程加入到node的pgdat->pfmemalloc_wait,并设置为TASK_KILLABLE状态,表示允许TASK_UNINTERRUPTIBLE响应致命信号的状态
+	 * 返回真,表示此进程加入过pgdat->pfmemalloc_wait等待队列,并且已经被唤醒
+	 * 返回假,表示此进程没有加入过pgdat->pfmemalloc_wait等待队列
 	 */
 	if (throttle_direct_reclaim(gfp_mask, zonelist, nodemask))
 		return 1;
@@ -4012,6 +4097,11 @@ static bool zone_balanced(struct zone *zone, int order, int classzone_idx)
  * waiting in throttle_direct_reclaim() and that watermarks have been met.
  *
  * Returns true if kswapd is ready to sleep
+ *
+ * kswapd准备好sleeping.
+ * 这将验证没有进程在throttle_direct_reclaim()中等待,并且已满足水位的要求.
+ *
+ * 如果kswapd已准备好睡眠,则返回true
  */
 static bool prepare_kswapd_sleep(pg_data_t *pgdat, int order, int classzone_idx)
 {
@@ -4029,6 +4119,20 @@ static bool prepare_kswapd_sleep(pg_data_t *pgdat, int order, int classzone_idx)
 	 * the wake up is premature, processes will wake kswapd and get
 	 * throttled again. The difference from wake ups in balance_pgdat() is
 	 * that here we are under prepare_to_wait().
+	 *
+	 * 一旦pfmemalloc_watermark_ok()为true,节流进程通常会在balance_pgdat()中被唤醒.
+	 * 但是,当kswapd检查水位和进程被抑制时,两者之间存在潜在的竞争.
+	 * 如果进程被抑制,kswapd唤醒,一个大型进程退出从而平衡zones,这会导致kswapd在到达唤醒检查之前退出balance_pgdat(),这也有潜在的竞争.
+	 * 如果kswapd要休眠,那么任何进程都不应该在pfmemalloc_wait上休眠,所以如果需要.请立即唤醒它们.
+	 * 如果唤醒过早,进程将唤醒kswapd并获得再次节流.
+	 * 与balance_pgdat()中唤醒的不同之处在于,这里我们处于prepare_to_wait()之下.
+	 */
+
+	/* 在直接内存回收过程中,有可能会造成当前需要分配内存的进程被加入一个等待队列,当整个node的空闲页数量满足要求时,
+	 * 由kswapd唤醒它重新获取内存.这个等待队列头就是node结点描述符pgdat中的pfmemalloc_wait.
+	 * 如果当前进程加入到了pgdat->pfmemalloc_wait这个等待队列中,那么进程就不会进行直接内存回收,而是由kswapd唤醒后直接进行内存分配
+	 *
+	 * 所以这里唤醒pgdat->pfmemalloc_wait等待队列
 	 */
 	if (waitqueue_active(&pgdat->pfmemalloc_wait))
 		wake_up_all(&pgdat->pfmemalloc_wait);
@@ -4229,11 +4333,23 @@ static void kswapd_try_to_sleep(pg_data_t *pgdat, int alloc_order, int reclaim_o
 				unsigned int classzone_idx)
 {
 	long remaining = 0;
+	/* 创建一个等待队列
+	 * #define DEFINE_WAIT_FUNC(name, function)		\
+	 * wait_queue_t name = {				\
+	 *	.private	= current,			\
+	 *	.func		= function,			\
+	 *	.task_list	= LIST_HEAD_INIT((name).task_list),	\
+	 * }
+	 *
+	 * #define DEFINE_WAIT(name) DEFINE_WAIT_FUNC(name, autoremove_wake_function)
+	 */
 	DEFINE_WAIT(wait);
 
+	/* 如果当前内核进程需要被stop掉,或者正在freezing,那么直接返回 */
 	if (freezing(current) || kthread_should_stop())
 		return;
 
+	/* 这里就是把kswapd_wait添加到wait这个等待队列的头,然后设置当前进程为TASK_INTERRUPTIBLE状态 */
 	prepare_to_wait(&pgdat->kswapd_wait, &wait, TASK_INTERRUPTIBLE);
 
 	/* Try to sleep for a short interval */
@@ -4311,6 +4427,13 @@ static void kswapd_try_to_sleep(pg_data_t *pgdat, int alloc_order, int reclaim_o
  *
  * If there are applications that are active memory-allocators
  * (most normal use), this basically shouldn't matter.
+ *
+ * 后台pageout守护进程,从init进程作为内核线程启动。
+ *
+ * 这基本上是涓涓细流的页面,这样我们就有了_some_ 可用内存,即使没有其他活动可以释放任何内存.
+ * 这是路由等事情所需要的,否则我们可能会在进行所有活动无法分页的异步上下文.
+ *
+ * 如果有应用程序是活动内存分配器(大多数正常使用),这基本上无关紧要.
  */
 static int kswapd(void *p)
 {
@@ -4321,12 +4444,17 @@ static int kswapd(void *p)
 	struct reclaim_state reclaim_state = {
 		.reclaimed_slab = 0,
 	};
+
+	/* 拿到该pgdat的cpumask */
 	const struct cpumask *cpumask = cpumask_of_node(pgdat->node_id);
 
 	lockdep_set_current_reclaim_state(GFP_KERNEL);
 
+	/* 如果cpumask_empty不是空的,设置当前kswapd的cpumask */
 	if (!cpumask_empty(cpumask))
 		set_cpus_allowed_ptr(tsk, cpumask);
+
+	/* 将reclaim_state赋值给current->reclaim_state */
 	current->reclaim_state = &reclaim_state;
 
 	/*
@@ -4340,16 +4468,25 @@ static int kswapd(void *p)
 	 * page out something else, and this flag essentially protects
 	 * us from recursively trying to free more memory as we're
 	 * trying to free the first piece of memory in the first place).
+	 *
+	 * 告诉内存管理,我们是一个"内存分配器",如果我们需要更多的内存,我们无论如何都应该访问它(请参见"__alloc_page()").
+	 * "kswapd"应该永远不要陷入正常的页面释放逻辑.
+	 *
+	 * (Kswapd通常不需要内存,但有时您需要少量内存才能分页出其他内容,而此标志基本上可以保护我们从递归地试图释放更多的内存,就像我们从一开始就试图释放第一块内存一样).
 	 */
 	tsk->flags |= PF_MEMALLOC | PF_SWAPWRITE | PF_KSWAPD;
 	set_freezable();
 
+	/* 初始化pgdat->kswapd_order、alloc_order、reclaim_order
+	 * pgdat->kswapd_classzone_idx、classzone_idx
+	 */
 	pgdat->kswapd_order = alloc_order = reclaim_order = 0;
 	pgdat->kswapd_classzone_idx = classzone_idx = 0;
 	for ( ; ; ) {
 		bool ret;
 
 kswapd_try_sleep:
+		/* 系统启动时会在kswapd_try_to_sleep函数中睡眠并让出CPU控制权. */
 		kswapd_try_to_sleep(pgdat, alloc_order, reclaim_order,
 					classzone_idx);
 

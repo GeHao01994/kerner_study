@@ -746,6 +746,13 @@ extern struct page *mem_map;
  *
  * Memory statistics and page replacement data structures are maintained on a
  * per-zone basis.
+ *
+ * pg_data_t结构用于具有CONFIG_DISCONTIGMEM的机器(大多数是NUMA机器?),
+ * 以表示比区域所表示的更高级别的内存区域.
+ *
+ * 在NUMA机器上,每个NUMA节点都有一个pg_data_t来描述其内存布局.
+ *
+ * 内存统计信息和页面替换数据结构以每个区域为基础进行维护.
  */
 struct bootmem_data;
 typedef struct pglist_data {
@@ -779,10 +786,23 @@ typedef struct pglist_data {
 	unsigned long node_spanned_pages; /* total size of physical page
 					     range, including holes */
 	int node_id;
+	/* kswapd_wait是一个等待队列,每个pg_data_t数据结构都有这样一个等待队列,在free_area_init_core函数中初始化的
+	 * 等待队列用于使进程等待某一事件发生,而无需频繁轮询,进程在等待期间睡眠.在某事件发生时,由内核自动唤醒.
+	 * kswapd内核线程在kswapd_wait等待队列上等待TASK_INTERRUPTIBLE事件发生.
+	 */
 	wait_queue_head_t kswapd_wait;
+	/* 在直接内存回收过程中,有可能会造成当前需要分配内存的进程被加入一个等待队列,当整个node的空闲页数量满足要求时,由kswapd唤醒它重新获取内存.
+	 * 这个等待队列头就是node结点描述符pgdat中的pfmemalloc_wait.
+	 * 如果当前进程加入到了pgdat->pfmemalloc_wait这个等待队列中,那么进程就不会进行直接内存回收,而是由kswapd唤醒后直接进行内存分配.
+	 * 用于减缓内存直接回收
+	 */
 	wait_queue_head_t pfmemalloc_wait;
 	struct task_struct *kswapd;	/* Protected by
 					   mem_hotplug_begin/end() */
+	/* 页面分配路径上的唤醒函数wakeup_kswapd把kswap_order和classzone_idx作为参数传递给kswapd内核线程.
+	 * 在内核内存路径上,如果在低水位(ALLOC_WMARK_LOW)情况下无法成功分配内存,
+	 * 那么会通过wakeup_kswapd函数唤醒kswapd内核线程来回收页面,以便释放一些内存.
+	 */
 	int kswapd_order;
 	enum zone_type kswapd_classzone_idx;
 

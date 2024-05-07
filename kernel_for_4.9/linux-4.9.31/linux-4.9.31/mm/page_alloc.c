@@ -4126,8 +4126,38 @@ __perform_reclaim(gfp_t gfp_mask, unsigned int order,
 
 	cond_resched();
 
-	/* We now go into synchronous reclaim */
+	/* We now go into synchronous reclaim
+	 * 我们现在进入同步回收
+	 */
+	/* cpuset_memory_pressure_bump().代码如下所示:
+	 * #define cpuset_memory_pressure_bump()	\
+	 * do {						\
+	 *	if (cpuset_memory_pressure_enabled)		\
+	 *	__cpuset_memory_pressure_bump();	\
+	 * } while (0)
+	 * 它实际上就是一个宏定义.如果启用了memory pressure,也就是cpuset_memroy_pressue_enable为1时.
+	 * 就会执行__cpuset_memroy_pressure_bump().代码如下:
+	 * void __cpuset_memory_pressure_bump(void)
+	 * {
+	 *	task_lock(current);
+	 *	fmeter_markevent(&task_cs(current)->fmeter);
+	 *	task_unlock(current);
+	 * }
+	 * 在这里我们就看到cpuset->fmeter成员的意义,它就是用来计算内存压力的.
+	 * fmeter_markevent()就不分析了,它无非就是根据请求时内存不足速率来计算压力值.
+	 * 最后计算出来的压力值会保存在fmeter.val中.
+	 */
 	cpuset_memory_pressure_bump();
+	/* PF_MEMALLOC含义: 当前进程有很多可以释放的内存,如果能分配一点紧急内存给当前进程,那么当前进程可以返回更多的内存给系统.
+	 * 非内存管理子系统不应该使用这个标记,除非这次分配保证会释放更大的内存给系统.
+	 * 如果每个子系统都滥用这个标记，可能会耗尽内存管理子系统的保留内存.
+	 *
+	 * 当一个进程被设置PF_MEMALLOC后，那么对进程会有如下影响：
+	 * 1. 当进程进行页面分配时,可以忽略内存管理的水印进行分配,这是告诉内存管理系统,给我一点紧急内存使用,我将会释放更多的内存给你.
+	 * 2. 如果忽略水印分配仍然失败,那么直接返回-ENOMEM,而不是等待kswapd回收或者缩减内存
+	 * 3. 如果忽略水印分配仍然失败,那么直接返回-ENOMEM,而不会调用OOM killer去杀死进程,释放内存
+	 * 4. 2和3 说的很清楚了,就是在page_allocs中失败并不会重试.
+	 */
 	current->flags |= PF_MEMALLOC;
 	lockdep_set_current_reclaim_state(gfp_mask);
 	reclaim_state.reclaimed_slab = 0;
@@ -4492,7 +4522,7 @@ retry_cpuset:
 
 	/* 如果允许直接回收,并且order > PAGE_ALLOC_COSTLY_ORDER
 	 * #define PAGE_ALLOC_COSTLY_ORDER 3
-	 * 并且gfp_pfmemalloc_allowed表示是否允许访问系统预留的内存,如果不允许,那么尝试内存规整操作，进行页的迁移
+	 * 并且gfp_pfmemalloc_allowed表示是否允许访问系统预留的内存,如果不允许,那么尝试内存规整操作,进行页的迁移
 	 */
 
 	/* 前面没有分配到内存可能是因为内存碎片原因,所以就调用__alloc_pages_direct_compact尝试内存规整操作,进行页的迁移,然后再尝试分配执行
@@ -4623,7 +4653,7 @@ retry:
 	 * 避免无水位的分配无休止地循环
 	 */
 
-	/* 进程被设置了TIF_MEMDIE(只有在线程刚好被OOM killer机制选中时，才会设置TIF_MEMDIE)
+	/* 进程被设置了TIF_MEMDIE(只有在线程刚好被OOM killer机制选中时,才会设置TIF_MEMDIE)
 	 * 并且gfp_mask没有设置__GFP_NOFAIL的时候,goto nopage进行退出
 	 */
 	if (test_thread_flag(TIF_MEMDIE) && !(gfp_mask & __GFP_NOFAIL))

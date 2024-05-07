@@ -24,8 +24,15 @@ void add_wait_queue(wait_queue_head_t *q, wait_queue_t *wait)
 {
 	unsigned long flags;
 
+	/* 清除 WQ_FLAG_EXCLUSIVE */
 	wait->flags &= ~WQ_FLAG_EXCLUSIVE;
 	spin_lock_irqsave(&q->lock, flags);
+	/* static inline void __add_wait_queue(wait_queue_head_t *head, wait_queue_t *new)
+	 * {
+	 *	list_add(&new->task_list, &head->task_list);
+	 * }
+	 */
+	/* 把q添加到等待队列的头 */
 	__add_wait_queue(q, wait);
 	spin_unlock_irqrestore(&q->lock, flags);
 }
@@ -167,16 +174,25 @@ EXPORT_SYMBOL_GPL(__wake_up_sync);	/* For internal use only */
  * one way (it only protects stuff inside the critical region and
  * stops them from bleeding out - it would still allow subsequent
  * loads to move into the critical region).
+ *
+ * 注意: 我们使用"set_current_state()" _after_ 等待队列添加,
+ * 因为我们在SMP上需要一个内存屏障,这样任何测试等待队列处于活动状态的唤醒函数都可以保证看到等待队列添加 _or_ 该线程中的后续测试将看到唤醒已经发生.
+ *
+ * spin_unlock()本身是半渗透的,只保护一种方式(它只保护关键区域内的物质并阻止它们渗出 - 它仍然允许后续移动到临界区域的负载)
  */
 void
 prepare_to_wait(wait_queue_head_t *q, wait_queue_t *wait, int state)
 {
 	unsigned long flags;
-
+	/* 通过设置WQ_FLAG_EXCLUSIVE标志位,只有一个进程会被唤醒来处理连接请求,其他进程会被阻塞.
+	 * 这样可以有效地避免因多个进程同时处理同一个连接请求而导致的性能下降.
+	 */
 	wait->flags &= ~WQ_FLAG_EXCLUSIVE;
 	spin_lock_irqsave(&q->lock, flags);
+	/* 如果当前等待队列的task_list是空的,才把q添加到等待队列的头中 */
 	if (list_empty(&wait->task_list))
 		__add_wait_queue(q, wait);
+	/* 设置当前进程的状态为传进来的state */
 	set_current_state(state);
 	spin_unlock_irqrestore(&q->lock, flags);
 }
@@ -199,18 +215,22 @@ EXPORT_SYMBOL(prepare_to_wait_exclusive);
 void init_wait_entry(wait_queue_t *wait, int flags)
 {
 	wait->flags = flags;
-	wait->private = current;
-	wait->func = autoremove_wake_function;
-	INIT_LIST_HEAD(&wait->task_list);
+	wait->private = current;  /*当前进程的task struct*/
+	wait->func = autoremove_wake_function; /*默认的唤醒函数，唤醒成功后将wq_entry的entry从链表上摘下来*/
+	INIT_LIST_HEAD(&wait->task_list);	/*初始化链表，以便唤醒进程时遍历 */
 }
 EXPORT_SYMBOL(init_wait_entry);
 
+/* 将刚刚初始化好的wait_queue_t挂到wait_queue_head链表中(该链表是wait_event_interruptible_timeout的第一个参数,
+ * 链表是在调用函数前就初始化好的,一般在驱动的probe中完成初始化)
+ */
 long prepare_to_wait_event(wait_queue_head_t *q, wait_queue_t *wait, int state)
 {
 	unsigned long flags;
 	long ret = 0;
 
 	spin_lock_irqsave(&q->lock, flags);
+	/*如果此时有信号给到当前线程,那就将wait_queue_t从wait_queue_head_t链表中去处并返回-ERESTARTSYS,此则为信号中断了当前线程的休眠等待 */
 	if (unlikely(signal_pending_state(state, current))) {
 		/*
 		 * Exclusive waiter must not fail if it was selected by wakeup,
@@ -223,18 +243,30 @@ long prepare_to_wait_event(wait_queue_head_t *q, wait_queue_t *wait, int state)
 		 * But we need to ensure that set-condition + wakeup after that
 		 * can't see us, it should wake up another exclusive waiter if
 		 * we fail.
+		 *
+		 * 独占等待者一定不能失败,如果它通过wakeup选择,
+		 * 它应该“消耗”我们正在等待的条件.
+		 *
+		 * 如果我们已经被唤醒,调用者将重新检查条件并返回成功,我们不能错过该event,因为唤醒locks/unlocks 相同的q->lock.
+		 *
+		 * 但我们需要确保set-condition + wakeup在这之后不能看到我们,如果我们失败了,它应该唤醒另一个独占等待者.
 		 */
+		/* 把它从wait_queue_head_t队列中删除掉 */
 		list_del_init(&wait->task_list);
 		ret = -ERESTARTSYS;
 	} else {
+		/* 如果它还没有添加到q等待队列里面去 */
 		if (list_empty(&wait->task_list)) {
+			/* 如果是独占的,那么把它添加到尾部 */
 			if (wait->flags & WQ_FLAG_EXCLUSIVE)
 				__add_wait_queue_tail(q, wait);
-			else
+			else	/* 否则,添加到头部 */
 				__add_wait_queue(q, wait);
 		}
+		/* 设置当前进程的状态为传进来的参数 */
 		set_current_state(state);
 	}
+	/* 解锁 */
 	spin_unlock_irqrestore(&q->lock, flags);
 
 	return ret;

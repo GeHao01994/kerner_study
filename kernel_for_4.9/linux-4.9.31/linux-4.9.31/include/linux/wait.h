@@ -14,14 +14,19 @@ typedef int (*wait_queue_func_t)(wait_queue_t *wait, unsigned mode, int flags, v
 int default_wake_function(wait_queue_t *wait, unsigned mode, int flags, void *key);
 
 /* __wait_queue::flags */
+/* WQ_FLAG_EXCLUSIVE,表示等待的进程应该独占资源(解决惊群现象). */
 #define WQ_FLAG_EXCLUSIVE	0x01
+/* In particular,that change causes a special flag (WQ_FLAG_WOKEN) to be set in the flags field of the wait queue entry.
+ * If wait_woken()sees that flag,it knows that the wakeup already occurred and doesn't block.
+ * Otherwise,the wakeup has not occurred, so wait_woken() can safely call schedule() to wait.
+ */
 #define WQ_FLAG_WOKEN		0x02
 
 struct __wait_queue {
-	unsigned int		flags;
-	void			*private;
-	wait_queue_func_t	func;
-	struct list_head	task_list;
+	unsigned int		flags;	/* 标志位 */
+	void			*private;	/* 用来保存本线程的task_struct结构体,一般是current,为了之后做唤醒 */
+	wait_queue_func_t	func;		/* 遍历到该wait_queue_entry时的回调函数,在本文场景中为唤醒线程的函数 */
+	struct list_head	task_list;	/* 链表结构,为了能把自己挂在wait_queue_head上 */
 };
 
 struct wait_bit_key {
@@ -239,8 +244,10 @@ wait_queue_head_t *bit_waitqueue(void *, int);
 #define ___wait_cond_timeout(condition)					\
 ({									\
 	bool __cond = (condition);					\
+	/*如果条件满足同时timeout为0，返回1*/				\
 	if (__cond && !__ret)						\
 		__ret = 1;						\
+	/* 条件不满足且timeout不为0,说明需要sleep等待了,返回0 */	\
 	__cond || !__ret;						\
 })
 
@@ -260,6 +267,13 @@ extern void init_wait_entry(wait_queue_t *__wait, int flags);
  * The type inconsistency of the wait_event_*() __ret variable is also
  * on purpose; we use long where we can return timeout values and int
  * otherwise.
+ *
+ * 当从wait_event_*()宏中使用时,以下宏___wait_event()具有__ret变量的显式影子
+ *
+ * 这样,两者都可以使用__wait_cond_timeout()构造来包装条件.
+ *
+ * wait_event_*() __ret变量的类型不一致也是故意的;
+ * 我们使用long来返回超时值,否则使用int.
  */
 
 #define ___wait_event(wq, condition, state, exclusive, ret, cmd)	\
@@ -268,20 +282,46 @@ extern void init_wait_entry(wait_queue_t *__wait, int flags);
 	wait_queue_t __wait;						\
 	long __ret = ret;	/* explicit shadow */			\
 									\
+	/* 初始化wait_queue_t
+	 *
+	 *  void init_wait_entry(wait_queue_t *wait, int flags)
+	 *  {
+	 *	wait->flags = flags;
+	 *	wait->private = current; 当前进程的task struct
+	 *	wait->func = autoremove_wake_function; 默认的唤醒函数，唤醒成功后将wq_entry的entry从链表上摘下来
+	 *	INIT_LIST_HEAD(&wait->task_list); 初始化链表，以便唤醒进程时遍历
+	 *  }
+	 */								\
 	init_wait_entry(&__wait, exclusive ? WQ_FLAG_EXCLUSIVE : 0);	\
 	for (;;) {							\
+		/* 将刚刚初始化好的wait_queue_entry挂到wait_queue_head链表中(该链表是wait_event_interruptible_timeout的第一个参数,
+		 * 链表是在调用函数前就初始化好的,一般在驱动的probe中完成初始化)
+		 * 还会设置当前进程的状态为传进来的state
+		 * 可以看一下这个函数,如果signal_pending_state才会返回-ERESTARTSYS
+		 * 其他的case都是返回0
+		 */							\
 		long __int = prepare_to_wait_event(&wq, &__wait, state);\
 									\
+		/* 如果条件满足,那么break当前的循环 */			\
 		if (condition)						\
 			break;						\
 									\
+		/* #define ___wait_is_interruptible(state)
+		 *	(!__builtin_constant_p(state) || state == TASK_INTERRUPTIBLE || state == TASK_KILLABLE)
+		 *
+		 * 这里判断它是不是可中断的
+		 * 如果是,并且上面prepare_to_wait_event的signal_pending_state状态触发了,那么
+		 * 把__int赋值给__ret之后返回__ret,就不要做任何事情了
+		 */							\
 		if (___wait_is_interruptible(state) && __int) {		\
 			__ret = __int;					\
 			goto __out;					\
 		}							\
 									\
+		/* 否则,就运行cmd */					\
 		cmd;							\
 	}								\
+	/* 这里就是去设置当前进程为TASK_RUNNING状态,然后把它从等待队列中拔掉 */	\
 	finish_wait(&wq, &__wait);					\
 __out:	__ret;								\
 })
@@ -467,6 +507,9 @@ do {									\
 	__ret;								\
 })
 
+/* 需要明确,这里都是宏,在预编译时做展开,所以参数中的表达式不会在进入宏之前执行
+ * 所以这里不会执行schedule_timeout,而是替换到___wait_event里面去执行
+ */
 #define __wait_event_interruptible_timeout(wq, condition, timeout)	\
 	___wait_event(wq, ___wait_cond_timeout(condition),		\
 		      TASK_INTERRUPTIBLE, 0, timeout,			\
@@ -491,11 +534,45 @@ do {									\
  * the remaining jiffies (at least 1) if the @condition evaluated
  * to %true before the @timeout elapsed, or -%ERESTARTSYS if it was
  * interrupted by a signal.
+ *
+ * wait_event_interruptible_timeout - 睡眠,直到条件成立或超时为止
+ * @wq: 要等待的等待队列
+ * @condition: 要等待的事件的C表达式
+ * @timeout: 超时,以jiffies为单位
+ *
+ * 进程进入休眠状态(TASK_INTERRUPTIBLE),直到@condition评估为true或接收到信号.
+ * 每次唤醒waitqueue @wq时,都会检查@condition.
+ *
+ * 在更改任何可能更改等待条件结果的变量后,必须调用wake_up().
+ *
+ * 返回:
+ * 0,如果@condition在@timeout后评估为%false.
+ * 1,如果@condition在@timeout后评估为%true.
+ *
+ * 如果@condition是在@timeout前评估为%true,则为剩余的jiffies(至少为1);
+ * 如果被信号中断,则为-%ERESTARTSYS.
  */
 #define wait_event_interruptible_timeout(wq, condition, timeout)	\
 ({									\
 	long __ret = timeout;						\
+	/* 用于debug,wait_event_interruptible_timeout在condition不为true时会休眠,
+	 * 因此不能在原子上下文中调用,这里加入might_sleep,
+	 * 如果用户在原子上下中调用wait_event_interruptible_timeout会打印出调用栈,方便尽早发现问题.
+	 */								\
 	might_sleep();							\
+	/* #define ___wait_cond_timeout(condition)
+	 * ({
+	 *	bool __cond = (condition);
+	 *	if (__cond && !__ret)	如果条件满足同时timeout为0,返回1
+	 *		__ret = 1;
+	 *	__cond || !__ret;	条件不满足且timeout不为0,说明需要sleep等待了,返回0
+	 * })
+	 * 实际上这里就是判断condition和timeout成不成立
+	 * 如果condition等于1,并且ret等于0
+	 * 那么___wait_cond_timeout就返回1
+	 * 否则返回condition || !_ret
+	 */								\
+	/* 所以如果说condition返回0并且ret即timeout还有值,那么我们进入到__wait_event_interruptible_timeout中去 */	\
 	if (!___wait_cond_timeout(condition))				\
 		__ret = __wait_event_interruptible_timeout(wq,		\
 						condition, timeout);	\
@@ -766,7 +843,7 @@ do {									\
 	((condition)							\
 	 ? 0 : __wait_event_interruptible_locked(wq, condition, 1, 1))
 
-
+/* TASK_KILLABLE(可杀的深度睡眠): 可以被等到的资源唤醒,不能被常规信号唤醒,但是可以被致命信号唤醒,醒后即死. */
 #define __wait_event_killable(wq, condition)				\
 	___wait_event(wq, condition, TASK_KILLABLE, 0, 0, schedule())
 
