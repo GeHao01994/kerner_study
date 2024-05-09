@@ -1,4 +1,7 @@
 How to conserve battery power using laptop-mode
+
+如何使用laptop-mode节省电池电量
+
 -----------------------------------------------
 
 Document Author: Bart Samwel (bart@samwel.tk)
@@ -11,6 +14,9 @@ Introduction
 Laptop mode is used to minimize the time that the hard disk needs to be spun up,
 to conserve battery power on laptops. It has been reported to cause significant
 power savings.
+
+Laptop mode 用于最大限度地减少硬盘旋转的时间,以节省laptops的电池电量.
+据报道,它可以显著节省电力.
 
 Contents
 --------
@@ -45,6 +51,17 @@ mode manually. To start laptop mode, run "laptop_mode start", and to
 stop it, run "laptop_mode stop". (Note: The laptop mode tools package now
 has experimental support for APM, you might want to try that first.)
 
+要使用laptop模式,您不需要设置任何内核配置选项或任何内容.
+只需安装本文档中包含的所有文件,当您使用电池时,laptop模式将自动启动.为了方便起见,可以在以下位置下载包含安装程序的tarball:
+
+http://www.samwel.tk/laptop_mode/laptop_mode/
+
+要配置laptop电脑模式,您需要编辑配置文件,该文件位于基于Debian的系统上的/etc/default/laptop-mode下,或其他系统上的etc/sysconfig/laptop-mode下
+
+不幸的是,laptop的自动启用不适用于没有ACPI的lattops.在这些laptops上,您需要手动启动laptop mode.
+若要启动laptop mode,请运行“laptop_mode start”,若要停止,则运行“laptop_mode stop”.
+(注意: laptop mode package现在对APM有实验性支持,您可能想先尝试一下.)
+
 
 Caveats
 -------
@@ -54,24 +71,41 @@ Caveats
   scripts automatically turn off laptop mode when the battery almost runs out,
   so that you won't lose any data at the end of your battery life.
 
+* laptop mode的缺点是,你有可能损失长达10分钟的工作时间.
+  如果你负担不起,就不要使用它!当电池几乎耗尽时,提供的ACPI脚本会自动关闭laptop mode,这样在电池寿命结束时您就不会丢失任何数据.
+
 * Most desktop hard drives have a very limited lifetime measured in spindown
   cycles, typically about 50.000 times (it's usually listed on the spec sheet).
   Check your drive's rating, and don't wear down your drive's lifetime if you
   don't need to.
+
+ 大多数台式机硬盘驱动器的使用寿命非常有限,以降速周期为单位,通常约为50000次(通常在规格表上列出).
+ 检查您的硬盘评级,如果不需要,请不要耗尽硬盘的使用寿命。
 
 * If you mount some of your ext3/reiserfs filesystems with the -n option, then
   the control script will not be able to remount them correctly. You must set
   DO_REMOUNTS=0 in the control script, otherwise it will remount them with the
   wrong options -- or it will fail because it cannot write to /etc/mtab.
 
+ 如果使用-n选项装载一些ext3/reiserfs文件系统,
+ 那么控制脚本将无法正确地重新装载它们.
+ 您必须在控制脚本中设置DO_REMOUNTS=0,否则它将使用错误的选项重新装载它们 -- 或者它将失败,因为它无法写入/etc/mtab.
+
 * If you have your filesystems listed as type "auto" in fstab, like I did, then
   the control script will not recognize them as filesystems that need remounting.
   You must list the filesystems with their true type instead.
+
+ 如果像我一样,在fstab中将文件系统列为类型“auto”,
+ 那么控制脚本将不会将它们识别为需要重新安装的文件系统.
+ 您必须列出文件系统及其真实类型.
 
 * It has been reported that some versions of the mutt mail client use file access
   times to determine whether a folder contains new mail. If you use mutt and
   experience this, you must disable the noatime remounting by setting the option
   DO_REMOUNT_NOATIME to 0 in the configuration file.
+
+ 据报道,某些版本的mutt邮件客户端使用文件访问时间来确定文件夹是否包含新邮件.
+ 如果使用mutt并遇到这种情况,则必须通过在配置文件中将选项DO_REMOUNT_NOATIME设置为0来禁用noatime重新安装.
 
 
 The Details
@@ -88,6 +122,13 @@ knob determines the time between the occurrence of disk I/O and when the flush
 is triggered. A sensible value for the knob is 5 seconds. Setting the knob to
 0 disables laptop mode.
 
+Laptop mode 由旋钮/proc/sys/vm/laptop_mode控制.
+这个旋钮是适用于所有laptop mode补丁的内核,不管任何配置选项.
+设置旋钮后,任何物理磁盘I/O(可能已经导致硬盘旋转)导致Linux刷新所有脏块.
+这个这样做的结果是,在磁盘降速,它将不会增速再写脏块了,因为那些块已经写过了紧接在最近的读取操作之后.
+laptop_mode的值旋钮确定磁盘I/O发生和刷新之间的时间被触发.旋钮的合理值为5秒.
+将旋钮设置为0禁用laptop mode.
+
 To increase the effectiveness of the laptop_mode strategy, the laptop_mode
 control script increases dirty_expire_centisecs and dirty_writeback_centisecs in
 /proc/sys/vm to about 10 minutes (by default), which means that pages that are
@@ -98,6 +139,12 @@ ext3 or ReiserFS filesystems (also done automatically by the control script),
 this results in concentration of disk activity in a small time interval which
 occurs only once every 10 minutes, or whenever the disk is forced to spin up by
 a cache miss. The disk can then be spun down in the periods of inactivity.
+
+为了提高laptop_mode策略的有效性,控制脚本增加了/proc/sys/vm中的dirty_expire_centisecs和dirty_writeback_centisec
+大约为10分钟(默认情况下),这意味着脏的页面不会像通常那样被强制写入磁盘.
+控制脚本也更改dirty background ratio,以至于后台写回脏页不再完成.对于ext3或ReiserFS文件系统,与更高的提交值(也是10分钟)相结合(也由控制脚本自动完成),
+这导致磁盘活动在一个小的时间间隔内集中每10分钟只发生一次,或者每当磁盘被缓存未命中.
+然后可以在不活动的时间段内使磁盘降速.
 
 If you want to find out which process caused the disk to spin up, you can
 gather information by setting the flag /proc/sys/vm/block_dump. When this flag
@@ -110,6 +157,11 @@ kernel debugging messages, you probably want to turn off klogd, otherwise
 the output of block_dump will be logged, causing disk activity that is not
 normally there.
 
+如果您想找出是哪个进程导致磁盘旋转,您可以通过设置标志/proc/sys/vm/block_dump来收集信息.
+当此标志设置,Linux报告发生的所有磁盘读写操作,以及对文件执行的所有块目录.
+这可能debug为什么磁盘需要旋转,并进一步延长电池寿命.block_dump的输出被写入内核输出,可以使用“dmesg”获得.
+当您使用block_dump时,您的kernel logging level还包括内核调试消息,可能需要关闭klogd,否则
+blockdump的输出将被记录,导致磁盘活动不是通常在那里.
 
 Configuration
 -------------

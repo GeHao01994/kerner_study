@@ -3628,8 +3628,15 @@ static inline bool zone_watermark_fast(struct zone *z, unsigned int order,
 bool zone_watermark_ok_safe(struct zone *z, unsigned int order,
 			unsigned long mark, int classzone_idx)
 {
+	/* 拿到zone的free pages数目 */
 	long free_pages = zone_page_state(z, NR_FREE_PAGES);
 
+	/* 内核在内存管理中,读取空闲页面与watermark值进行比较,要读取正确的空闲页面值,
+	 * 必须同时读取vm_stat[]和__percpu *pageset计算器.
+	 * 如果每次都读取的话会降低效率,因此设定了percpu_drift_mark值,只有在低于这个值的时候,才触发更精确的计算来保持性能.
+	 *
+	 * 详见https://blog.csdn.net/u012294613/article/details/124150086
+	 */
 	if (z->percpu_drift_mark && free_pages < z->percpu_drift_mark)
 		free_pages = zone_page_state_snapshot(z, NR_FREE_PAGES);
 

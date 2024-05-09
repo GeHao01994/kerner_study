@@ -1108,8 +1108,16 @@ EXPORT_SYMBOL(pagevec_lookup_tag);
 /*
  * Perform any setup for the swap system
  */
+/* 根据物理内存大小设置全局变量page_cluster,磁盘读道是一个费时操作,
+ * 每次读一个页面过于浪费,每次多读几个,这个量就要根据实际物理内存大小来确定
+ * swap_setup函数根据物理内存大小设定全局变量page_cluster，当megs小于16时候，page_cluster为2，否则为3
+ *
+ * page_cluster为每次swap in或者swap out操作多少内存页
+ * 为2的指数,当为0的时候为1页,为1的时候2页,2的时候4页,通过/proc/sys/vm/page-cluster查看
+ */
 void __init swap_setup(void)
 {
+	/* 拿总物理内存的pages数量 >> (20 - PAGE_SHIFT) */
 	unsigned long megs = totalram_pages >> (20 - PAGE_SHIFT);
 #ifdef CONFIG_SWAP
 	int i;
@@ -1118,13 +1126,18 @@ void __init swap_setup(void)
 		spin_lock_init(&swapper_spaces[i].tree_lock);
 #endif
 
-	/* Use a smaller cluster for small-memory machines */
+	/* Use a smaller cluster for small-memory machines
+	 * 对小型内存机器使用较小的群集
+	 */
+	/* 如果小于16,那么page_cluster = 2,也就是4个page */
 	if (megs < 16)
 		page_cluster = 2;
-	else
+	else	/* 否则就是3,那么就是8个page */
 		page_cluster = 3;
 	/*
 	 * Right now other parts of the system means that we
 	 * _really_ don't want to cluster much more
+	 *
+	 * 现在,系统的其他部分意味着我们不想再进行更多的集群
 	 */
 }

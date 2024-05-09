@@ -323,6 +323,12 @@ struct per_cpu_pageset {
 	s8 expire;
 #endif
 #ifdef CONFIG_SMP
+
+	/* 内核在内存管理中,读取空闲页面与watermark值进行比较,要读取正确的空闲页面值,必须同时读取vm_stat[]和__percpu *pageset计算器.
+	 * 如果每次都读取的话会降低效率,因此设定了percpu_drift_mark值,只有在低于这个值的时候,才触发更精确的计算来保持性能.
+	 * __percpu *pageset计数器的值更新时,当计数器值超过stat_threshold值,会更新到vm_stat[]中
+	 * https://blog.csdn.net/u012294613/article/details/124150086
+	 */
 	s8 stat_threshold;
 	s8 vm_stat_diff[NR_VM_ZONE_STAT_ITEMS];
 #endif
@@ -651,15 +657,23 @@ struct zone {
 enum pgdat_flags {
 	PGDAT_CONGESTED,		/* pgdat has many dirty pages backed by
 					 * a congested BDI
+					 *
+					 * pgdat有许多由拥塞的BDI支持的脏页面
 					 */
 	PGDAT_DIRTY,			/* reclaim scanning has recently found
 					 * many dirty file pages at the tail
 					 * of the LRU.
+					 *
+					 * 回收扫描最近在LRU的尾部发现了大量脏文件页.
 					 */
 	PGDAT_WRITEBACK,		/* reclaim scanning has recently found
 					 * many pages under writeback
+					 *
+					 * 回收扫描最近找到大量在回写的页面
 					 */
-	PGDAT_RECLAIM_LOCKED,		/* prevents concurrent reclaim */
+	PGDAT_RECLAIM_LOCKED,		/* prevents concurrent reclaim
+					 * 防止并发回收
+					 */
 };
 
 static inline unsigned long zone_end_pfn(const struct zone *zone)
@@ -686,6 +700,9 @@ static inline bool zone_is_empty(struct zone *zone)
  * The "priority" of VM scanning is how much of the queues we will scan in one
  * go. A value of 12 for DEF_PRIORITY implies that we will scan 1/4096th of the
  * queues ("queue_length >> 12") during an aging round.
+ *
+ * VM扫描的"优先级"是我们一次扫描多少队列.
+ * DEF_PRIORITY的值为12意味着我们将在老化回合中扫描1/4096个队列("queue_length >> 12 ")
  */
 #define DEF_PRIORITY 12
 

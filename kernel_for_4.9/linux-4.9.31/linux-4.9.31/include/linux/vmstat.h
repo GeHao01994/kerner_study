@@ -160,6 +160,10 @@ static inline unsigned long zone_page_state(struct zone *zone,
  * deltas. For that we need to loop over all cpus to find the current
  * deltas. There is no synchronization so the result cannot be
  * exactly accurate either.
+ *
+ * 更准确的版本,也考虑了当前挂起的增量.
+ * 为此,我们需要遍历所有cpu以找到当前的delta.
+ * 没有同步,所以结果也不可能完全准确.
  */
 static inline unsigned long zone_page_state_snapshot(struct zone *zone,
 					enum zone_stat_item item)
@@ -168,6 +172,7 @@ static inline unsigned long zone_page_state_snapshot(struct zone *zone,
 
 #ifdef CONFIG_SMP
 	int cpu;
+	/* 这里就是去找到pageset里面的vm_stat_diff状态 */
 	for_each_online_cpu(cpu)
 		x += per_cpu_ptr(zone->pageset, cpu)->vm_stat_diff[item];
 

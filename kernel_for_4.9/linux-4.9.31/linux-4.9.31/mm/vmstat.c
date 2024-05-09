@@ -105,8 +105,15 @@ int calculate_pressure_threshold(struct zone *zone)
 	 * value looks fine. The pressure threshold is a reduced value such
 	 * that even the maximum amount of drift will not accidentally breach
 	 * the min watermark
+	 *
+	 * 由于vmstats不是最新的,因此估计值和实际值之间存在差异.
+	 * 对于高阈值和大量CPU,最小水位可能会被破坏,而估计值看起来很好.
+	 * 压力阈值是减小的值,使得即使是最大漂移量也不会意外地破坏最小水印.
 	 */
+
+	/* watermask_distance表示水位的距离,就是low水位 - min水位 */
 	watermark_distance = low_wmark_pages(zone) - min_wmark_pages(zone);
+	/* 这个阀值就是1 和 watermask_distance / num_online_cpus() 的最大值 */
 	threshold = max(1, (int)(watermark_distance / num_online_cpus()));
 
 	/*
@@ -128,6 +135,9 @@ int calculate_normal_threshold(struct zone *zone)
 	 * longer, more processors could lead to more contention.
  	 * fls() is used to have a cheap way of logarithmic scaling.
 	 *
+	 * threshold 随处理器数量和每个zone的内存数量而变化.
+	 * 更多的内存意味着我们可以将更新推迟更长的时间,更多的处理器可能会导致更多的争用.
+	 * fls()用于提供一种廉价的对数缩放方法.
 	 * Some sample thresholds:
 	 *
 	 * Threshold	Processors	(fls)	Zonesize	fls(mem+1)
@@ -152,6 +162,7 @@ int calculate_normal_threshold(struct zone *zone)
 	 * 125		1024		10	16-32 GB	9
 	 */
 
+	/* mem = zone->managed_pages >> (27 - PAGE_SHIFT) */
 	mem = zone->managed_pages >> (27 - PAGE_SHIFT);
 
 	threshold = 2 * fls(num_online_cpus()) * (1 + fls(mem));
@@ -220,12 +231,16 @@ void set_pgdat_percpu_threshold(pg_data_t *pgdat,
 	int threshold;
 	int i;
 
+	/* 轮询pgdat的每个zone */
 	for (i = 0; i < pgdat->nr_zones; i++) {
 		zone = &pgdat->node_zones[i];
+		/* 如果没有设置percpu_drift_mark,那么continue */
 		if (!zone->percpu_drift_mark)
 			continue;
 
+		/* 运行calculate_pressure,得到新的threshold */
 		threshold = (*calculate_pressure)(zone);
+		/* 将每个CPU的zone->pageset都设置为threshold */
 		for_each_online_cpu(cpu)
 			per_cpu_ptr(zone->pageset, cpu)->stat_threshold
 							= threshold;

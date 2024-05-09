@@ -68,15 +68,25 @@ EXPORT_SYMBOL(remove_wait_queue);
  * There are circumstances in which we can try to wake a task which has already
  * started to run but is not in state TASK_RUNNING. try_to_wake_up() returns
  * zero in this (rare) case, and we handle it by continuing to scan the queue.
+ *
+ * 核心唤醒功能. 非独占唤醒(nr_exclusive == 0)只是唤醒所有东西.
+ * 如果它是一个独占唤醒(nr_exclusive == small + ve number),那么我们唤醒所有非独占任务和一个独占任务.
+ *
+ * 在某些情况下,我们可以尝试唤醒开始进入run但不处于TASK_RUNNING状态的任务.
+ * try_to_wake_up()在这种(罕见的)情况下返回零,我们通过继续扫描队列来处理它.
  */
 static void __wake_up_common(wait_queue_head_t *q, unsigned int mode,
 			int nr_exclusive, int wake_flags, void *key)
 {
 	wait_queue_t *curr, *next;
 
+	/* 去轮询等待队列的链表 */
 	list_for_each_entry_safe(curr, next, &q->task_list, task_list) {
+		/* 先获取flag */
 		unsigned flags = curr->flags;
-
+		/* 调用唤醒的函数,并且如果flag带了WQ_FLAG_EXCLUSIVE,且--nr_exclusive == 0
+		 * 那么就直接break了
+		 */
 		if (curr->func(curr, mode, wake_flags, key) &&
 				(flags & WQ_FLAG_EXCLUSIVE) && !--nr_exclusive)
 			break;
