@@ -1103,6 +1103,11 @@ extern int bit_wait_io_timeout(struct wait_bit_key *, int);
  * @bit: the bit of the word being waited on
  * @mode: the task state to sleep in
  *
+ * wait_on_bit - 等待一个位被清除
+ * @word: 正在等待的word,内核虚拟地址
+ * @bit: 正在等待的word的bit
+ * @mode：要睡眠的任务状态
+ *
  * There is a standard hashed waitqueue table for generic use. This
  * is the part of the hashtable's accessor API that waits on a bit.
  * For instance, if one were to have waiters on a bitflag, one would
@@ -1112,6 +1117,14 @@ extern int bit_wait_io_timeout(struct wait_bit_key *, int);
  * Returned value will be zero if the bit was cleared, or non-zero
  * if the process received a signal and the mode permitted wakeup
  * on that signal.
+ *
+ * 有一个标准的hashed等待队列表供一般使用.
+ * 这是哈希表的访问器API中等待一位的部分.
+ *
+ * 例如,如果一个位标志上有等待程序,则会在等待位清除的线程中调用wait_on_bit().
+ * 使用wait_on_bit(),其中等待位清除,但无意设置它.
+ * 如果位被清除,返回值将为零.
+ * 如果进程接收到信号,并且模式允许对该信号进行唤醒,则返回值为非零.
  */
 static inline int
 wait_on_bit(unsigned long *word, int bit, unsigned mode)

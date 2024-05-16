@@ -176,13 +176,15 @@ extern unsigned int kobjsize(const void *objp);
  */
 #define VM_GROWSDOWN	0x00000100	/* general info on the segment */
 #define VM_UFFD_MISSING	0x00000200	/* missing pages tracking */
-/* VM_PFNMAP表示页帧号(Page Frame Number, PFN)映射,特殊映射不希望关联页描述符,直接使用页帧号,可能是因为页描述符不存,，也可能是因为不想使用页描述符. */
+/* VM_PFNMAP表示页帧号(Page Frame Number, PFN)映射,特殊映射不希望关联页描述符,直接使用页帧号,可能是因为页描述符不存,也可能是因为不想使用页描述符. */
 #define VM_PFNMAP	0x00000400	/* Page-ranges managed without "struct page", just pure PFN */
+/* 在这个区间映射一个打开后不能用来写的文件 */
 #define VM_DENYWRITE	0x00000800	/* ETXTBSY on write attempts.. */
 #define VM_UFFD_WP	0x00001000	/* wrprotect pages tracking */
 
 /* VM_LOCKED表示页被锁定在内存中,不允许换出到交换区 */
 #define VM_LOCKED	0x00002000
+/* 这个区间映射一个设备的I/O地址空间 */
 #define VM_IO           0x00004000	/* Memory mapped I/O or similar */
 
 					/* Used by sys_madvise() */
@@ -207,6 +209,7 @@ extern unsigned int kobjsize(const void *objp);
 /* VM_ARCH_1和VM_ARCH_2由各种处理器架构自定义 */
 #define VM_ARCH_1	0x01000000	/* Architecture-specific flag */
 #define VM_ARCH_2	0x02000000
+/* 在coredump时不保存这个部分 */
 #define VM_DONTDUMP	0x04000000	/* Do not include in the core dump */
 
 #ifdef CONFIG_MEM_SOFT_DIRTY
