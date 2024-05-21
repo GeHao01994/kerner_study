@@ -425,9 +425,17 @@ ENDPROC(__create_page_tables)
  *
  *   x0 = __PHYS_OFFSET
  */
+
+/* 原本我的理解应该是这里的sp应该指向init_thread_union + THREAD_START_SP
+ * 但是在下面这一笔修改了
+ * https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/commit/arch/arm64/kernel/head.S?id=60699ba18b69ff210ed0304bc23f6c9d11d27a72
+ */
 __primary_switched:
+	/* 将init_thread_union地址保存在x4中,它存放了init进程栈起始地址 */
 	adrp	x4, init_thread_union
+	/* 设置sp指针为init_thread_union偏移THREAD_SIZE,自此init进程真正诞生,它就是内核的0号进程,将来将化身为idle进程 */
 	add	sp, x4, #THREAD_SIZE
+	/* 保存当前进程描述符到sp_el0,sp_el0在el1时被用来保存当前的进程描述符指针,即全局current */
 	msr	sp_el0, x4			// Save thread_info
 
 	adr_l	x8, vectors			// load VBAR_EL1 with virtual

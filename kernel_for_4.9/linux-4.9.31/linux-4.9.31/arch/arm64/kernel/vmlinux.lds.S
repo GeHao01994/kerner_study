@@ -185,6 +185,7 @@ SECTIONS
 
 	_data = .;
 	_sdata = .;
+	/* 在这里去预留的内核栈,这里第三个参数为THREAD_SIZE */
 	RW_DATA_SECTION(L1_CACHE_BYTES, PAGE_SIZE, THREAD_SIZE)
 
 	/*

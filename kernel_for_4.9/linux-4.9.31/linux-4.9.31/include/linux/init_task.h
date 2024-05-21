@@ -201,6 +201,10 @@ extern struct task_group root_task_group;
 {									\
 	INIT_TASK_TI(tsk)						\
 	.state		= 0,						\
+	/* init_task进程的task_struct数据结构中stack成员指向init_stack数据结构.
+	 * 内核栈大小通常和体系结构相关,ARM32架构中的内核栈大小是8KB,ARM64架构中内核栈大小是16KB.
+	 * 它存放在内核映像文件中data段中,在编译链接时预先分配好,具体见vmlinux.lds.S链接文件.
+	 */								\
 	.stack		= init_stack,					\
 	.usage		= ATOMIC_INIT(2),				\
 	.flags		= PF_KTHREAD,					\

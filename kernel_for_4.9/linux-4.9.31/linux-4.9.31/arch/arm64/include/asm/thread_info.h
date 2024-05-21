@@ -30,6 +30,8 @@
 #endif
 
 #define THREAD_SIZE		16384
+
+/* 预留16Byte的空洞 */
 #define THREAD_START_SP		(THREAD_SIZE - 16)
 
 #ifndef __ASSEMBLY__
@@ -61,6 +63,7 @@ struct thread_info {
 }
 
 #define init_thread_info	(init_thread_union.thread_info)
+/* init_stack在这里 */
 #define init_stack		(init_thread_union.stack)
 
 /*
@@ -78,13 +81,18 @@ static inline struct thread_info *current_thread_info(void) __attribute_const__;
  *
  * We don't use read_sysreg() as we want the compiler to cache the value where
  * possible.
+ *
+ * struct thread_info可以通过sp_el0直接访问.
+ * 我们不使用read_sysreg(),因为我们希望编译器尽可能缓存值.
  */
 static inline struct thread_info *current_thread_info(void)
 {
 	unsigned long sp_el0;
 
+	/* 这里sp_el0就是存放线程的thread_info */
 	asm ("mrs %0, sp_el0" : "=r" (sp_el0));
 
+	/* 然后把它返回出去 */
 	return (struct thread_info *)sp_el0;
 }
 

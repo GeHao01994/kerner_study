@@ -248,6 +248,7 @@
 	. = ALIGN(align);						\
 	*(.data..cacheline_aligned)
 
+/* 就是这里啦 */
 #define INIT_TASK_DATA(align)						\
 	. = ALIGN(align);						\
 	VMLINUX_SYMBOL(__start_init_task) = .;				\
@@ -842,11 +843,21 @@
  * is located before the ones requiring PAGE_SIZE alignment.
  * NOSAVE_DATA starts and ends with a PAGE_SIZE alignment which
  * matches the requirement of PAGE_ALIGNED_DATA.
+ * use 0 as page_align if page_aligned data is not used
  *
- * use 0 as page_align if page_aligned data is not used */
+ * 可写数据
+ * 所有段都组合在一个.data段中.CONSTRUCTORS后面的段的排布使其典型对齐匹配.
+ *
+ * cacheline 通常/总是小于PAGE_SIZE,因此具有此限制(或类似限制)的段位于需要对齐PAGE_SIZE的部分之前.
+ *
+ * NOSAVE_DATA以符合PAGE_ALIGNED_DATA要求的PAGE_SIZE对齐开始和结束.
+ *
+ * 如果未使用page_aligned数据,则使用0作为page_align
+ */
 #define RW_DATA_SECTION(cacheline, pagealigned, inittask)		\
 	. = ALIGN(PAGE_SIZE);						\
 	.data : AT(ADDR(.data) - LOAD_OFFSET) {				\
+		/* 这里去初始化内核栈 */				\
 		INIT_TASK_DATA(inittask)				\
 		NOSAVE_DATA						\
 		PAGE_ALIGNED_DATA(pagealigned)				\
