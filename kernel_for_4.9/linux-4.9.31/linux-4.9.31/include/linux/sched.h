@@ -204,17 +204,35 @@ extern void proc_sched_set_task(struct task_struct *p);
  * modifying one set can't modify the other one by
  * mistake.
  */
+/* 表示进程要么正在执行,要么正要准备执行(已经就绪),正在等待cpu时间片的调度 */
 #define TASK_RUNNING		0
+/* 进程因为等待一些条件而被挂起(阻塞)而所处的状态.
+ * 这些条件主要包括:硬中断、资源、一些信号……,一旦等待的条件成立,进程就会从该状态(阻塞)迅速转化成为就绪状态TASK_RUNNING */
 #define TASK_INTERRUPTIBLE	1
+/* 意义与TASK_INTERRUPTIBLE类似,除了不能通过接受一个信号来唤醒以外,对于处于TASK_UNINTERRUPIBLE状态的进程,
+ * 哪怕我们传递一个信号或者有一个外部中断都不能唤醒他们.
+ * 只有它所等待的资源可用的时候,他才会被唤醒.
+ * 这个标志很少用,但是并不代表没有任何用处,其实他的作用非常大,特别是对于驱动刺探相关的硬件过程很重要,
+ * 这个刺探过程不能被一些其他的东西给中断,否则就会让进城进入不可预测的状态
+ */
 #define TASK_UNINTERRUPTIBLE	2
+/* 进程被停止执行,当进程接收到SIGSTOP、SIGTTIN、SIGTSTP或者SIGTTOU信号之后就会进入该状态 */
 #define __TASK_STOPPED		4
+/* 表示进程被debugger等进程监视,进程执行被调试程序所停止,当一个进程被另外的进程所监视,每一个信号都会让进程进入该状态 */
 #define __TASK_TRACED		8
 /* in tsk->exit_state */
+/* 其实还有两个附加的进程状态既可以被添加到state域中,又可以被添加到exit_state域中.
+ * 只有当进程终止的时候,才会达到这两种状态.
+ *
+ * EXIT_ZOMBIE: 进程的执行被终止,但是其父进程还没有使用wait()等系统调用来获知它的终止信息,此时进程成为僵尸进程
+ * EXIT_DEAD: 进程的最终状态
+ */
 #define EXIT_DEAD		16
 #define EXIT_ZOMBIE		32
 #define EXIT_TRACE		(EXIT_ZOMBIE | EXIT_DEAD)
 /* in tsk->state again */
 #define TASK_DEAD		64
+/* TASK_WAKEKILL 用于在接收到致命信号时唤醒进程 */
 #define TASK_WAKEKILL		128
 #define TASK_WAKING		256
 #define TASK_PARKED		512
@@ -1497,10 +1515,20 @@ struct task_struct {
 	 */
 	struct thread_info thread_info;
 #endif
+	/* 进程的状态 */
 	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
+	/* 进程内核栈 */
 	void *stack;
+	/* 进程描述符使用计数,被置为2时,表示进程描述符正在被使用而且其相应的进程处于活动状态 */
 	atomic_t usage;
+	/* 进程标记 */
 	unsigned int flags;	/* per process flags, defined below */
+	/* Ptrace 提供了一种父进程可以控制子进程运行,并可以检查和改变它的核心image.
+	 * 它主要用于实现断点调试.
+	 * 一个被跟踪的进程运行中,直到发生一个信号.则进程被中止,并且通知其父进程.
+	 * 在进程中止的状态下,进程的内存空间可以被读写.
+	 * 父进程还可以使子进程继续执行,并选择是否是否忽略引起中止的信号.
+	 */
 	unsigned int ptrace;
 
 #ifdef CONFIG_SMP
@@ -1516,11 +1544,18 @@ struct task_struct {
 	int wake_cpu;
 #endif
 	int on_rq;
-
+	/* static_prio 用于保存静态优先级,可以通过nice系统调用来进行修改
+	 * rt_priority 用于保存实时优先级
+	 * normal_prio 该值取决于静态优先级和调度策略
+	 * prio	用于保存动态优先级
+	 */
 	int prio, static_prio, normal_prio;
 	unsigned int rt_priority;
+	/* sched_class 调度类 */
 	const struct sched_class *sched_class;
+	/* se 普通进程的调用实体,每个进程都有的实体 */
 	struct sched_entity se;
+	/* rt 实时进程的调用实体,每个进程都有其中之一的实体 */
 	struct sched_rt_entity rt;
 #ifdef CONFIG_CGROUP_SCHED
 	struct task_group *sched_task_group;
@@ -1535,9 +1570,10 @@ struct task_struct {
 #ifdef CONFIG_BLK_DEV_IO_TRACE
 	unsigned int btrace_seq;
 #endif
-
+	/* policy 调度策略 */
 	unsigned int policy;
 	int nr_cpus_allowed;
+	/* cpus_allowed	用于控制进程可以在哪里处理器上运行 */
 	cpumask_t cpus_allowed;
 
 #ifdef CONFIG_PREEMPT_RCU
@@ -1562,24 +1598,40 @@ struct task_struct {
 	struct plist_node pushable_tasks;
 	struct rb_node pushable_dl_tasks;
 #endif
-
+	/* mm: 进程所拥有的用户空间内存描述符,内核线程无的mm为NULL
+	 * active_mm: active_mm指向进程运行时所使用的内存描述符,对于普通进程而言,这两个指针变量的值相同.
+	 * 但是内核线程kernel thread是没有进程地址空间的,所以内核线程的tsk->mm域是空(NULL).
+	 * 但是内核必须知道用户空间包含了什么,因此它的active_mm成员被初始化为前一个运行进程的active_mm值.
+	 */
 	struct mm_struct *mm, *active_mm;
 	/* per-thread vma caching */
 	u32 vmacache_seqnum;
 	struct vm_area_struct *vmacache[VMACACHE_SIZE];
 #if defined(SPLIT_RSS_COUNTING)
+	/* 用来记录缓冲信息 */
 	struct task_rss_stat	rss_stat;
 #endif
 /* task state */
 	int exit_state;
+	/* exit_code: 用于设置进程的终止代号,这个值要么是_exit()或exit_group()系统调用参数(正常终止),
+	 *	      要么是由内核提供的一个错误代号(异常终止).
+	 *
+	 * exit_signal: 被置为-1时表示是某个线程组中的一员.
+	 *		只有当线程组的最后一个成员终止时,才会产生一个信号,以通知线程组的领头进程的父进程.
+	 */
 	int exit_code, exit_signal;
+	/* pdeath_signal: 用于判断父进程终止时发送信号. */
 	int pdeath_signal;  /*  The signal sent when the parent dies  */
 	unsigned long jobctl;	/* JOBCTL_*, siglock protected */
 
 	/* Used for emulating ABI behavior of previous Linux versions */
+	/* personality: 用于处理不同的ABI
+	 * https://man7.org/linux/man-pages/man2/personality.2.html
+	 */
 	unsigned int personality;
 
 	/* scheduler bits, serialized by scheduler locks */
+	/* sched_reset_on_fork: 用于判断是否恢复默认的优先级或调度策略 */
 	unsigned sched_reset_on_fork:1;
 	unsigned sched_contributes_to_load:1;
 	unsigned sched_migrated:1;
@@ -1587,7 +1639,11 @@ struct task_struct {
 	unsigned :0; /* force alignment to the next boundary */
 
 	/* unserialized, strictly 'current' */
+	/* in_execve 用于通知LSM是否被do_execve()函数所调用.
+	 * https://lkml.indiana.edu/hypermail/linux/kernel/0901.1/00014.html
+	 */
 	unsigned in_execve:1; /* bit to tell LSMs we're in execve */
+	/* in_iowait: 用于判断是否进行iowait计数 */
 	unsigned in_iowait:1;
 #if !defined(TIF_RESTORE_SIGMASK)
 	unsigned restore_sigmask:1;
@@ -1599,6 +1655,9 @@ struct task_struct {
 #endif
 #endif
 #ifdef CONFIG_COMPAT_BRK
+	/* 用来确定对随机堆内存的探测.
+	 * https://lkml.indiana.edu/hypermail/linux/kernel/1104.1/00196.html
+	 */
 	unsigned brk_randomized:1;
 #endif
 #ifdef CONFIG_CGROUPS
@@ -1609,7 +1668,15 @@ struct task_struct {
 	unsigned long atomic_flags; /* Flags needing atomic access. */
 
 	struct restart_block restart_block;
-
+	/* Unix系统通过pid来标识进程,linux把不同的pid与系统中每个进程或轻量级线程关联,
+	 * 而unix程序员希望同一组线程具有共同的pid,遵照这个标准linux引入线程组的概念.
+	 * 一个线程组所有线程与领头线程具有相同的pid,存入tgid字段,getpid()返回当前进程的tgid值而不是pid的值.
+	 * 在CONFIG_BASE_SMALL配置为0的情况下,PID的取值范围是0到32767,即系统中的进程数最大为32768个.
+	 * #define PID_MAX_DEFAULT (CONFIG_BASE_SMALL ? 0x1000 : 0x8000)
+	 * 在Linux系统中,一个线程组中的所有线程使用和该线程组的领头线程(该组中的第一个轻量级进程)相同的PID,并被存放在tgid成员中.
+	 * 只有线程组的领头线程的pid成员才会被设置为与tgid相同的值.
+	 * 注意,getpid()系统调用返回的是当前进程的tgid值而不是pid值.
+	 */
 	pid_t pid;
 	pid_t tgid;
 
@@ -1622,13 +1689,19 @@ struct task_struct {
 	 * older sibling, respectively.  (p->father can be replaced with
 	 * p->real_parent->pid)
 	 */
+
+	/* real_parent 指向其父进程,如果创建它的父进程不再存在,则指向PID为1的init进程 */
 	struct task_struct __rcu *real_parent; /* real parent process */
+	/* 指向其父进程,当它终止时,必须向它的父进程发送信号.它的值通常与real_parent相同 */
 	struct task_struct __rcu *parent; /* recipient of SIGCHLD, wait4() reports */
 	/*
 	 * children/sibling forms the list of my natural children
 	 */
+	/* children 表示链表的头部,链表中的所有元素都是它的子进程 */
 	struct list_head children;	/* list of my children */
+	/* sibling 用于把当前进程插入到兄弟链表中 */
 	struct list_head sibling;	/* linkage in my parent's children list */
+	/* group_leader 指向其所在进程组的领头进程 */
 	struct task_struct *group_leader;	/* threadgroup leader */
 
 	/*
@@ -1648,8 +1721,14 @@ struct task_struct {
 	int __user *set_child_tid;		/* CLONE_CHILD_SETTID */
 	int __user *clear_child_tid;		/* CLONE_CHILD_CLEARTID */
 
+	/* utime/stime 用于记录进程在用户态/内核态下所经过的节拍数
+	 *
+	 * utimescaled/stimescaled 用于记录进程在用户态/内核态的运行时间,但它们以处理器的频率为刻度
+	 */
 	cputime_t utime, stime, utimescaled, stimescaled;
+	/* 以节拍计数的虚拟机运行时间(guest time) */
 	cputime_t gtime;
+	/* 先前的运行时间 */
 	struct prev_cputime prev_cputime;
 #ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
 	seqcount_t vtime_seqcount;
@@ -1667,12 +1746,17 @@ struct task_struct {
 #ifdef CONFIG_NO_HZ_FULL
 	atomic_t tick_dep_mask;
 #endif
+	/* nvcsw/nivcsw是自愿(voluntary)/非自愿(involuntary)上下文切换计数 */
 	unsigned long nvcsw, nivcsw; /* context switch counts */
+	/* start_time进程创建时间,real_start_time还包含了进程睡眠时间,常用于/proc/pid/stat
+	 * https://lkml.indiana.edu/hypermail/linux/kernel/0705.0/2094.html
+	 */
 	u64 start_time;		/* monotonic time in nsec */
 	u64 real_start_time;	/* boot based time in nsec */
 /* mm fault and swap info: this can arguably be seen as either mm-specific or thread-specific */
 	unsigned long min_flt, maj_flt;
 
+	/* cputime_expires 用来统计进程或进程组被跟踪的处理器时间,其中的三个成员对应着cpu_timers[3]的三个链表 */
 	struct task_cputime cputime_expires;
 	struct list_head cpu_timers[3];
 
@@ -1695,6 +1779,7 @@ struct task_struct {
 #endif
 #ifdef CONFIG_DETECT_HUNG_TASK
 /* hung task detection */
+	/* nvcsw和nivcsw的总和 */
 	unsigned long last_switch_count;
 #endif
 /* filesystem information */
@@ -1704,13 +1789,16 @@ struct task_struct {
 /* namespaces */
 	struct nsproxy *nsproxy;
 /* signal handlers */
+	/* signal 指向进程的信号描述符 */
 	struct signal_struct *signal;
+	/* 指向进程的信号处理程序描述符 */
 	struct sighand_struct *sighand;
-
+	/* blocked表示被阻塞信号的掩码,real_blocked表示临时掩码 */
 	sigset_t blocked, real_blocked;
+	/* 存放私有挂起信号的数据结构 */
 	sigset_t saved_sigmask;	/* restored if set_restore_sigmask() was used */
 	struct sigpending pending;
-
+	/* sas_ss_sp是信号处理程序备用堆栈的地址,sas_ss_size表示堆栈的大小 */
 	unsigned long sas_ss_sp;
 	size_t sas_ss_size;
 	unsigned sas_ss_flags;
@@ -1729,6 +1817,7 @@ struct task_struct {
    	u32 self_exec_id;
 /* Protection of (de-)allocation: mm, files, fs, tty, keyrings, mems_allowed,
  * mempolicy */
+	/* 用于保护资源分配或释放的自旋锁 */
 	spinlock_t alloc_lock;
 
 	/* Protection of the PI data structures: */
@@ -2289,9 +2378,12 @@ extern void thread_group_cputime_adjusted(struct task_struct *p, cputime_t *ut, 
 #define PF_EXITING	0x00000004	/* getting shut down */
 #define PF_EXITPIDONE	0x00000008	/* pi exit done on shut down */
 #define PF_VCPU		0x00000010	/* I'm a virtual CPU */
+/* worker线程,worker线程由工作队列机制创建 */
 #define PF_WQ_WORKER	0x00000020	/* I'm a workqueue worker */
+/* fork了但是不执行 */
 #define PF_FORKNOEXEC	0x00000040	/* forked but didn't exec */
 #define PF_MCE_PROCESS  0x00000080      /* process policy on mce errors */
+/* 使用超级用户权限 */
 #define PF_SUPERPRIV	0x00000100	/* used super-user privileges */
 #define PF_DUMPCORE	0x00000200	/* dumped core */
 #define PF_SIGNALED	0x00000400	/* killed by a signal */

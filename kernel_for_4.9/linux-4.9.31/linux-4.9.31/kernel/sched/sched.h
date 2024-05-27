@@ -1019,6 +1019,13 @@ static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
 	 * After ->cpu is set up to a new value, task_rq_lock(p, ...) can be
 	 * successfuly executed on another CPU. We must ensure that updates of
 	 * per-task data have been completed by this moment.
+	 *
+	 * 将->cpu设置为新值后,task_rq_lock(p，…)可以在另一个cpu上成功执行.
+	 * 我们必须确保per-task数据的更新在此刻已经完成.
+	 */
+
+	/* 在设置thread_info->cpu之前,__set_task_cpu函数用smp_wmb
+	 * 写内存屏障语句来保证之前内容写入完成后才设置thread_info->cpu
 	 */
 	smp_wmb();
 #ifdef CONFIG_THREAD_INFO_IN_TASK
@@ -1026,6 +1033,7 @@ static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
 #else
 	task_thread_info(p)->cpu = cpu;
 #endif
+	/* 这里把wake_cpu设置为本地cpu */
 	p->wake_cpu = cpu;
 #endif
 }
@@ -1294,10 +1302,21 @@ static inline void set_curr_task(struct rq *rq, struct task_struct *curr)
 #define for_each_class(class) \
    for (class = sched_class_highest; class; class = class->next)
 
+/* 优先级最高的线程,会中断所有其他线程,且不会被其他任务打断.
+ * 作用: 1.发生在cpu_stop_cpu_callback 进行cpu之间任务migration;
+ *	 2.HOTPLUG_CPU的情况下关闭任务
+ */
 extern const struct sched_class stop_sched_class;
+/* deadline */
 extern const struct sched_class dl_sched_class;
+/* RT,作用: 实时线程 */
 extern const struct sched_class rt_sched_class;
+/* CFS(公平)作用: 一般常规线程 */
 extern const struct sched_class fair_sched_class;
+/* 每个cup的第一个pid=0线程: swapper,是一个静态线程.
+ * 调度类属于: idel_sched_class,所以在ps里面是看不到的.
+ * 一般运行在开机过程和cpu异常的时候做dump
+ */
 extern const struct sched_class idle_sched_class;
 
 

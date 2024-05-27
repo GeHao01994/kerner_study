@@ -248,13 +248,23 @@ int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 
 asmlinkage void ret_from_fork(void) asm("ret_from_fork");
 
+/* 这里是拷贝寄存器这些等信息 */
 int copy_thread(unsigned long clone_flags, unsigned long stack_start,
 		unsigned long stk_sz, struct task_struct *p)
 {
+	/* 拿到子进程的寄存器的地址 */
+	/* 对应ARM64体系结构中,Linux内核栈顶存放着ARM64的通用寄存器,在代码中
+	 * 使用struct pt_regs结构体表示
+	 */
 	struct pt_regs *childregs = task_pt_regs(p);
 
+	/* 清0 */
 	memset(&p->thread.cpu_context, 0, sizeof(struct cpu_context));
-
+	/* 如果新进程不是内核线程,那么将父进程的寄存器值赋值到子进程中 */
+	/* thread_info数据结构中的cpu_context成员保存着进程的上下文相关的通用寄存器.
+	 * 设置cpu_context中的pc和sp指针,pc指针指向ret_from_fork函数.
+	 * tp_value用于设置线程用的局部存储(Thread Local Storage)
+	 */
 	if (likely(!(p->flags & PF_KTHREAD))) {
 		*childregs = *current_pt_regs();
 		childregs->regs[0] = 0;
@@ -266,6 +276,7 @@ int copy_thread(unsigned long clone_flags, unsigned long stack_start,
 		*task_user_tls(p) = read_sysreg(tpidr_el0);
 
 		if (stack_start) {
+			/* 这里应该是说的兼容32位的进程 */
 			if (is_compat_thread(task_thread_info(p)))
 				childregs->compat_sp = stack_start;
 			else

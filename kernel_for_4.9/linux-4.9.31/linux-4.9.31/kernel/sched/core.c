@@ -2384,48 +2384,72 @@ static inline void init_schedstats(void) {}
 int sched_fork(unsigned long clone_flags, struct task_struct *p)
 {
 	unsigned long flags;
+	/* 关闭抢占,然后通过current_thread_info函数来获取当前CPU ID */
 	int cpu = get_cpu();
-
+	/* 初始化进程调度相关的数据结构,调度实体用struct sched_entity数据结构来抽象,
+	 * 每个进程或线程都是一个调度实体,另外也可包括组调度
+	 */
 	__sched_fork(clone_flags, p);
 	/*
 	 * We mark the process as NEW here. This guarantees that
 	 * nobody will actually run it, and a signal or other external
 	 * event cannot wake it up and insert it on the runqueue either.
+	 *
+	 * 我们在此处将process标记为“NEW”.
+	 * 这保证了没有人会真正运行它,信号或其他外部事件也不能唤醒它并将其插入运行队列.
 	 */
 	p->state = TASK_NEW;
 
 	/*
 	 * Make sure we do not leak PI boosting priority to the child.
 	 */
+	/* task_struct数据结构中的prio成员表示进程的优先级,
+	 * 这里先用父进程的normal_prio
+	 */
 	p->prio = current->normal_prio;
 
 	/*
 	 * Revert to default priority/policy on fork if requested.
 	 */
+	/* 父进程使用sched_setscheduler系统调用来重新设置进程的调度策略时设置了sched_flag_reset_on_fork标志位,
+	 * 它在fork子进程时会让子进程恢复到默认的调度策略和优先级
+	 */
 	if (unlikely(p->sched_reset_on_fork)) {
+		/* 如果是deadline或者说是rt调度策略
+		 * 全部给我改成SCHED_NORMAL
+		 * 把static_prio设为初始值NICE_TO_PRIO(0)
+		 */
 		if (task_has_dl_policy(p) || task_has_rt_policy(p)) {
 			p->policy = SCHED_NORMAL;
 			p->static_prio = NICE_TO_PRIO(0);
 			p->rt_priority = 0;
+			/* 其他不是上面两种,那么只是把static_prio还原 */
 		} else if (PRIO_TO_NICE(p->static_prio) < 0)
 			p->static_prio = NICE_TO_PRIO(0);
 
+		/* 这里就是设置新创建的进程的prio、normal_prio都为static_prio,也就是都为NICE_TO_PRIO(0) */
 		p->prio = p->normal_prio = __normal_prio(p);
 		set_load_weight(p);
 
 		/*
 		 * We don't need the reset flag anymore after the fork. It has
 		 * fulfilled its duty:
+		 *
+		 * fork之后我们不再需要重置标志了.它已经完成了它的职责:
 		 */
 		p->sched_reset_on_fork = 0;
 	}
-
+	/* 如果是deadline调度策略 */
 	if (dl_prio(p->prio)) {
+		/* 因为前面get_cpu关闭了中断
+		 * 所以这里使能中断
+		 */
 		put_cpu();
 		return -EAGAIN;
+		/* 如果是rt调度策略,那么我们把调度类赋值为rt调度类 */
 	} else if (rt_prio(p->prio)) {
 		p->sched_class = &rt_sched_class;
-	} else {
+	} else { /* 如果不是,那我们把它赋值为cfs调度类 */
 		p->sched_class = &fair_sched_class;
 	}
 
@@ -2443,7 +2467,9 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	 * We're setting the cpu for the first time, we don't migrate,
 	 * so use __set_task_cpu().
 	 */
+	/* 这里把当前CPU设置到新进程thread_info结构中的CPU成员中 */
 	__set_task_cpu(p, cpu);
+	/* 如果说调度类有task_fork函数,那么就调用该函数 */
 	if (p->sched_class->task_fork)
 		p->sched_class->task_fork(p);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
@@ -2455,6 +2481,7 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 #if defined(CONFIG_SMP)
 	p->on_cpu = 0;
 #endif
+	/* 初始化thread_info数据结构中的preempt_count计数,为了支持内核抢占而引入该字段. */
 	init_task_preempt_count(p);
 #ifdef CONFIG_SMP
 	plist_node_init(&p->pushable_tasks, MAX_PRIO);

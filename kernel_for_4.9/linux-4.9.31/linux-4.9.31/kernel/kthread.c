@@ -218,9 +218,14 @@ static int kthread(void *_create)
 int tsk_fork_get_node(struct task_struct *tsk)
 {
 #ifdef CONFIG_NUMA
+	/* kthreadd_task指向kthreadd的task_strcut结构体
+	 * threadadd是负责创建内核线程的,所以如果tsk是threadadd_task
+	 * 那么node就取tsk->pref_node_fork
+	 */
 	if (tsk == kthreadd_task)
 		return tsk->pref_node_fork;
 #endif
+	/* 否则,就取NUMA_NO_NODE */
 	return NUMA_NO_NODE;
 }
 

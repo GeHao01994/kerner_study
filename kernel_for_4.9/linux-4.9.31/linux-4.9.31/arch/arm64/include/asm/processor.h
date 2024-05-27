@@ -155,6 +155,9 @@ static inline void cpu_relax(void)
 extern struct task_struct *cpu_switch_to(struct task_struct *prev,
 					 struct task_struct *next);
 
+/* 对应ARM64体系结构中,Linux内核栈顶存放着ARM64的通用寄存器,在代码中
+ * 使用struct pt_regs结构体表示
+ */
 #define task_pt_regs(p) \
 	((struct pt_regs *)(THREAD_START_SP + task_stack_page(p)) - 1)
 

@@ -685,8 +685,12 @@ static inline void add_mm_rss_vec(struct mm_struct *mm, int *rss)
 {
 	int i;
 
+	/* 如果当前进程的mm和我们的mm是一致的
+	 * 那就先sync当前进程的current->rss_stat.count
+	 */
 	if (current->mm == mm)
 		sync_mm_rss(mm);
+	/* 然后再加上带进来的rss的值 */
 	for (i = 0; i < NR_MM_COUNTERS; i++)
 		if (rss[i])
 			add_mm_counter(mm, i, rss[i]);
@@ -957,6 +961,9 @@ out:
  * copy one vm_area from one task to the other. Assumes the page tables
  * already present in the new task to be cleared in the whole range
  * covered by this vma.
+ *
+ * 将一个vma_area从一个task复制到另一个task.
+ * 假设在该vma覆盖的整个范围内,要清除的新任务中已经存在的页表。
  */
 
 static inline unsigned long
@@ -969,6 +976,10 @@ copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	struct page *page;
 
 	/* pte contains position in swap or file, so copy. */
+	/* 首先判断父进程pte对应的页面是否在内存中(pte_present(pte)).
+	 * 如果不在内存中,那么有两种可能,这是一个swap entry或者迁移entry(migration entry).
+	 * 这两种情况要设置父进程pte页表项内容到子进程中,因此跳转到out_set_pte标签处
+	 */
 	if (unlikely(!pte_present(pte))) {
 		swp_entry_t entry = pte_to_swp_entry(pte);
 
@@ -1010,6 +1021,9 @@ copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	 * If it's a COW mapping, write protect it both
 	 * in the parent and the child
 	 */
+	/* 如果父进程VMA属性是一个写时复制映射,即不是共享的进程地址空间(没有设置VM_SHARED),那么父进程和子进程对应的pte页表都要设置成写保护.
+	 * pte_wrprotect()函数设置pte为只读属性.
+	 */
 	if (is_cow_mapping(vm_flags)) {
 		ptep_set_wrprotect(src_mm, addr, src_pte);
 		pte = pte_wrprotect(pte);
@@ -1019,10 +1033,16 @@ copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	 * If it's a shared mapping, mark it clean in
 	 * the child
 	 */
+	 /* 如果VMA对应属性是共享(VM_SHARED)的,那么调用pte_mkclean函数清除pte页表项的DIRTY标志位 */
 	if (vm_flags & VM_SHARED)
 		pte = pte_mkclean(pte);
+	/* pte_mkold函数清除pte页表项中的L_PTE_YOUNG比特位 */
 	pte = pte_mkold(pte);
 
+	/* 由父进程pte通过vm_normal_page函数找到相应页面的struct page数据结构,
+	 * 注意返回的页面是normal mapping的.
+	 * 这里主要增加rss统计计数,并增加该页面的_refcount计数和_mapcout计数
+	 * get_page函数增加_refcount计数,page_dup_rmao函数增加_mapcount计数*/
 	page = vm_normal_page(vma, addr, pte);
 	if (page) {
 		get_page(page);
@@ -1031,10 +1051,15 @@ copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	}
 
 out_set_pte:
+	/* 设置pte到子进程对应的页表项dst_pte中 */
 	set_pte_at(dst_mm, addr, dst_pte, pte);
 	return 0;
 }
 
+/* copy_pte_range函数中的addr和end分别表示VMA对应的起始地址和结束地址,
+ * 从VMA起始地址开始到结束地址依次调用copy_one_pte,利用父进程的pte设置到
+ * 对应的子进程pte页表中
+ */
 static int copy_pte_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		   pmd_t *dst_pmd, pmd_t *src_pmd, struct vm_area_struct *vma,
 		   unsigned long addr, unsigned long end)
@@ -1043,19 +1068,26 @@ static int copy_pte_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	pte_t *src_pte, *dst_pte;
 	spinlock_t *src_ptl, *dst_ptl;
 	int progress = 0;
+	/* rss: 驻留内存大小,是进程当前实际占用的物理内存大小,包括进程独自占用的物理内存、和其他进程共享的内存 */
 	int rss[NR_MM_COUNTERS];
 	swp_entry_t entry = (swp_entry_t){0};
 
 again:
+	/* 初始化rss vec */
 	init_rss_vec(rss);
 
+	/* 分配pte 并且上锁 */
 	dst_pte = pte_alloc_map_lock(dst_mm, dst_pmd, addr, &dst_ptl);
 	if (!dst_pte)
 		return -ENOMEM;
+	/* 拿到src_pte */
 	src_pte = pte_offset_map(src_pmd, addr);
+	/* 上锁 */
 	src_ptl = pte_lockptr(src_mm, src_pmd);
 	spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
+	/* 把src_pte赋值给orig_src_pte */
 	orig_src_pte = src_pte;
+	/* 把dst_pte赋值给orig_dst_pte */
 	orig_dst_pte = dst_pte;
 	arch_enter_lazy_mmu_mode();
 
@@ -1063,14 +1095,25 @@ again:
 		/*
 		 * We are holding two locks at this point - either of them
 		 * could generate latencies in another task on another CPU.
+		 *
+		 * 在这一点上,我们持有两个锁 - 它们中的任何一个都可能在另一个CPU上的另一个任务中产生延迟.
 		 */
+		/* 如果progess >=32 */
 		if (progress >= 32) {
+			/* 把progress设置为0 */
 			progress = 0;
+
+			/* 因为如果页表项很多.复制很耗时间,所以如果有进程需要调度,则先跳出循环,去调度
+			 * 新进程
+			 */
+			/* 如果需要调度或者说因为另外一个进程的等待需要跳出spinlock,那么直接break */
 			if (need_resched() ||
 			    spin_needbreak(src_ptl) || spin_needbreak(dst_ptl))
 				break;
 		}
+		/* 如果src_pte是none的,那么progress + 1之后continue */
 		if (pte_none(*src_pte)) {
+			/* progress+1,因为此操作耗时短,所以只加一 */
 			progress++;
 			continue;
 		}
@@ -1078,12 +1121,15 @@ again:
 							vma, addr, rss);
 		if (entry.val)
 			break;
+		/* copy_one_pte耗时稍微长,所以progress + 8 */
 		progress += 8;
 	} while (dst_pte++, src_pte++, addr += PAGE_SIZE, addr != end);
 
 	arch_leave_lazy_mmu_mode();
+	/* 解锁 */
 	spin_unlock(src_ptl);
 	pte_unmap(orig_src_pte);
+	/* 将rss更新到对应的mm中 */
 	add_mm_rss_vec(dst_mm, rss);
 	pte_unmap_unlock(orig_dst_pte, dst_ptl);
 	cond_resched();
@@ -1104,10 +1150,11 @@ static inline int copy_pmd_range(struct mm_struct *dst_mm, struct mm_struct *src
 {
 	pmd_t *src_pmd, *dst_pmd;
 	unsigned long next;
-
+	/* 为dst_pmd分配pmd_alloc,并且填充到pud里面去 */
 	dst_pmd = pmd_alloc(dst_mm, dst_pud, addr);
 	if (!dst_pmd)
 		return -ENOMEM;
+	/* 这里轮询pmd */
 	src_pmd = pmd_offset(src_pud, addr);
 	do {
 		next = pmd_addr_end(addr, end);
@@ -1138,9 +1185,12 @@ static inline int copy_pud_range(struct mm_struct *dst_mm, struct mm_struct *src
 	pud_t *src_pud, *dst_pud;
 	unsigned long next;
 
+	/* 为dst_pud分配pud_alloc,并且填充到pgd里面去 */
 	dst_pud = pud_alloc(dst_mm, dst_pgd, addr);
+	/* 分配不到直接返回-ENOMEM */
 	if (!dst_pud)
 		return -ENOMEM;
+	/* 然后进行pud的轮询拷贝 */
 	src_pud = pud_offset(src_pgd, addr);
 	do {
 		next = pud_addr_end(addr, end);
@@ -1170,6 +1220,20 @@ int copy_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	 * Fork becomes much lighter when there are big shared or private
 	 * readonly mappings. The tradeoff is that copy_page_range is more
 	 * efficient than faulting.
+	 *
+	 * 不要复制page faults会正确填充的pte.
+	 * 当存在大的共享或私有只读映射时,Fork会变得更轻.
+	 * 折中的办法是copy_page_range比faulting更有效。
+	 */
+
+	/* VM_MIXEDMAP表示映射混合使用页帧号和页描述符
+	 * VM_PFNMAP表示页帧号(Page Frame Number,PFN)映射,特殊映射不希望关联页描述符,直接使用页帧号,
+	 * 可能是因为页描述符不存在,也可能是因为不想使用页描述符.
+	 * VM_HUGETLB表示虚拟内存区域使用标准巨型页
+	 */
+	/* 这里是说如果vma->vm_flags和VM_HUGETLB、VM_PFNMAP、VM_MIXEDMAP不搭边
+	 * 或者说vma->anon_vma为空(也就是不是匿名映射)
+	 * 那么直接返回0
 	 */
 	if (!(vma->vm_flags & (VM_HUGETLB | VM_PFNMAP | VM_MIXEDMAP)) &&
 			!vma->anon_vma)
@@ -1182,6 +1246,8 @@ int copy_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		/*
 		 * We do not free on error cases below as remove_vma
 		 * gets called on error from higher level routine
+		 *
+		 * 我们不排除以下错误情况,因为remove_vma会在更高级别的例程出现错误时被调用
 		 */
 		ret = track_pfn_copy(vma);
 		if (ret)
@@ -1193,8 +1259,12 @@ int copy_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	 * there could be a permission downgrade on the ptes of the
 	 * parent mm. And a permission downgrade will only happen if
 	 * is_cow_mapping() returns true.
+	 *
+	 * 只有当父mm的pte上可能存在权限降级时,我们才需要使辅助MMU映射无效.
+	 * 只有当is_cow_mapping()返回true时,权限降级才会发生.
 	 */
 	is_cow = is_cow_mapping(vma->vm_flags);
+
 	mmun_start = addr;
 	mmun_end   = end;
 	if (is_cow)
@@ -1202,12 +1272,17 @@ int copy_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 						    mmun_end);
 
 	ret = 0;
+	/* 拿到dst_mm的pgd */
 	dst_pgd = pgd_offset(dst_mm, addr);
+	/* 拿到src_mm的src_pgd */
 	src_pgd = pgd_offset(src_mm, addr);
 	do {
+		/* 拿到这个pgd_t的结束地址 */
 		next = pgd_addr_end(addr, end);
+		/* 如果这块pgd是none或者说是bad的,那么continue */
 		if (pgd_none_or_clear_bad(src_pgd))
 			continue;
+		/* 下面就是拷贝pud了 */
 		if (unlikely(copy_pud_range(dst_mm, src_mm, dst_pgd, src_pgd,
 					    vma, addr, next))) {
 			ret = -ENOMEM;

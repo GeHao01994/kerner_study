@@ -23,6 +23,31 @@ static __always_inline void preempt_count_set(int pc)
 /*
  * must be macros to avoid header recursion hell
  */
+/* 初始化thread_info数据结构中的preempt_count计数,为了支持内核抢占而引入该字段.
+ * 当preempt_count为0时表示内核可以被安全地抢占,大于0时,则禁止抢占.
+ *
+ * preempt_count计数的结构如下图
+ *
+ * |----------------------preempt_count计数-----------------------|
+ * ↓--------------------------------------------------------------↓
+ * |        | PREEMPT_ACTIVE | NMI | hardirq | sortirq | preempt  |
+ *  --------------------------------------------------------------
+ *                   21            20       16         8          0
+ *
+ * PREEMPT_MASK(0x000000ff)表示抢占计数,记录内核显式地被禁止抢占的次数.
+ * 每次调用preempt_disable时该域的值会加1,调用preempt_enable该域的值会减1.
+ * preempt_disable和preempt_enable成对出现,可以嵌套的深度最大为255.
+ *
+ * SOFTIRQ_MASK(0x0000ff000)表示软中断嵌套数量或嵌套的深度.
+ *
+ * HARDIRQ_MASK(0x000f0000)表示硬件中断嵌套数量或嵌套的深度.
+ *
+ * NMI_MASK(0x00100000)表示NMI中断
+ *
+ * PREEMPT_ACTIVE(0x00200000)表示当前已经被抢占或刚刚被抢占,通常用于表示抢占调度
+ *
+ * 以上任何一个字段的值非零,那么内核的抢占功能都会被禁用.
+ */
 #define init_task_preempt_count(p) do { \
 	task_thread_info(p)->preempt_count = FORK_PREEMPT_COUNT; \
 } while (0)
