@@ -1255,8 +1255,11 @@ struct mempolicy;
 struct pipe_inode_info;
 struct uts_namespace;
 
+/* 内核使用load_weight数据结构来记录调度实体的权重信息(weight) */
 struct load_weight {
+	/* weight是调度实体的权重 */
 	unsigned long weight;
+	/* inv_weight是inverse weight的缩写,它是权重的一个中间计算结果. */
 	u32 inv_weight;
 };
 
@@ -1311,10 +1314,74 @@ struct load_weight {
  *
  * Then it is the load_weight's responsibility to consider overflow
  * issues.
+ *
+ * load_avg/util_avg累积一个无限几何级数
+ * (请参阅kernel/sched/fair.c中的__update_load_avg()).
+ *
+ * [load_avg definition]
+ *
+ * load_avg = runnable% * scale_load_down(load)
+ *
+ * 其中runnable% 是sched_entity可运行的时间比率. 对于cfs_rq,它是所有可运行和阻塞的sched_entities的聚合load_avg.
+ *
+ * load_avg还可以考虑频率缩放：
+ *
+ * load_avg = runnable% * scale_load_down(load) * freq%
+ *
+ * 其中freq%是归一化到最高频率的CPU频率.
+ *
+ * [util_avg definition]
+ *
+ * util_avg = running% * SCHED_CAPACITY_SCALE
+ *
+ * 其中running%是sched_entity在CPU上运行的时间比率.
+ * 对于cfs_rq,它是所有可运行和阻塞的sched_entities的聚合util_avg.
+ *
+ * util_avg还可以将频率缩放和CPU容量缩放作为因子:
+ *
+ * util_avg = running% * SCHED_CAPACITY_SCALE * freq% * capacity%
+ *
+ * 其中freq%与上述相同,capacity%是标准化为最大容量的CPU容量(由于uarch差异等).
+ *
+ * 注意,上述比率(runnable%, running%, freq%, and capacity%)本身在[0，1]的范围内.
+ * 因此,为了进行浮点运算,我们将它们缩放到必要的大范围.例如,util_avg的SCHED_CAPACITY_SCALE反映了这一点.
+ *
+ * [Overflow issue]
+ *
+ * 64位load_sum可以有4353082796(=2^64/47742/88761)个实体
+ * 具有最高负载(=88761),始终可在单个cfs_rq上运行,
+ * 并且不应该溢出,因为该数字已经命中PID_MAX_LIMIT.
+ *
+ * 对于所有其他情况(包括32位内核),struct load_weight的权重会在我们之前先溢出,因为:
+ *
+ * Max(load_avg) <= Max(load.weight)
+ *
+ * 那么load_weight有责任考虑溢出
+ */
+
+/* 下面来关注CPU的负载计算问题.
+ * 计算一个CPU的负载,最简单的方法是计算CPU上就绪队列上所有进程的权重.
+ * 仅考虑优先级权重是有问题的,因为没有考虑该进程的行为.
+ * 有的进程使用的CPU是突发性的,有的是恒定的,有的是CPU密集型的,也有的是IO密集型的.
+ * 进程调度考虑优先级权重的方法可行,但是如果延伸到多个CPU之间的负载均衡就显得不准确了.
+ * 因此从Linux 3.8内核以后进程的负载计算不仅考虑权重,而且跟踪每个调度实体的负载情况,该方法称为PELT(Pre-entry Load Tracking).
+ * 调度实体数据结构中有一个struct sched_avg用于描述进程的负载
  */
 struct sched_avg {
+	/* last_update_time: 上一次更新的时间点,用于计算时间间隔,单位是纳秒
+	 * load_sum: 对于sched_entity: 进程在就绪队列里的可运行状态下的累计衰减总时间(decay_sum_time),计算的是时间值
+	 *	     对于cfs_rq: 调度队列中所有进程的累计工作总负载(decay_sum_load)
+	 */
 	u64 last_update_time, load_sum;
+	/* util_sum: 对于sched_entity: 正在运行状态下的累计衰减总时间(decay_sum_time).(使用cfs_rq->curr == se来判断进程是否正在运行);
+	 *	     对于cfs_rq: 就绪队列中所有处于运行状态进程的累计衰减总时间(decay_sum_time).只要就绪队列里有正在运行的进程,它就会累加
+	 * period_contrib: 存放上一次时间采样时,不能凑成一个周期(1024us)的剩余的时间
+	 */
 	u32 util_sum, period_contrib;
+	/* load_avg: 对于sched_entity: 可运行状态下的量化负载(decay_avg_load).负载均衡中,使用该成员来衡量一个进程的负载贡献值,如衡量迁移进程的负载量.
+	 *	     对于cfs_rq：就绪队列中总的量化负载
+	 * util_avg: 实际算力.通常体现于一个调度实体或者CPU的实际算力需求
+	 */
 	unsigned long load_avg, util_avg;
 };
 
@@ -1544,10 +1611,17 @@ struct task_struct {
 	int wake_cpu;
 #endif
 	int on_rq;
-	/* static_prio 用于保存静态优先级,可以通过nice系统调用来进行修改
+	/* static_prio: 是静态优先级,在进程启动时分配.
+	 *		内核不存储nice值,取而代之的是static_prio.
+	 *		内核中宏NICE_TO_PRIO实现由nice值转换成static_prio.
+	 *		它之所以被成为静态优先级是因为它不会随着时间而改变,用户可以通过nice或sched_setscheduler等系统调用来修改该值.
+	 *
 	 * rt_priority 用于保存实时优先级
-	 * normal_prio 该值取决于静态优先级和调度策略
-	 * prio	用于保存动态优先级
+	 * normal_prio: 是基于static_prio和调度策略计算出来的优先级,在创建进程时会继承父进程的normal_prio.
+	 *		对于普通进程来说,normal_prio等同于static_prio,对于实时进程,会根据rt_priority重新计算normal_prio,
+	 *		详见effective_prio函数.
+	 * prio: 保存着进程的动态优先级,是调度类考虑的优先级,有些情况下是需要暂时提高进程优先级,例如实时互斥量.
+	 * rt_priority是实时进程的优先级.
 	 */
 	int prio, static_prio, normal_prio;
 	unsigned int rt_priority;

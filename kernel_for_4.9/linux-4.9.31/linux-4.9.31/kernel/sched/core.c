@@ -736,18 +736,27 @@ int tg_nop(struct task_group *tg, void *data)
 
 static void set_load_weight(struct task_struct *p)
 {
+	/* 用task_struct的静态优先级减去100,得到普通进程的prio,用来查表的 */
 	int prio = p->static_prio - MAX_RT_PRIO;
+	/* 得到调度实体的权重 */
 	struct load_weight *load = &p->se.load;
 
 	/*
 	 * SCHED_IDLE tasks get minimal weight:
+	 * SCHED_DIDLE任务获得最小权重:
 	 */
+	/* 如果是idle调度策略 */
 	if (idle_policy(p->policy)) {
+		/* #define WEIGHT_IDLEPRIO 3 */
 		load->weight = scale_load(WEIGHT_IDLEPRIO);
+		/* 设置inv_weight为 WMULT_IDLEPRIO
+		 * #define WMULT_IDLEPRIO 1431655765
+		 */
 		load->inv_weight = WMULT_IDLEPRIO;
 		return;
 	}
 
+	/* 如果是normal的话,就根据查表来赋值他的权重等信息 */
 	load->weight = scale_load(sched_prio_to_weight[prio]);
 	load->inv_weight = sched_prio_to_wmult[prio];
 }
@@ -8856,6 +8865,26 @@ void dump_cpu_task(int cpu)
  * it's +10% CPU usage. (to achieve that we use a multiplier of 1.25.
  * If a task goes up by ~10% and another task goes down by ~10% then
  * the relative distance between them is ~25%.)
+ *
+ * nice 级别是倍增的,每改变一个nice级别都会有10%的温和变化.
+ * 例如,当一个CPU绑定任务从nice 0变为nice 1时,它将比另一个保留在nice 0上的CPU绑定任务少获得约10%的CPU时间.
+ *
+ * “10%的效果”是相对的和累积的: 从_any_ nice级别开始,如果你上升1个级别,它将-10%的CPU使用率,如果你下降1个级别则是+10%的CPU利用率.
+ * (为了实现这一点,我们使用1.25的乘数.如果一个任务上升约10%,而另一个任务下降约10%,那么它们之间的相对距离约为25%)
+ */
+
+/* nice值的范围是从-20 ~ 19,进程默认的nice值为0.这些值含义类似级别,可以理解成有40个等级,nice值越高,则优先级越低,反之依然.
+ * 例如一个CPU密集型的应用程序nice值从0增加到1,那么它相对于其他nice值为0的引用程序将减少10%的CPU时间.
+ * 因此进程每降低一个nice级别,优先级则提高一个级别,相应的进程多获得10%的CPU时间;
+ * 反之每提升一个nice级别,优先级则降低一个级别,相应的进程少获得10%的CPU时间.
+ * 为了方便计算,内核约定nice值为0的权重值为1024,其他nice值对应的权重值可以通过查表的方式来获取,
+ * 内核预先计算好了一个表prio_to_weight[40],表下标对应nice值[-20 ~ 19].
+ *
+ * 前文所述的10%的影响是相对及累加的,例如一个进程增加10%的CPU时间,则另外一个进程减小10%,那么差距大约是20%,因此这里使用一个系数1.25来计算.
+ * 举个例子,进程A和进程B的nice值是0,那么权重值都是1024,它们获得CPU的时间都是50%,
+ * 计算公式为1024 / (1024 + 1024) = 50%,假设进程A增加一个nice值,即nice=1,进程B的nice值不变,
+ * 那么进程B应该获得55%的CPU时间,进程A应该是45%.
+ * 而进程B = 1024 / (1024 + 820) = 55%,注意是近似等于.
  */
 const int sched_prio_to_weight[40] = {
  /* -20 */     88761,     71755,     56483,     46273,     36291,
@@ -8874,7 +8903,71 @@ const int sched_prio_to_weight[40] = {
  * In cases where the weight does not change often, we can use the
  * precalculated inverse to speed up arithmetics by turning divisions
  * into multiplications:
+ *
+ * 预先计算的sched_prio_to_weight[]数组的倒转(2^32/x)值
+ *
+ * 在权重不经常变化的情况下,我们可以使用预先计算的倒数,通过将除法转化为乘法来加快运算速度:
  */
+/* 内核中还提供另外一个表prio_to_wmult[40],也是预先计算好的.
+ * sched_prio_to_wmult[]表的计算公式如下:
+ * inv_weight = 2^32 / weight
+ * 其中,inv_weight是inverse weight的缩写,指权重被倒转了,作用是为后面计算方便.
+ *
+ * sched_prio_to_wmult表有什么用途呢?
+ * 在CFS调度器中有一个计算虚拟时间的核心函数calc_delta_fair(),它的计算公示为
+ * vruntime = (delta_exec * nice_0_weight)/weight
+ *
+ * 其中,vruntime表示进程虚拟的运行时间,delta_exec表示实际运行时间,nice_0_weight表示nice为0的权重值,weight表示该进程的权重值.
+ *
+ * vruntime该如何理解呢? 如下图所示,假设系统中只有3个进程A、B、C,它们的NICE都为0,也就是权重值都是1024.
+ * 它们分配到的运行时间相同,即都应该分配到1/3的运行时间.如果A、B、C三个进程的权重值不同呢?
+ *
+ * NICE为0的进程
+ *             真实时钟
+ *          ________________
+ *         |                |                 时间轴
+ *——————————————————————————————————————————————>
+ *             vruntime					vruntime和真实时钟跑的一样快
+ *          ----------------
+ *         |                |
+ *----------------------------------------------->
+ *
+ * 优先级高的进程
+ *             真实时钟
+ *          ________________
+ *         |                |                 时间轴
+ *——————————————————————————————————————————————>
+ *             vruntime					vruntime和真实时钟跑的慢
+ *          --------
+ *         |        |
+ *----------------------------------------------->
+
+ * 优先级低的进程
+ *             真实时钟
+ *          ________________
+ *         |                |                 时间轴
+ *——————————————————————————————————————————————>
+ *             vruntime					vruntime和真实时钟跑的一样快
+ *          ---------------------------
+ *         |                           |
+ *----------------------------------------------->
+ *
+ * CFS调度器抛弃以前固定时间片和固定调度周期的算法,而采用进程权重值的比重来量化和计算实际运行时间.
+ * 另外引入虚拟时钟的概念,每个进程的虚拟时间是实际运行时间相对于NICE值为0的权重的比例值.
+ * 进程按照各自不同的速率比在物理时钟节拍内前进.NICE值小的进程,优先级高且权重大,其虚拟时钟比真实时钟跑得慢,但是可以获得比较多的运行时间;
+ * 反之,NICE值大的进程,优先级低,权重也低,其虚拟时钟比真实时钟跑得快,反而获得比较少的运行时间.
+ * CFS调度器总是选择虚拟时钟跑得慢的进程,它像一个多级变速箱,NICE为0的进程是基准齿轮,其他各个进程在不同的变速比下相互追赶,从而达到公平公正.
+ *
+ * 假设某个进程nice值为1,其权重值为820,delta_exec=10ms,导入公式计算vruntime= (10 * 1024)/820,这里会涉及浮点运算.
+ * 为了计算高效,函数calc_delta_fair的计算方式变成乘法和移位运行公式如下:
+ * vruntime = (delta_exec * nice_0_weight * inv_weight ) >> shift
+ *
+ * 把inv_weight带入计算公式后,得到如下计算公式:
+ * vruntime = (delta_exec * nice_0_weight * 2^32 ) / weight >>32
+ *
+ * 巧妙的运用prio_to_wmult表预先做了除法,因此实际的计算只有乘法和移位操作，2^32是为了预先做除法和移位操作.
+ */
+
 const u32 sched_prio_to_wmult[40] = {
  /* -20 */     48388,     59856,     76040,     92818,    118348,
  /* -15 */    147320,    184698,    229616,    287308,    360437,

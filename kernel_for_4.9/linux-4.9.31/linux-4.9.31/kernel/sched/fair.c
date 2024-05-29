@@ -216,10 +216,28 @@ static void __update_inv_weight(struct load_weight *lw)
  *
  * Or, weight =< lw.weight (because lw.weight is the runqueue weight), thus
  * weight/lw.weight <= 1, and therefore our shift will also be positive.
+ *
+ * delta_exec * weight / lw.weight
+ *   OR
+ * (delta_exec * (weight * lw->inv_weight)) >> WMULT_SHIFT
+ *
+ * 任一权重 := NICE_0_LOAD 和lw \e sched_prio_to_wmult[],
+ * 在这种情况下,我们保证移位保持积极乐观的,因为inv_weight保证适合32位,
+ * 并且NICE_0_LOAD给出另外10位; 因此移位 >= 22.
+ *
+ * 或者,weight =< lw.weight(因为lw.weight 是运行队列的权重),因此weight/lw.weight <= 1,因此我们的偏移也将是正的.
+ */
+/* vruntimt = (delta_exec * nice_0_weight) / weight
+ * 因为上述公式会涉及浮点运算,为了计算搞笑,函数calc_delta_fair的计算公式变成乘法和移位运算公式如下:
+ * vruntime = (delta_exec * nice_0_weight * inv_weight) >> shift
+ * 把inv_weight带入计算公式后,得到如下计算公式:
+ * vruntime = (delta_exec * nice_0_weight * 2^32 / weight ) >> 32
+ * 所以下面这就是对这个公式的计算
  */
 static u64 __calc_delta(u64 delta_exec, unsigned long weight, struct load_weight *lw)
 {
 	u64 fact = scale_load_down(weight);
+	/* #define WMULT_SHIFT	32 */
 	int shift = WMULT_SHIFT;
 
 	__update_inv_weight(lw);
@@ -603,8 +621,15 @@ int sched_proc_update_handler(struct ctl_table *table, int write,
 /*
  * delta /= w
  */
+/* 这个函数实际上就是去计算vruntime
+ * 计算公式为vruntime = (delta_exec * nice_0_weight)/weight
+ */
 static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se)
 {
+	/* 所以说如果se->load.weight == NICE_0_LOAD
+	 * 那么不需要进入__calc_delta
+	 * 直接返回delta
+	 */
 	if (unlikely(se->load.weight != NICE_0_LOAD))
 		delta = __calc_delta(delta, NICE_0_LOAD, &se->load);
 
@@ -2671,6 +2696,29 @@ static inline void update_cfs_shares(struct cfs_rq *cfs_rq)
 
 #ifdef CONFIG_SMP
 /* Precomputed fixed inverse multiplies for multiplication by y^n */
+
+/* 我们把1毫秒(准确来说是1024微妙,为了方便移位操作)的时间跨度算出一个周期,称为period,简称PI.
+ * 一个调度实体(可以是一个进程,也可以是一个调度组)在一个PI周期内对系统负载的贡献除了权重外,还有在PI周期内可运行的时间,包括运行时间或等待CPU时间.
+ * 一个理想的计算方式是: 统计多个实际的PI周期,并是有一个衰减系数来计算过去PI周期对负载的贡献.
+ * 假设Li是一个调度实体在第i个周期内的负载贡献,那么一个调度实体的负载总和计算公式如下:
+ *	L = L0 + L1*y + L2*y^2 + L3*y^3 +...+L32 *y^32 + ...
+ * 这个公式用于计算调度实体的最近的负载,过去的负载也是影响因素,它是一个衰减因子.
+ * 因此调度实体的负载需要考虑时间的因素,不能只考虑当前的负载,还要考虑其在过去一段时间内的表项.
+ * 衰减的意义类似于信号处理中的采样,距离当前时间点越远,衰减系数越大,对总体影响越小.
+ * 其中,y是一个预先选好的衰减系数,y^32约等于0.5,因此统计过去第32个周期的负载可以被简单地认为负载减半.
+ * 该计算公式还有简化计算方式,内核不需要使用数组来存放过去PI个周期的负载贡献,只需要用过去周期贡献和乘以衰减系数y,并加上当前时间点的负载L0即可.
+ * 内核定义表runnable_avg_yN_inv来方便使用衰减因子
+ *
+ * 为了处理器计算方法方便,该表对应的因子乘以2^32,计算完成后在右移32位.
+ * 在处理器中,乘法运算比浮点运算快得多,其公式等同于
+ *
+ * A / B = (A * 2 ^ 32) / (B * 2^32) = (A * (2^32/B))/2^32
+ *
+ * 其中,除以2^32可以用右移32位来计算.
+ * runable_avg_yN_inv相当于提前计算了公式中的2^32/B的值.runable_avg_yN_inv表包括32个下标,对应过去0~32毫秒的负载贡献的衰减因子.
+ * 举例说明,加上当前进程的负载贡献度是100,要求计算过去第32毫秒的负载.首先查表得到过去32毫秒周期的衰减因子: runable_avg_yN_inv[31].
+ * 计算公式为: Load = (100 * runable_avg_yN_inv[31] >>32 ),最后计算结果为51.
+ */
 static const u32 runnable_avg_yN_inv[] = {
 	0xffffffff, 0xfa83b2da, 0xf5257d14, 0xefe4b99a, 0xeac0c6e6, 0xe5b906e6,
 	0xe0ccdeeb, 0xdbfbb796, 0xd744fcc9, 0xd2a81d91, 0xce248c14, 0xc9b9bd85,
@@ -2683,6 +2731,12 @@ static const u32 runnable_avg_yN_inv[] = {
 /*
  * Precomputed \Sum y^k { 1<=k<=n }.  These are floor(true_value) to prevent
  * over-estimates when re-combining.
+ */
+/* 为了计算更加方便,内核又维护了一个表runnable_avg_yN_sum,已预先计算好如下公式的值.
+ * runnable_avg_yN_sump[] = 1024 * (y + y^2 + y^3 + ... + y^n )
+ * 其中,n取1~32.为什么系数是1024呢?因为内核的runnable_avg_yN_sum[]表通常用于计算时间的衰减,
+ * 准确地说是周期period,一个周期是1024微妙.
+ * 例如n=2时,sum = 1024 * (runnable_avg_yN_inv[1] + runnable_avg_yN_inv[2]) >> 32 = 1024 *(0.978 + 0.957) = 1981.44,就约等于runnable_avg_yN_sum[2].
  */
 static const u32 runnable_avg_yN_sum[] = {
 	    0, 1002, 1982, 2941, 3880, 4798, 5697, 6576, 7437, 8279, 9103,
@@ -2704,12 +2758,19 @@ static const u32 __accumulated_sum_N32[] = {
  * Approximate:
  *   val * y^n,    where y^32 ~= 0.5 (~1 scheduling period)
  */
+/* 内核中的decay_load函数用于计算第n个周期的衰减值
+ * 参数val表示n个周期前的负载值,n表示第n个周期,其计算公式,即第n个周期的衰减值为val * y ^ n,计算y^n采用查表的方式,因此计算公式变为:
+ *	(val * runnable_avg_yN_inv[n]) >> 32.
+ * 因此定义了32毫秒的衰减系数为1/2,每增加32毫秒都要衰减1/2,因此如果period太大,衰减后值会变得很小几乎等于0.
+ * 代码 n > LOAD_AVG_PERIOD * 63,当period大于2016就直接等于0.
+ */
 static __always_inline u64 decay_load(u64 val, u64 n)
 {
 	unsigned int local_n;
-
+	/* 如果n为0,那么没必要衰减,直接返回val */
 	if (!n)
 		return val;
+	/* 如果period大于2016,那么直接返回0 */
 	else if (unlikely(n > LOAD_AVG_PERIOD * 63))
 		return 0;
 
@@ -2723,11 +2784,14 @@ static __always_inline u64 decay_load(u64 val, u64 n)
 	 *
 	 * To achieve constant time decay_load.
 	 */
+	/* 每增加32毫秒就要衰减1/2,相当于右移一位 */
+	/* #define LOAD_AVG_PERIOD 32 */
 	if (unlikely(local_n >= LOAD_AVG_PERIOD)) {
 		val >>= local_n / LOAD_AVG_PERIOD;
 		local_n %= LOAD_AVG_PERIOD;
 	}
 
+	/* 这里就是val *  runnable_avg_yN_inv[local_n] / 2^32 */
 	val = mul_u64_u32_shr(val, runnable_avg_yN_inv[local_n], 32);
 	return val;
 }
@@ -2739,19 +2803,33 @@ static __always_inline u64 decay_load(u64 val, u64 n)
  * We can compute this reasonably efficiently by combining:
  *   y^PERIOD = 1/2 with precomputed \Sum 1024*y^n {for  n <PERIOD}
  */
+/* __compute_runnable_contrib会使用该表来计算连续n个PI周期的负载累计贡献值.
+ * __compute_runnable_contrib函数中的参数n表示PI周期的个数.
+ * 如果n小于等于LOAD_AVG_PERIOD(32个周期),那么直接查表runnable_avg_yN_sum[]取值,
+ * 如果n大于等于LOAD_AVG_MAX_N(345个周期),那么直接得到极限值LOAD_AVG_MAX(47742).
+ * 如果n的范围为32~345,那么每次递进32个衰减周期进行计算,然后把不能凑成32个周期的单独计算并累加.
+ */
 static u32 __compute_runnable_contrib(u64 n)
 {
 	u32 contrib = 0;
 
+	/* 如果n小于LOAD_AVG_PERIOD(32个周期),那么直接查表runnable_avg_yN_sum[]取值 */
 	if (likely(n <= LOAD_AVG_PERIOD))
 		return runnable_avg_yN_sum[n];
+	/* 如果n大于等于LOAD_AVG_MAX_N(345个周期),那么直接得到极限值LOAD_AVG_MAX(47742) */
 	else if (unlikely(n >= LOAD_AVG_MAX_N))
 		return LOAD_AVG_MAX;
 
 	/* Since n < LOAD_AVG_MAX_N, n/LOAD_AVG_PERIOD < 11 */
+	/* 如果n的范围为32~345
+	 * 用n/32 去查__accumulated_sum_N32[]表
+	 */
 	contrib = __accumulated_sum_N32[n/LOAD_AVG_PERIOD];
+	/* 在得到除以32的余数 */
 	n %= LOAD_AVG_PERIOD;
+	/* 然后不足32个周期的单独计算并累加 */
 	contrib = decay_load(contrib, n);
+	/* 返回负载累计贡献值 */
 	return contrib + runnable_avg_yN_sum[n];
 }
 
@@ -2763,27 +2841,39 @@ static u32 __compute_runnable_contrib(u64 n)
  * history into segments of approximately 1ms (1024us); label the segment that
  * occurred N-ms ago p_N, with p_0 corresponding to the current period, e.g.
  *
+ * 我们可以将对可运行平均值的历史贡献表示为几何级数的系数.
+ * 为此,我们将可运行历史细分为大约1ms(1024us)的片段;
+ * 将N毫秒前发生的分段标记为p_N,其中p_0对应于当前时段,例如.
  * [<- 1024us ->|<- 1024us ->|<- 1024us ->| ...
  *      p0            p1           p2
  *     (now)       (~1ms ago)  (~2ms ago)
  *
  * Let u_i denote the fraction of p_i that the entity was runnable.
+ * 设u_i表示实体可运行的p_i的分数.
  *
  * We then designate the fractions u_i as our co-efficients, yielding the
  * following representation of historical load:
  *   u_0 + u_1*y + u_2*y^2 + u_3*y^3 + ...
  *
+ * 然后,我们将分数u_i指定为我们的系数,得到历史负荷的以下表示:
+ *	u_0 + u1*y + u2*y^2 + u_3*y^3 + ...
  * We choose y based on the with of a reasonably scheduling period, fixing:
  *   y^32 = 0.5
+ * 我们根据合理的调度周期选择y,固定：y^32=0.5
  *
  * This means that the contribution to load ~32ms ago (u_32) will be weighted
  * approximately half as much as the contribution to load within the last ms
  * (u_0).
+ * 这意味着~32ms前(u_32)对负载的贡献将被加权,大约是最后ms内(u_0)对负载贡献的一半.
  *
  * When a period "rolls over" and we have new u_0`, multiplying the previous
  * sum again by y is sufficient to update:
  *   load_avg = u_0` + y*(u_0 + u_1*y + u_2*y^2 + ... )
  *            = u_0 + u_1*y + u_2*y^2 + ... [re-labeling u_i --> u_{i+1}]
+ *
+ * 当一个周期“滚动”并且我们有新的u_0`时，将之前的总和再次乘以y就足以更新：
+ *	load_avg= u_0` + y*(u_0 + u1*y + u2*y^2 + ...)
+ *		= u_0 + u1*y + u2*y^2 + ... [re-labeling u_i--> u_{i+1}]
  */
 static __always_inline int
 __update_load_avg(u64 now, int cpu, struct sched_avg *sa,
@@ -2793,12 +2883,16 @@ __update_load_avg(u64 now, int cpu, struct sched_avg *sa,
 	u32 contrib;
 	unsigned int delta_w, scaled_delta_w, decayed = 0;
 	unsigned long scale_freq, scale_cpu;
-
+	/* delta是指从上次更新到本次更新的时间差,单位是纳秒 */
 	delta = now - sa->last_update_time;
 	/*
 	 * This should only happen when time goes backwards, which it
 	 * unfortunately does during sched clock init when we swap over to TSC.
+	 *
+	 * 这应该只在时间倒退时发生,不幸的是,当我们切换到TSC时,在调度时钟初始化期间会发生这种情况.
 	 */
+
+	/* 如果delta < 0,那么更新last_update_time之后返回0 */
 	if ((s64)delta < 0) {
 		sa->last_update_time = now;
 		return 0;
@@ -2807,83 +2901,143 @@ __update_load_avg(u64 now, int cpu, struct sched_avg *sa,
 	/*
 	 * Use 1024ns as the unit of measurement since it's a reasonable
 	 * approximation of 1us and fast to compute.
+	 *
+	 * 使用1024ns作为测量单位,因为它是1us的合理近似值,计算速度快.
 	 */
+	/* delta时间转换成微妙,注意这里为了计算效率右移10位,相当于除以1024.*/
 	delta >>= 10;
 	if (!delta)
 		return 0;
 	sa->last_update_time = now;
 
-	scale_freq = arch_scale_freq_capacity(NULL, cpu);
+	scale_freq = arch_scale_freq_capacity(NULL, cpu); /* 1024*curr_freq/max_freq */
+
+	/* arch_scale_cpu_capacity函数用于计算并返回一个CPU的“容量”值.
+	 * 这个值代表了该CPU相对于系统中其他CPU的性能或能力.
+	 * 该函数通常是架构特定的,因为不同的CPU架构可能有不同的性能和功耗特性.
+	 * 容量值通常会被归一化到一个固定的范围内(例如,0到1024),以便于比较和计算.
+	 * 归一化后的值可以与由实体负载跟踪(PELT)机制算出的利用率信号做对比,从而帮助调度器更准确地评估系统的整体负载和性能.
+	 */
 	scale_cpu = arch_scale_cpu_capacity(NULL, cpu);
 
-	/* delta_w is the amount already accumulated against our next period */
+	/* delta_w is the amount already accumulated against our next period
+	 * delta_w是我们下一个周期已经累积的数额
+	 */
+	/* delta_w是上一次总周期数中不能凑成一个周期(1024微妙)的剩余的时间 */
 	delta_w = sa->period_contrib;
+	/* 如果上次剩余delta_w加上本次时间差delta大于一个周期,那么就要进行衰减计算. */
+	/*             周期1024微秒  ←------n个周期period-----→|
+	 *  __________|_____________|__________________________|________|
+	 * |	      |		    |			       |	|
+	 * |__________|_____________|__________________________|________|
+	 *  	      |      ↑      |                          |←--T2--→|
+	 *	      |← T0 →|← T1 →| 					↑
+	 *                                                           本次更新节点now
+	 */
 	if (delta + delta_w >= 1024) {
 		decayed = 1;
 
-		/* how much left for next period will start over, we don't know yet */
+		/* how much left for next period will start over, we don't know yet
+		 * 我们还不知道下一周期还有多少left要重新开始
+		 */
+		/* 这里把上一次总周期数中不能凑成一个周期(1024微妙)的剩余的时间设置为0,因为我们现在还不知道 */
 		sa->period_contrib = 0;
 
 		/*
 		 * Now that we know we're crossing a period boundary, figure
 		 * out how much from delta we need to complete the current
 		 * period and accrue it.
+		 *
+		 * 现在我们知道我们正在跨越一个周期边界,计算出我们需要从delta中获得多少来完成当前周期并累积它.
 		 */
+		/* 所以这里就是算出图中的T1,这部分时间是上次更新中不满一个周期的剩余时间段 */
 		delta_w = 1024 - delta_w;
+		/* #define cap_scale(v, s) ((v)*(s) >> SCHED_CAPACITY_SHIFT) */
 		scaled_delta_w = cap_scale(delta_w, scale_freq);
 		if (weight) {
+			/* load_sum: 对于sched_entity: 进程在就绪队列里的可运行状态下的累计衰减总时间(decay_sum_time),计算的是时间值
+			 *           对于cfs_rq: 调度队列中所有进程的累计工作总负载(decay_sum_load)
+			 * 所以这里对load_sum进行衰减计算 */
 			sa->load_sum += weight * scaled_delta_w;
+			/* runnable_load_sum应该是指的可运行状态下的累计衰减总和,应该是该rq可运行状态的所有进程的总和 */
 			if (cfs_rq) {
 				cfs_rq->runnable_load_sum +=
 						weight * scaled_delta_w;
 			}
 		}
+		/* util_sum: 对于sched_entity: 正在运行状态下的累计衰减总时间(decay_sum_time).(使用cfs_rq->curr == se来判断进程是否正在运行);
+		 *	     对于cfs_rq: 就绪队列中所有处于运行状态进程的累计衰减总时间(decay_sum_time).只要就绪队列里有正在运行的进程,它就会累加
+		 */
+		/* 注意的是这里乘以的是scale_cpu */
 		if (running)
 			sa->util_sum += scaled_delta_w * scale_cpu;
 
+		/* 这里delta减去delta_w就得到了完整的周期段从上图中就是n个周期period + T2 */
 		delta -= delta_w;
 
-		/* Figure out how many additional periods this update spans */
+		/* Figure out how many additional periods this update spans
+		 * 计算此更新所跨的额外的周期
+		 */
+		/* 用delta / 1024 算出多少个周期 */
 		periods = delta / 1024;
+		/* 算出剩余的不足一个周期的 */
 		delta %= 1024;
-
+		/* 这里计算load_sum经历过periods + 1的衰减值(decay_load函数用于计算第n个周期的衰减值) */
 		sa->load_sum = decay_load(sa->load_sum, periods + 1);
+		/* 计算cfs_rq->runnable_load_sum经历过periods + 1的衰减值 */
 		if (cfs_rq) {
 			cfs_rq->runnable_load_sum =
 				decay_load(cfs_rq->runnable_load_sum, periods + 1);
 		}
+		/* 计算sa->util_sum的衰减值 */
 		sa->util_sum = decay_load((u64)(sa->util_sum), periods + 1);
 
 		/* Efficiently calculate \sum (1..n_period) 1024*y^i */
+		/* __compute_runnable_contrib会使用runnable_avg_yN_sum来计算连续n个PI周期的负载累计贡献值 */
 		contrib = __compute_runnable_contrib(periods);
+		/* #define cap_scale(v, s) ((v)*(s) >> SCHED_CAPACITY_SHIFT) */
 		contrib = cap_scale(contrib, scale_freq);
+		/* 如果有权重,那么还需要让sa->load_sum + weight * contrib */
 		if (weight) {
 			sa->load_sum += weight * contrib;
+			/* 让cfs_rq->runnable_load_sum加上权重 * 贡献值 */
 			if (cfs_rq)
 				cfs_rq->runnable_load_sum += weight * contrib;
 		}
+		/* 让sa->util_sum 加上贡献值 * scale_cpu */
 		if (running)
 			sa->util_sum += contrib * scale_cpu;
 	}
 
 	/* Remainder of delta accrued against u_0` */
+	/* 对u_0累计的增量的剩余部分 */
+	/* 这里就是不满1个周期的部分进行统计,它就不用做衰减了 */
 	scaled_delta = cap_scale(delta, scale_freq);
 	if (weight) {
 		sa->load_sum += weight * scaled_delta;
 		if (cfs_rq)
 			cfs_rq->runnable_load_sum += weight * scaled_delta;
 	}
+	/* 指的注意的是这里是乘以的scale_cpu */
 	if (running)
 		sa->util_sum += scaled_delta * scale_cpu;
-
+	/* 这里把delta赋值给period_contrib */
 	sa->period_contrib += delta;
-
+	/* decayed等于1说明如果上次剩余delta_w加上本次时间差delta大于一个周期 */
 	if (decayed) {
+		/* load_avg: 对于sched_entity: 可运行状态下的量化负载(decay_avg_load).负载均衡中,使用该成员来衡量一个进程的负载贡献值,如衡量迁移进程的负载量.
+		 *	     对于cfs_rq：就绪队列中总的量化负载
+		 *
+		 * #define LOAD_AVG_MAX 47742 maximum possible load avg
+		 * 这里load_avg = sa->load_sum / 47742
+		 */
 		sa->load_avg = div_u64(sa->load_sum, LOAD_AVG_MAX);
+		/* 同理 */
 		if (cfs_rq) {
 			cfs_rq->runnable_load_avg =
 				div_u64(cfs_rq->runnable_load_sum, LOAD_AVG_MAX);
 		}
+		/* 同理 */
 		sa->util_avg = sa->util_sum / LOAD_AVG_MAX;
 	}
 

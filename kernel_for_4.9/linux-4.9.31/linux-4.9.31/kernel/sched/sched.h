@@ -400,6 +400,7 @@ struct cfs_rq {
 	 * CFS load tracking
 	 */
 	struct sched_avg avg;
+	/* runnable_load_sum应该是指的可运行状态下的累计衰减总和,应该是该rq可运行状态的所有进程的总和 */
 	u64 runnable_load_sum;
 	unsigned long runnable_load_avg;
 #ifdef CONFIG_FAIR_GROUP_SCHED

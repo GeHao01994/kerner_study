@@ -2111,13 +2111,18 @@ long _do_fork(unsigned long clone_flags,
 		if (likely(!ptrace_event_enabled(current, trace)))
 			trace = 0;
 	}
-
+	/* copy_process函数成功创建了一个新的进程 */
 	p = copy_process(clone_flags, stack_start, stack_size,
 			 child_tidptr, NULL, trace, tls, NUMA_NO_NODE);
 	add_latent_entropy();
 	/*
 	 * Do this prior waking up the new thread - the thread pointer
 	 * might get invalid after that point, if the thread exits quickly.
+	 */
+	/* 对do_fork创建的子进程,首先要保证子进程先运行
+	 * 在调用exec或者exit之前,父子进程是共享数据的,
+	 * 在子进程调用exec或者exit之后,父进程才可以被调度运行,
+	 * 因此这里使用了一个vfork_done完成量来达到扣留父进程的作用.
 	 */
 	if (!IS_ERR(p)) {
 		struct completion vfork;
@@ -2136,7 +2141,7 @@ long _do_fork(unsigned long clone_flags,
 			init_completion(&vfork);
 			get_task_struct(p);
 		}
-
+		/* 这里准备唤醒新创建的进程,也就是把进程加入调度器里接受调度运行. */
 		wake_up_new_task(p);
 
 		/* forking complete and child started to run, tell ptracer */
