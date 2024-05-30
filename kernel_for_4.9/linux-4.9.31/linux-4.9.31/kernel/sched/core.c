@@ -383,6 +383,7 @@ static inline void init_rq_hrtick(struct rq *rq)
 static bool set_nr_and_not_polling(struct task_struct *p)
 {
 	struct thread_info *ti = task_thread_info(p);
+	/* 原子设置TIF_NED_RESCHED并测试TIF_POLLING_NRFLAG,这样可以避免轮询状态更改引起的任何争用,从而避免虚假的IPI. */
 	return !(fetch_or(&ti->flags, _TIF_NEED_RESCHED) & _TIF_POLLING_NRFLAG);
 }
 
@@ -477,27 +478,39 @@ void wake_up_q(struct wake_q_head *head)
  * On UP this means the setting of the need_resched flag, on SMP it
  * might also involve a cross-CPU call to trigger the scheduler on
  * the target CPU.
+ *
+ * resched_curr - 将rq的当前task标记为'立刻重新调度'.
+ *
+ * 在UP上,这意味着need_sched标志的设置,在SMP上,它还可能涉及跨CPU调用,以触发目标CPU上的调度器.
  */
 void resched_curr(struct rq *rq)
 {
+	/* 拿到当前运行队列运行的那个task_struct */
 	struct task_struct *curr = rq->curr;
 	int cpu;
 
 	lockdep_assert_held(&rq->lock);
 
+	/* 如果TIF_NEED_RESCHED(TIF_NEED_RESCHED标志来对进程进行标记的,设置该位则表明需要进行调度切换)被设置了
+	 * 那么直接返回
+	 */
 	if (test_tsk_need_resched(curr))
 		return;
 
+	/* 如果没有,那么就先拿到rq所在的CPU */
 	cpu = cpu_of(rq);
 
+	/* 如果该CPU是我们本地CPU */
 	if (cpu == smp_processor_id()) {
+		/* 设置当前进程的TIF_NEED_RESCHED flags */
 		set_tsk_need_resched(curr);
 		set_preempt_need_resched();
 		return;
 	}
 
+	/* 如果不是本地CPU */
 	if (set_nr_and_not_polling(curr))
-		smp_send_reschedule(cpu);
+		smp_send_reschedule(cpu);/* 发一个ipi给对方CPU */
 	else
 		trace_sched_wake_idle_without_ipi(cpu);
 }
@@ -2217,6 +2230,9 @@ void __dl_clear_params(struct task_struct *p)
  *
  * __sched_fork() is basic setup used by init_idle() too:
  */
+/* __sched_fork函数会把新创建进程的调度实体se相关成员初始化为0,因为这些值不能复用父进程的,
+ * 子进程将来要加入调度去中参与调度,和父进程“分道扬镳”.
+ */
 static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 {
 	p->on_rq			= 0;
@@ -2478,7 +2494,9 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	 */
 	/* 这里把当前CPU设置到新进程thread_info结构中的CPU成员中 */
 	__set_task_cpu(p, cpu);
-	/* 如果说调度类有task_fork函数,那么就调用该函数 */
+	/* 如果说调度类有task_fork函数,那么就调用该函数
+	 * 每个调度类都定义了一套操作方法集,调用CFS调度器的task_fork方法做一些fork相关的初始化.
+	 */
 	if (p->sched_class->task_fork)
 		p->sched_class->task_fork(p);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
@@ -2607,13 +2625,20 @@ extern void init_dl_bw(struct dl_bw *dl_b);
  * This function will do some initial scheduler statistics housekeeping
  * that must be done for every newly created context, then puts the task
  * on the runqueue and wakes it.
+ *
+ * wake_up_new_task - 第一次唤醒新创建的任务.
+ *
+ * 此函数将对每个新创建的上下文执行一些必须执行的初始调度程序统计内务处理,然后将任务放入运行队列并唤醒它.
  */
+
+/* 新进程创建完成后需要由wake_up_new_task把它加入到调度器中 */
 void wake_up_new_task(struct task_struct *p)
 {
 	struct rq_flags rf;
 	struct rq *rq;
 
 	raw_spin_lock_irqsave(&p->pi_lock, rf.flags);
+	/* 设置task_struct的state为TASK_RUNNING */
 	p->state = TASK_RUNNING;
 #ifdef CONFIG_SMP
 	/*
@@ -2623,6 +2648,18 @@ void wake_up_new_task(struct task_struct *p)
 	 *
 	 * Use __set_task_cpu() to avoid calling sched_class::migrate_task_rq,
 	 * as we're not fully set-up yet.
+	 *
+	 * fork balancing,在这里进行,不提前进行,因为:
+	 * - cpus_allowed 可以在fork路径中更改
+	 * - 任何先前选择的cpu都可能通过热插拔而消失
+	 *
+	 * 使用__set_task_cpu()避免调用sched_class::migrate_task_rq,因为我们还没有完全设置好.
+	 */
+
+	/* 在前面已经设置了父进程的CPU到子进程的thread_info->cpu中,为什么这里要重新设置呢?
+	 * 因为在fork新进程的过程中,cpus_allowed有可能发生变化,另外一个原因是之前选择的CPU
+	 * 有可能被关闭了,因此重新选择CPU.
+	 * select_task_rq函数会调用CFS调度类的select_task_rq方法来选择一个合适的调度域中最悠闲的CPU.
 	 */
 	__set_task_cpu(p, select_task_rq(p, task_cpu(p), SD_BALANCE_FORK, 0));
 #endif

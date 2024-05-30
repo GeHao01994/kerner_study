@@ -1420,30 +1420,46 @@ struct sched_statistics {
 	u64			nr_wakeups_idle;
 };
 #endif
-
+/* 进程调度有一个非常重要的数据结构struct sched_entity,称为调度实体,该数据结构描述进程作为一个调度
+ * 实体参与调度所需要的所有信息
+ */
 struct sched_entity {
+	/* load 表示该调度实体的权重 */
 	struct load_weight	load;		/* for load-balancing */
+	/* run_node表示该调度实体在红黑树中的节点 */
 	struct rb_node		run_node;
 	struct list_head	group_node;
+	/* on_rq表示该调度实体是否在就绪队列中接受调度 */
 	unsigned int		on_rq;
-
+	/* 当前调度实体的开始执行时间,感觉是调用update_curr函数的时间 */
 	u64			exec_start;
+	/* 进程执行的总时间大小 */
 	u64			sum_exec_runtime;
+	/* vruntime表示虚拟运行时间 */
 	u64			vruntime;
+	/* prev_sum_exec_runtime表示进程截止目前获取cpu的时间(即执行时间)；
+	 * 可以使用sum_exec_runtime- prev_sum_exec_runtime计算进程最近一次调度内获取cpu使用权的时间.
+	 * 不过sum_exec_runtime是使用exec_start计算出的时间差的累加
+	 */
 	u64			prev_sum_exec_runtime;
-
+	/* 负载均衡,迁移的次数? */
 	u64			nr_migrations;
 
 #ifdef CONFIG_SCHEDSTATS
+	/* 统计信息 */
 	struct sched_statistics statistics;
 #endif
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
+	/* 任务组的深度,其中根任务组的深度为0,逐级往下增加 */
 	int			depth;
+	/* 指向调度实体的父对象 */
 	struct sched_entity	*parent;
 	/* rq on which this entity is (to be) queued: */
+	/* 指向调度实体归属的CFS队列,也就是需要入列的CFS队列 */
 	struct cfs_rq		*cfs_rq;
 	/* rq "owned" by this entity/group: */
+	/* 指向归属于当前调度实体的CFS队列,用于包含子任务或子的任务组 */
 	struct cfs_rq		*my_q;
 #endif
 
@@ -1454,6 +1470,7 @@ struct sched_entity {
 	 * Put into separate cache line so it does not
 	 * collide with read-mostly values above.
 	 */
+	/* 用于调度实体的负载计算('PELT') */
 	struct sched_avg	avg ____cacheline_aligned_in_smp;
 #endif
 };

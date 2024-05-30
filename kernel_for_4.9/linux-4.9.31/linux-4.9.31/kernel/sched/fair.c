@@ -227,8 +227,8 @@ static void __update_inv_weight(struct load_weight *lw)
  *
  * 或者,weight =< lw.weight(因为lw.weight 是运行队列的权重),因此weight/lw.weight <= 1,因此我们的偏移也将是正的.
  */
-/* vruntimt = (delta_exec * nice_0_weight) / weight
- * 因为上述公式会涉及浮点运算,为了计算搞笑,函数calc_delta_fair的计算公式变成乘法和移位运算公式如下:
+/* vruntime = (delta_exec * nice_0_weight) / weight
+ * 因为上述公式会涉及浮点运算,为了计算高效,函数calc_delta_fair的计算公式变成乘法和移位运算公式如下:
  * vruntime = (delta_exec * nice_0_weight * inv_weight) >> shift
  * 把inv_weight带入计算公式后,得到如下计算公式:
  * vruntime = (delta_exec * nice_0_weight * 2^32 / weight ) >> 32
@@ -478,29 +478,44 @@ static inline int entity_before(struct sched_entity *a,
 
 static void update_min_vruntime(struct cfs_rq *cfs_rq)
 {
+	/* 拿到当前cfs_rq的运行的sched_entity
+	 * 如果是fork的话,那么这里指的就是父进程
+	 */
 	struct sched_entity *curr = cfs_rq->curr;
 
+	/* 拿到该cfs_rq最小的vruntime */
 	u64 vruntime = cfs_rq->min_vruntime;
 
+	/* 如果当前cfs_rq有正在运行的sched_entity */
 	if (curr) {
-		if (curr->on_rq)
+		/* 如果当前sched_entity在rq上 */
+		if (curr->on_rq)	/* vruntime = curr->vruntime */
 			vruntime = curr->vruntime;
 		else
 			curr = NULL;
 	}
-
+	/* 函数本身并不会遍历数找到最左叶子节点(即就是所有进程中vruntime最小的那个),因为该值已经缓存在rb_leftmost字段中 */
 	if (cfs_rq->rb_leftmost) {
 		struct sched_entity *se = rb_entry(cfs_rq->rb_leftmost,
 						   struct sched_entity,
 						   run_node);
-
+		/* 如果curr没有值,那么vruntime就是se->vruntime */
 		if (!curr)
 			vruntime = se->vruntime;
-		else
+		else	/* 如果有值,那么vruntime就是vruntime和se->vruntime中最小的那个 */
 			vruntime = min_vruntime(vruntime, se->vruntime);
 	}
 
-	/* ensure we never gain time by being placed backwards. */
+	/* ensure we never gain time by being placed backwards.
+	 * 确保我们永远不会因为落后而获得时间.
+	 */
+	/* min_vruntime算出cfs_rq->min_vruntime 和 vruntime的最大值??? */
+	/* 由于正常情况当前运行进程的vruntime,应该比就绪队列中其它调度实体的值要小.
+	 * 但也有一些特殊情况,如睡眠进程唤醒后获得了奖励,从而使其加入就绪队列后比当前进程的vruntime值更小.
+	 * 因此,最小运行时间需要通过比较它们的值来确定
+	 * 与cfs_rq->min_vruntime比较,将较大值赋给cfs_rq->min_vruntime,这样可以保证cfs_rq->min_vruntime推进的同时不会倒流
+	 * 也就是说内核保证min_vruntime只能增加不能减少
+	 */
 	cfs_rq->min_vruntime = max_vruntime(cfs_rq->min_vruntime, vruntime);
 #ifndef CONFIG_64BIT
 	smp_wmb();
@@ -643,6 +658,19 @@ static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se)
  * this period because otherwise the slices get too small.
  *
  * p = (nr <= nl) ? l : l*nr/nl
+ *
+ * 其想法是设置一个周期,每个任务在该周期内运行一次.
+ *
+ * 当任务太多(sched_nr_latency)时,我们必须延长这段时间,否则时间片会变得太小.
+ *
+ * p=(nr <= nl) ? l : l * nr/nl
+ */
+
+/* __sched_period函数会计算CFS就绪队列中的一个调度周期的长度,可以理解为一个调度周期的时间片,
+ * 它会根据当前运行的进程数目来计算.
+ * CFS调度器有一个默认调度时间片,默认值为6毫秒,详见sysctl_sched_latency变量(/proc/sys/kernel/sched_min_granularity_ns)
+ * 当运行中的进程数目大于8时,按照进程最小的调度延时sysctl_sched_min_granularity乘以进程数目来计算调度时间片.
+ * 反之使用系统默认的调度时间片,即sysctl_sched_latency
  */
 static u64 __sched_period(unsigned long nr_running)
 {
@@ -656,25 +684,45 @@ static u64 __sched_period(unsigned long nr_running)
  * We calculate the wall-time slice from the period by taking a part
  * proportional to the weight.
  *
+ * 我们通过取与权重成比例的部分来计算周期的wall-time时间片
+ *
  * s = p*P[w/rw]
  */
+/* sched_slice根据当前进程的权重来计算在CFS就绪队列总权重中可以瓜分到的调度时间 */
 static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+	/* 拿到时间片 */
 	u64 slice = __sched_period(cfs_rq->nr_running + !se->on_rq);
 
+	/* 这里主要是考虑组调度,如果没有组调度,那么就只考虑他自己的sched_entity */
 	for_each_sched_entity(se) {
 		struct load_weight *load;
 		struct load_weight lw;
 
+		/* 拿到这个sched_entity的cfs_rq */
 		cfs_rq = cfs_rq_of(se);
+		/* 获取CFS就绪队列的总权重 */
 		load = &cfs_rq->load;
 
+		/* 如果调度实体不在就绪队列 struct rq 上,即se->on_rq = 0
+		 * 这里用 unlikely 修饰代表这是小概率事件,通常该调度实体都在就绪队列 struct rq 上
+		 */
 		if (unlikely(!se->on_rq)) {
+			/* 获取CFS就绪队列的总权重,赋值给lw */
 			lw = cfs_rq->load;
-
+			/* 那么CFS就绪队列的总权重加上该调度实体的权重
+			 *
+			 *  static inline void update_load_add(struct load_weight *lw, unsigned long inc)
+			 * {
+			 *	lw->weight += inc;
+			 *	lw->inv_weight = 0;
+			 * }
+			 */
 			update_load_add(&lw, se->load.weight);
 			load = &lw;
+			/* 实际上这里就是直接返回0了,因为下面的计算根本对我们的这个没有任何用处 */
 		}
+		/* 计算进程调度实体可以在CFS就绪队列总权重可以获取的调度周期 */
 		slice = __calc_delta(slice, se->load.weight, load);
 	}
 	return slice;
@@ -682,7 +730,7 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 /*
  * We calculate the vruntime slice of a to-be-inserted task.
- *
+ * 我们计算要插入的任务的vruntime惩罚.
  * vs = s/w
  */
 static u64 sched_vslice(struct cfs_rq *cfs_rq, struct sched_entity *se)
@@ -820,28 +868,33 @@ static void update_tg_load_avg(struct cfs_rq *cfs_rq, int force)
 /*
  * Update the current task's runtime statistics.
  */
+/* update_curr函数的参数是当前进程对应的CFS就绪队列 */
 static void update_curr(struct cfs_rq *cfs_rq)
 {
+	/* curr指针指向的调度实体是当前进程,即父进程 */
 	struct sched_entity *curr = cfs_rq->curr;
+	/* rq_lock_task获取当前就绪队列保存的clock_task值,该变量在每次时钟滴答(tick)到来时更新 */
 	u64 now = rq_clock_task(rq_of(cfs_rq));
 	u64 delta_exec;
 
 	if (unlikely(!curr))
 		return;
-
+	/* delta_exec计算该进程从上次调用update_curr函数到现在的时间差 */
 	delta_exec = now - curr->exec_start;
 	if (unlikely((s64)delta_exec <= 0))
 		return;
-
+	/* 将curr的exec_start设置为now */
 	curr->exec_start = now;
 
 	schedstat_set(curr->statistics.exec_max,
 		      max(delta_exec, curr->statistics.exec_max));
 
+	/* 让当前的sum_exec_runtime加上delta_exec */
 	curr->sum_exec_runtime += delta_exec;
 	schedstat_add(cfs_rq->exec_clock, delta_exec);
-
+	/* 用当前的delta_exec时间差来就算该进程的虚拟时间vruntime */
 	curr->vruntime += calc_delta_fair(delta_exec, curr);
+	/* 更新当前cfs_rq的min_vruntime */
 	update_min_vruntime(cfs_rq);
 
 	if (entity_is_task(curr)) {
@@ -3441,6 +3494,11 @@ static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
 #endif
 }
 
+/* place_entity参数cfs_rq指父进程对应的cfs就绪队列,se是新进程的调度实体.
+ * initial值为1.
+ * 如果每个cfs_rq就绪队列中都有一个成员min_vruntime. min_vruntime其实是单独递增的,
+ * 用于跟踪整个CFS就绪队列中红黑树里的最小vruntime值.
+ */
 static void
 place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 {
@@ -3451,17 +3509,41 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 	 * however the extra weight of the new task will slow them down a
 	 * little, place the new task so that it fits in the slot that
 	 * stays open at the end.
+	 *
+	 * "current"周期已经承诺给当前任务,但是新任务的额外权重会使它们慢一点,将新任务放置在合适的位置最后保持开放.
+	 */
+
+	/* sched_features的START_DEBIT位: 规定新进程的第一次运行要有延迟 */
+	/* 如果当前进程用于fork新进程,那么这里会对新进程的vruntime做一些惩罚,因为新创建了一个进程导致CFS运行队列的权重发生了
+	 * 变化.惩罚值通过sched_vslice函数来计算
 	 */
 	if (initial && sched_feat(START_DEBIT))
 		vruntime += sched_vslice(cfs_rq, se);
 
-	/* sleeps up to a single latency don't count. */
+	/* sleeps up to a single latency don't count.
+	 * 睡眠达一个延迟不算在内.
+	 */
 	if (!initial) {
+		/* unsigned int sysctl_sched_latency = 6000000ULL; 6ms */
 		unsigned long thresh = sysctl_sched_latency;
 
 		/*
 		 * Halve their sleep time's effect, to allow
 		 * for a gentler effect of sleepers:
+		 *
+		 * 将睡眠时间的影响减半,以便对睡眠者产生更温和的影响:
+		 */
+		/* initial等于0,表示为唤醒的进程,对唤醒的进程进行一定的补偿
+		 * 补偿为默认调度周期的一半，即3ms，减去调度周期的一半: 3ms
+		 */
+
+		/* GENTLE_FAIR_SLEEPERS
+		 * 该功能用来限制睡眠线程的补偿时间为sysctl_sched_latency的50%,可以减少其他任务的调度延迟,该功能内核默认打开.
+		 * 如果关闭该特性,则唤醒线程可以获得更多的执行时间,但于此同时,调度队列上的其他任务则会由较大的调度延迟.
+		 */
+		/* 这里将睡眠线程的最大补偿时间设置为内核调度延迟的一半,这样做可以
+		 * 防止睡眠时间较长的线程被唤醒后获得的时间片过长,让调度队列上
+		 * 的其他任务出现较大的调度延迟毛刺
 		 */
 		if (sched_feat(GENTLE_FAIR_SLEEPERS))
 			thresh >>= 1;
@@ -8762,32 +8844,66 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
  *  - child not yet on the tasklist
  *  - preemption disabled
  */
+/* task_fork_fair函数的参数p表示新创建的进程.
+ * 进程task_struct数据结构中内嵌了调度实体struct sched_entity结构体,
+ * 因此由task_struct可以得到该进程的调度实体.
+ */
 static void task_fork_fair(struct task_struct *p)
 {
 	struct cfs_rq *cfs_rq;
 	struct sched_entity *se = &p->se, *curr;
+	/* 拿到当前CPU的就绪队列数据结构struct rq */
 	struct rq *rq = this_rq();
 
 	raw_spin_lock(&rq->lock);
 	update_rq_clock(rq);
-
+	/* 由current变量取得当前进程对应的CFS调度器就绪队列的数据结构(cfs_rq) */
 	cfs_rq = task_cfs_rq(current);
+	/* 拿到当前cfs_rq正在运行的进程的sched_entity */
 	curr = cfs_rq->curr;
 	if (curr) {
+		/* update_curr是CFS调度器中比较核心的函数 */
 		update_curr(cfs_rq);
+		/* 这里会设置se->runtime为curr->vruntime,因为此时的crru已经是vruntime最小的了
+		 * 后面还有个惩罚可以给它
+		 */
 		se->vruntime = curr->vruntime;
 	}
-	place_entity(cfs_rq, se, 1);
 
+	/* 新创建的进程会得到惩罚,惩罚的时间根据新进程的权重由sched_vslice函数计算虚拟时间.
+	 * 最后新进程调度实体的虚拟时间是在调度实体的实际虚拟时间和CFS运行队列中min_vruntime取最大值
+	 */
+	place_entity(cfs_rq, se, 1);
+	/* 如果设置了sysctl_sched_child_runs_first,代表fork之后子进程先运行
+	 * 这里如果sysctl_sched_child_runs_first被置位了
+	 * 并且curr不为空
+	 * 并且
+	 * static inline int entity_before(struct sched_entity *a,
+	 *				   struct sched_entity *b)
+	 * {
+	 *	return (s64)(a->vruntime - b->vruntime) < 0;
+	 * }
+	 * 也就是parent的vruntime比子进程的要小
+	 */
 	if (sysctl_sched_child_runs_first && curr && entity_before(curr, se)) {
 		/*
 		 * Upon rescheduling, sched_class::put_prev_task() will place
 		 * 'current' within the tree based on its new key value.
+		 *
+		 * 重新调度后,sched_class::put_prev_task()将根据其新键值在树中放置“current”.
 		 */
+		/* 把父子进程的给换过来 */
 		swap(curr->vruntime, se->vruntime);
+		/* 设置当前进程的TIF_NEED_RESCHED,方便在返回到用户空间的时候抢占父进程 */
 		resched_curr(rq);
 	}
 
+	/* 在place_entity函数计算得到的se->vruntime要减去min_vruntime?
+	 * 难道不用担心该vruntime变得很小会恶意占用调度器吗?
+	 * 新进程还没有加入到调度器中,加入调度器时会重新增加min_vruntime值.
+	 * 换个角度来思考,新进程在place_entity函数中得到了一些惩罚,惩罚的虚拟实践由sched_vslice计算,
+	 * 在某种程度上也是为了防止新进程恶意占用CPU时间
+	 */
 	se->vruntime -= cfs_rq->min_vruntime;
 	raw_spin_unlock(&rq->lock);
 }

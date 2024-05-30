@@ -383,6 +383,9 @@ struct cfs_rq {
 #endif
 
 	struct rb_root tasks_timeline;
+	/* 这里就是一个优化,避免去遍历树找到最左叶子节点(即就是所有进程中vruntime最小的那个),
+	 * 所以把该值已经缓存在rb_leftmost字段中
+	 */
 	struct rb_node *rb_leftmost;
 
 	/*
@@ -588,6 +591,12 @@ extern struct root_domain def_root_domain;
  * (such as the load balancing or the thread migration code), lock
  * acquire operations must be ordered by ascending &runqueue.
  */
+/* strcut rq数据结构是描述CPU的通用就绪队列,rq数据结构中记录了一个就绪队列所需要的全部信息,
+ * 包括一个CFS调度器就绪队列数据结构struct cfs_rq,
+ * 一个实时进程调度就绪队列数据结构struct rq_rq
+ * 一个deadline调度器就绪队列数据结构struct dl_rq
+ * 以及就绪队列的权重load等信息
+ */
 struct rq {
 	/* runqueue lock: */
 	raw_spinlock_t lock;
@@ -596,6 +605,7 @@ struct rq {
 	 * nr_running and cpu_load should be in the same cacheline because
 	 * remote CPUs use both these fields when doing load calculation.
 	 */
+	/* 运行队列上可运行任务的个数 */
 	unsigned int nr_running;
 #ifdef CONFIG_NUMA_BALANCING
 	unsigned int nr_numa_running;
@@ -616,7 +626,7 @@ struct rq {
 	struct load_weight load;
 	unsigned long nr_load_updates;
 	u64 nr_switches;
-
+	/* CFS 运行队列 */
 	struct cfs_rq cfs;
 	struct rt_rq rt;
 	struct dl_rq dl;
@@ -633,13 +643,15 @@ struct rq {
 	 * it on another CPU. Always updated under the runqueue lock:
 	 */
 	unsigned long nr_uninterruptible;
-
+	/* curr: 当前正在运行任务的 task_struct 实例 */
+	/* idle: 指向idle任务的实例,在没有其它可运行任务的时候执行 */
 	struct task_struct *curr, *idle, *stop;
 	unsigned long next_balance;
 	struct mm_struct *prev_mm;
 
 	unsigned int clock_skip_update;
 	u64 clock;
+	/* clock_task值,该变量在每次时钟滴答(tick)到来时更新 */
 	u64 clock_task;
 
 	atomic_t nr_iowait;
@@ -752,6 +764,9 @@ static inline void update_idle_core(struct rq *rq) { }
 DECLARE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 
 #define cpu_rq(cpu)		(&per_cpu(runqueues, (cpu)))
+/* 系统中每个CPU都有一个就绪队列(runqueue),它是Per-CPU类型,即每个CPU都有一个struct rq
+ * 数据结构.this_rq可以获取当前CPU的就绪队列数据结构struct rq
+ */
 #define this_rq()		this_cpu_ptr(&runqueues)
 #define task_rq(p)		cpu_rq(task_cpu(p))
 #define cpu_curr(cpu)		(cpu_rq(cpu)->curr)
