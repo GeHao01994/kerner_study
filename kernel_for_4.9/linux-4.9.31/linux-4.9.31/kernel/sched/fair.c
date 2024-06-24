@@ -535,17 +535,32 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 	/*
 	 * Find the right place in the rbtree:
+	 *
+	 * 在rbtree中找到正确的位置
 	 */
 	while (*link) {
 		parent = *link;
+		/* 通过run_node找到sched_entity */
 		entry = rb_entry(parent, struct sched_entity, run_node);
 		/*
 		 * We dont care about collisions. Nodes with
 		 * the same key stay together.
+		 *
+		 * 我们不在乎碰撞. 具有相同密钥的节点保持在一起.
+		 */
+
+		/* static inline int entity_before(struct sched_entity *a,
+		 *				   struct sched_entity *b)
+		 * {
+		 *	return (s64)(a->vruntime - b->vruntime) < 0;
+		 * }
+		 *
+		 * 如果a->vruntime小于b->vruntime,那么左边
 		 */
 		if (entity_before(se, entry)) {
 			link = &parent->rb_left;
 		} else {
+			/* 否则是右边,那么就设置leftmost为0 */
 			link = &parent->rb_right;
 			leftmost = 0;
 		}
@@ -554,10 +569,13 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	/*
 	 * Maintain a cache of leftmost tree entries (it is frequently
 	 * used):
+	 *
+	 * 维护最左边树项的缓存(这是经常使用的):
 	 */
 	if (leftmost)
 		cfs_rq->rb_leftmost = &se->run_node;
 
+	/* 设置它的位置 */
 	rb_link_node(&se->run_node, parent, link);
 	rb_insert_color(&se->run_node, &cfs_rq->tasks_timeline);
 }
@@ -809,29 +827,65 @@ static void attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
  *
  * Finally, that extrapolated util_avg is clamped to the cap (util_avg_cap)
  * if util_avg > util_avg_cap.
+ *
+ * 随着新任务的创建,它们的初始util_avg将基于cfs_rq的当前util_avg进行推测:
+ *
+ * util_avg = cfs_rq->util_avg / (cfs_rq->load_avg + 1 ) * se.load.weight
+ *
+ * 然而,在许多情况下,上述util_avg并没有给出所需的值.此外,util_avgs的和可以是发散的,例如当级数是调和级数时.
+ *
+ * 为了解决这个问题,我们还将连续任务的util_avg限制为仅剩余利用率预算的1/2:
+ *
+ * util_avg_cap = (1024 - cfs_rq->avg.util_avg）/ 2^n
+ *
+ * 其中n表示第n个任务.
+ *
+ * 例如,一个最简单的系列从一开始就是这样的:
+ *
+ * task   util_avg: 512, 256, 128, 64,  32,    16, 8,   ...
+ * cfs_rq util_avg: 512, 768, 896, 960, 992, 1008, 1016 ...
+ *
+ * 最后,如果util_avg > util_ag_cap,则推测的util_avg 被固定到cap (util_avg_cap)
  */
 void post_init_entity_util_avg(struct sched_entity *se)
 {
+	/* 拿到该sched_entity的cfs_rq */
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
+	/* 拿到该sched_entity的负载sched_avg */
 	struct sched_avg *sa = &se->avg;
+	/* 计算cap (当第一个任务创建时,cfs_rq->avg.util_avg = 0),因此这时task se的util_avg等于cap;
+	 * 这里就是把cap赋值为SCHED_CAPACITY_SCALE和cfs_rq平均利用率差值的一半 */
 	long cap = (long)(SCHED_CAPACITY_SCALE - cfs_rq->avg.util_avg) / 2;
+	/* 获得cfs_rq clock */
 	u64 now = cfs_rq_clock_task(cfs_rq);
 
+	/* 如果cap大于0 */
 	if (cap > 0) {
+		/* 如果cfs_rq的平均利用率不等于0 */
 		if (cfs_rq->avg.util_avg != 0) {
+			/* 那么sa的平均利用率就等于(cfs_rq->avg.util_avg) * se->load.weight / (cfs_rq->avg.load_avg + 1) */
 			sa->util_avg  = cfs_rq->avg.util_avg * se->load.weight;
 			sa->util_avg /= (cfs_rq->avg.load_avg + 1);
-
+			/* 如果sa->util_avg > cap,那么把cap给它 */
 			if (sa->util_avg > cap)
 				sa->util_avg = cap;
 		} else {
+			/* 如果cfs_rq->avg.util_avg == 0,那么把sa->util_avg = cap */
 			sa->util_avg = cap;
 		}
+		/* util_sum: 对于sched_entity: 正在运行状态下的累计衰减总时间(decay_sum_time).(使用cfs_rq->curr == se来判断进程是否正在运行); */
+		/* 把sa->util_sum 赋值为 sa->util_avg * LOAD_AVG_MAX
+		 * #define LOAD_AVG_MAX 47742 maximum possible load avg
+		 */
 		sa->util_sum = sa->util_avg * LOAD_AVG_MAX;
 	}
 
+	/* An entity is a task if it doesn't "own" a runqueue
+	 * #define entity_is_task(se)	(!se->my_q)
+	 */
 	if (entity_is_task(se)) {
 		struct task_struct *p = task_of(se);
+		/* 如果不是cfs调度策略 */
 		if (p->sched_class != &fair_sched_class) {
 			/*
 			 * For !fair tasks do:
@@ -842,13 +896,17 @@ void post_init_entity_util_avg(struct sched_entity *se)
 			 *
 			 * such that the next switched_to_fair() has the
 			 * expected state.
+			 *
+			 * 使得下一次switched_to_fair()具有预期状态.
 			 */
 			se->avg.last_update_time = now;
 			return;
 		}
 	}
 
+	/* 更新cfs_rq的平均负载 */
 	update_cfs_rq_load_avg(now, cfs_rq, false);
+	/* 这个把当前进程的se相关的成员添加到cfs_rq中 */
 	attach_entity_load_avg(cfs_rq, se);
 	update_tg_load_avg(cfs_rq, false);
 }
@@ -2639,7 +2697,14 @@ static inline void account_numa_dequeue(struct rq *rq, struct task_struct *p)
 static void
 account_entity_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+	/* 把它加到cfs的权重加到cfs_rq->load 里面去 */
 	update_load_add(&cfs_rq->load, se->load.weight);
+	/*  static inline struct sched_entity *parent_entity(struct sched_entity *se)
+	 * {
+	 *	return se->parent;
+	 * }
+	 *
+	 * 如果没有parent还要加到该cfs属于rq的那个load中 */
 	if (!parent_entity(se))
 		update_load_add(&rq_of(cfs_rq)->load, se->load.weight);
 #ifdef CONFIG_SMP
@@ -2650,6 +2715,7 @@ account_entity_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		list_add(&se->group_node, &rq->cfs_tasks);
 	}
 #endif
+	/* 让cfs_rq的nr_running++ */
 	cfs_rq->nr_running++;
 }
 
@@ -3236,17 +3302,37 @@ static inline void cfs_rq_util_change(struct cfs_rq *cfs_rq)
  *
  * Since both these conditions indicate a changed cfs_rq->avg.load we should
  * call update_tg_load_avg() when this function returns true.
+ *
+ * update_cfs_rq_load_avg - 更新cfs_rq的负载/util平均值
+ * @now: 当前时间,根据cfs_rq_clock_task()
+ * @cfs_rq: 要更新的cfs_rq
+ * @update_freq: 我们应该调用cfg_rq_util_change或者将会调用
+ *
+ * cfs_rq平均值是其所有实体(阻塞和可运行)平均值的直接和.
+ * 直接的推论是必须附加所有(公平)task,请参阅post_init_entity_util_avg().
+ *
+ * cfs_rq->avg用于task_h_load()和update_cfs_share()
+ *
+ * 如果负载衰减或我们移除了负载,则返回true.
+ *
+ * 由于这两个条件都表示cfs_rq->avg.load发生了变化,因此当此函数返回true时,我们应该调用update_tg_load_avg().
  */
 static inline int
 update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq, bool update_freq)
 {
+	/* 拿到cfs_rq的复制结构体 */
 	struct sched_avg *sa = &cfs_rq->avg;
 	int decayed, removed_load = 0, removed_util = 0;
-
+	/* 是否设置了remove_load_avg和remove_util_avg,如果设置了就修正之前计算的load/util数值 */
 	if (atomic_long_read(&cfs_rq->removed_load_avg)) {
+		/* 将cfs_rq->removed_load_avg复制为0,然后把旧值赋值给r */
 		s64 r = atomic_long_xchg(&cfs_rq->removed_load_avg, 0);
+		/* sub_positive: if(arg1-arg2 > arg1) arg1=0; 说明arg2是个负数(溢出)
+		 * 这里就是减去 r
+		 */
 		sub_positive(&sa->load_avg, r);
 		sub_positive(&sa->load_sum, r * LOAD_AVG_MAX);
+		/* 然后把removed_load = 1 */
 		removed_load = 1;
 	}
 
@@ -3298,9 +3384,16 @@ static inline void update_load_avg(struct sched_entity *se, int update_tg)
  *
  * Must call update_cfs_rq_load_avg() before this, since we rely on
  * cfs_rq->avg.last_update_time being current.
+ *
+ * attach_entity_load_avg-将此实体附加到其cfs_rq负载平均值
+ * @cfs_rq: 要附加的cfs_rq
+ * @se: 要附加的sched_entity
+ *
+ * 在此之前必须调用update_cfs_rq_load_avg(),因为我们依赖于当前的cfg_rq>avg.last_update_time.
  */
 static void attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+	/* 这个应该是说赋值的时候不要经过衰减 */
 	if (!sched_feat(ATTACH_AGE_LOAD))
 		goto skip_aging;
 
@@ -3309,7 +3402,12 @@ static void attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 	 * have aged the average right before clearing @last_update_time.
 	 *
 	 * Or we're fresh through post_init_entity_util_avg().
+	 *
+	 * 如果我们被迁移(在CPU之间或在cgroups之间),我们将在清除@last_update_time之前对平均值进行老化.
+	 *
+	 * 或者我们刚刚通过post_init_entity_util_avg().
 	 */
+	/* 这边就是去衰减这个se->avg */
 	if (se->avg.last_update_time) {
 		__update_load_avg(cfs_rq->avg.last_update_time, cpu_of(rq_of(cfs_rq)),
 				  &se->avg, 0, 0, NULL);
@@ -3317,10 +3415,13 @@ static void attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 		/*
 		 * XXX: we could have just aged the entire load away if we've been
 		 * absent from the fair class for too long.
+		 *
+		 * XXX: 如果我们在fair class缺席太久的话,我们可能会把所有的东西都老化掉。
 		 */
 	}
 
 skip_aging:
+	/* 这边就是让cfs_rq的avg加上这个进程相关的东西 */
 	se->avg.last_update_time = cfs_rq->avg.last_update_time;
 	cfs_rq->avg.load_avg += se->avg.load_avg;
 	cfs_rq->avg.load_sum += se->avg.load_sum;
@@ -3356,22 +3457,33 @@ static void detach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 static inline void
 enqueue_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+	/* 拿到se的sched_avg */
 	struct sched_avg *sa = &se->avg;
+	/* 拿到当前task的cfs_rq的clock */
 	u64 now = cfs_rq_clock_task(cfs_rq);
 	int migrated, decayed;
 
+	/* 如果说sa->last_update_time为0,那么说明它是迁移的 */
 	migrated = !sa->last_update_time;
+	/* 如果不是迁移的,那么就要进行衰减了 */
 	if (!migrated) {
 		__update_load_avg(now, cpu_of(rq_of(cfs_rq)), sa,
 			se->on_rq * scale_load_down(se->load.weight),
 			cfs_rq->curr == se, NULL);
 	}
-
+	/* 更新cfs rq的权重 */
 	decayed = update_cfs_rq_load_avg(now, cfs_rq, !migrated);
 
+	/* 加上这个task的 平均负载,(load_sum*load->weight)/最大衰减值
+	 * runnable_load_avg;  // runnable状态平均负载贡献
+	 *
+	 * load_sum: 对于sched_entity: 进程在就绪队列里的可运行状态下的累计衰减总时间(decay_sum_time),计算的是时间值
+	 *	     对于cfs_rq: 调度队列中所有进程的累计工作总负载(decay_sum_load)
+	 */
 	cfs_rq->runnable_load_avg += sa->load_avg;
 	cfs_rq->runnable_load_sum += sa->load_sum;
 
+	/* 如果是迁移的,还需要加上当前进程的一些负载信息 */
 	if (migrated)
 		attach_entity_load_avg(cfs_rq, se);
 
@@ -3611,16 +3723,22 @@ static inline void check_schedstat_required(void)
 static void
 enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
+	/* 如果不是被WAKEUP入队的或者说是迁移入队的,那么renorm为1 */
 	bool renorm = !(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_MIGRATED);
+	/* 这里判断当前队列运行的进程是不是se */
 	bool curr = cfs_rq->curr == se;
 
 	/*
 	 * If we're the current task, we must renormalise before calling
 	 * update_curr().
+	 *
+	 * 如果我们是当前任务,则必须在调用update_curr()之前重新规范化.
 	 */
+	/* 如果我们是被WAKEUP入队,或者被迁移入队的,并且当前队列运行的进程就是我,那么se->vruntime += cfs_rq->min_vruntime */
 	if (renorm && curr)
 		se->vruntime += cfs_rq->min_vruntime;
 
+	/* 因为vruntime发生了变化,所以更新一下当前进程的vruntime和该CFS就绪队列的min_vruntime  */
 	update_curr(cfs_rq);
 
 	/*
@@ -3628,22 +3746,33 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 * moment in time, instead of some random moment in the past. Being
 	 * placed in the past could significantly boost this task to the
 	 * fairness detriment of existing tasks.
+	 *
+	 * 否则,在之后重新规范化,这样我们就被放置在当前时刻,而不是过去的某个随机时刻.
+	 * 被放在过去可能会大大促进这项任务,损害现有任务的公平性.
+	 */
+
+	/* 实际新进程刚创建的时候,应该是走的这里
+	 * 因此该进程的vruntime要加上min_vruntime.
+	 * 回想之前在task_fork_fair函数里vruntime减去min_vruntime,这里又添加回来,因为task_fork_fair只是创建进程还没有把该进程添加到调度器,这期间min_vruntime已经发生了变化,因此添加上min_vruntime是比较准确的
 	 */
 	if (renorm && !curr)
 		se->vruntime += cfs_rq->min_vruntime;
-
+	/* 计算该调度实体se的平均负载,然后添加到整个CFS就绪队列的总平均负载*/
 	enqueue_entity_load_avg(cfs_rq, se);
+	/* 给cfs_rq加上我们的权重 */
 	account_entity_enqueue(cfs_rq, se);
 	update_cfs_shares(cfs_rq);
-
+	/* 处理刚被唤醒的进程,place_entity对唤醒进程有一定的补偿,最多可以补偿一个调度周期的一半(默认值sysctl_sched_latency/2,3毫秒),即vruntime减去半个调度周期时间 */
 	if (flags & ENQUEUE_WAKEUP)
 		place_entity(cfs_rq, se, 0);
 
 	check_schedstat_required();
 	update_stats_enqueue(cfs_rq, se, flags);
 	check_spread(cfs_rq, se);
+	/* 那该调度实体键入到CFS就绪队列的红黑树中 */
 	if (!curr)
 		__enqueue_entity(cfs_rq, se);
+	/* 设置on_rq为1 */
 	se->on_rq = 1;
 
 	if (cfs_rq->nr_running == 1) {
@@ -4767,25 +4896,34 @@ static inline void hrtick_update(struct rq *rq)
  * The enqueue_task method is called before nr_running is
  * increased. Here we update the fair scheduling stats and
  * then put the task into the rbtree:
+ *
+ * enqueue_task方法在nr_running增加之前调用.
+ * 在这里,我们更新公平调度统计数据,然后将任务放入rbtree:
  */
 static void
 enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 {
 	struct cfs_rq *cfs_rq;
+	/* 拿到该task的sched_entity */
 	struct sched_entity *se = &p->se;
 
 	/*
 	 * If in_iowait is set, the code below may not trigger any cpufreq
 	 * utilization updates, so do it here explicitly with the IOWAIT flag
 	 * passed.
+	 *
+	 * 如果设置了in_iowait,下面的代码可能不会触发任何cpufreq利用率更新,所以在这里显式地执行,并传递IOWAIT标志.
 	 */
 	if (p->in_iowait)
 		cpufreq_update_this_cpu(rq, SCHED_CPUFREQ_IOWAIT);
-
+	/* for循环对于没有定义FAIR_GROUP_SCHED的系统来说,其实就是调度实体se */
 	for_each_sched_entity(se) {
+		/* 如果se在rq中,那么直接break */
 		if (se->on_rq)
 			break;
+		/* 拿到这个sched_entity的cfs_rq */
 		cfs_rq = cfs_rq_of(se);
+		/* 把调度实体se添加到cfs_rq就绪队列中 */
 		enqueue_entity(cfs_rq, se, flags);
 
 		/*

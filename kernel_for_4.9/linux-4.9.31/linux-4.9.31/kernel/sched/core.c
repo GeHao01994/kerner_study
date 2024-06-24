@@ -777,7 +777,13 @@ static void set_load_weight(struct task_struct *p)
 static inline void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 {
 	update_rq_clock(rq);
+	/* ENQUEUE_RESTORE:该标志位表示恢复,通常应用在当用户设置进程的nice值或者对进程设置新的调度参数时,
+	 * 为了公平起见,调度器会先把进程 dequeue 然后再 enqueue,改变调度参数的同时应该重新参与调度.
+	 * 对应的 DEQUEUE 标志为 DEQUEUE_SAVE,DEQUEUE_MOVE
+	 *
+	 * 这里是说如果flags没有带ENQUEUE_RESTORE */
 	if (!(flags & ENQUEUE_RESTORE))
+		/* 更新进程从其他状态(休眠,不可中断等)切换到运行状态后进入运行等待队列的起始时刻 */
 		sched_info_queued(rq, p);
 	p->sched_class->enqueue_task(rq, p, flags);
 }
@@ -792,9 +798,19 @@ static inline void dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 
 void activate_task(struct rq *rq, struct task_struct *p, int flags)
 {
+	/* #define task_contributes_to_load(task)
+	 *			((task->state & TASK_UNINTERRUPTIBLE) != 0 && \
+	 *			 (task->flags & PF_FROZEN) == 0 && \
+	 *			 (task->state & TASK_NOLOAD) == 0)
+	 *
+	 * TASK_NOLOAD 表示可以接受致命信号
+	 * PF_FROZEN: 表示进程已经处于冻结状态
+	 * 那么rq的nr_uninterruptible -1
+	 *
+	 */
 	if (task_contributes_to_load(p))
 		rq->nr_uninterruptible--;
-
+	/* 这个函数就是更新rq的clock,然后调用sched_class的enqueue_task,把进程加到运行队列中 */
 	enqueue_task(rq, p, flags);
 }
 
@@ -2664,8 +2680,9 @@ void wake_up_new_task(struct task_struct *p)
 	__set_task_cpu(p, select_task_rq(p, task_cpu(p), SD_BALANCE_FORK, 0));
 #endif
 	rq = __task_rq_lock(p, &rf);
+	/* 这里会初始化新创建的进程的util_avg,还会更新cfs运行队列的 */
 	post_init_entity_util_avg(&p->se);
-
+	/* 将进程加入到运行队列 */
 	activate_task(rq, p, 0);
 	p->on_rq = TASK_ON_RQ_QUEUED;
 	trace_sched_wakeup_new(p);

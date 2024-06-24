@@ -102,11 +102,16 @@ static void sched_info_arrive(struct rq *rq, struct task_struct *t)
  * This function is only called from enqueue_task(), but also only updates
  * the timestamp if it is already not set.  It's assumed that
  * sched_info_dequeued() will clear that stamp when appropriate.
+ *
+ * 此函数仅从enqueue_task()调用,但也仅在尚未设置时间戳的情况下更新时间戳.
+ * 假设sched_info_dequeued()将在适当的时候清除该标记.
  */
 static inline void sched_info_queued(struct rq *rq, struct task_struct *t)
 {
+	/* 判断sched_info有没有打开 */
 	if (unlikely(sched_info_on()))
-		if (!t->sched_info.last_queued)
+		/* 为0代表当前不是在可运行队列中 */
+		if (!t->sched_info.last_queued) /* 更新进入运行等待队列的起始时刻 */
 			t->sched_info.last_queued = rq_clock(rq);
 }
 
