@@ -168,19 +168,27 @@ enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk)
  * is concerned.  No registers are touched.  We avoid
  * calling the CPU specific function when the mm hasn't
  * actually changed.
+ *
+ * 就调度程序而言,这是实际的mm交换.未触及寄存器.
+ * 当mm实际上没有改变时我们避免调用CPU特定的函数.
  */
 static inline void
 switch_mm(struct mm_struct *prev, struct mm_struct *next,
 	  struct task_struct *tsk)
 {
+	/* 拿到本地CPU */
 	unsigned int cpu = smp_processor_id();
 
+	/* 如果prev和next相等,那么就不用做任何事情了 */
 	if (prev == next)
 		return;
 
 	/*
 	 * init_mm.pgd does not contain any user mappings and it is always
 	 * active for kernel addresses in TTBR1. Just set the reserved TTBR0.
+	 *
+	 * init_mm.pgd不包含任何用户映射,并且对于TTBR1中的内核地址,它始终处于活动状态.
+	 * 只需设置保留的TTBR0.
 	 */
 	if (next == &init_mm) {
 		cpu_set_reserved_ttbr0();

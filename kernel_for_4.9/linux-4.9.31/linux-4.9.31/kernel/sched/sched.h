@@ -392,6 +392,12 @@ struct cfs_rq {
 	 * 'curr' points to currently running entity on this cfs_rq.
 	 * It is set to NULL otherwise (i.e when none are currently running).
 	 */
+
+	/* cfs_rq的last和next指针,last表示最后一个执行wakeup的sched_entity,next表示最后一个被wakeup的sched_entity.
+	 * 他们在进程wakeup的时候会赋值,在pick新sched_entity的时候,会优先选择这些last或者next指针的sched_entity,有利于提高缓存的命中率
+	 * 因此我们优选出来的进程必须同last和next指针域进行对比,其实就是检查就绪队列中的最优进程,即红黑树中最左节点last是否可以抢占last和next指针域,检查是否可以抢占是通过
+	 * skip为自动放弃运行权利的进程
+	 */
 	struct sched_entity *curr, *next, *last, *skip;
 
 #ifdef	CONFIG_SCHED_DEBUG

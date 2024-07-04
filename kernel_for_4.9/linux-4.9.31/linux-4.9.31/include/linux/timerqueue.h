@@ -6,7 +6,9 @@
 
 
 struct timerqueue_node {
+	/* node是红黑树的节点 */
 	struct rb_node node;
+	/* expires: 表示该定时器的硬超时时间 */
 	ktime_t expires;
 };
 

@@ -909,11 +909,20 @@ struct reclaim_state;
 #ifdef CONFIG_SCHED_INFO
 struct sched_info {
 	/* cumulative counters */
+	/* 运行在这个CPU的次数 */
 	unsigned long pcount;	      /* # of times run on this cpu */
+	/* 在linux中一个任务被创建、被唤醒后并非立刻运行,而是需要先放置到一个叫做”就绪队列”的合适位置上等待CPU调度运行;
+	 * 此外,一个任务运行过程中由于时间片到期或者高优先级任务抢占或者主动放弃CPU等情况发生时.内核会将当前运行的任务
+	 * 暂放到就绪队列上选择其他任务到CPU运行。
+	 *
+	 * 上面不论是第一种首次进入就绪队列等待还是暂时进入就绪队列等待的情况,他们在就绪队列上等待CPU调度的时间,就是run_delay,我把它称作为调度延迟.
+	 */
 	unsigned long long run_delay; /* time spent waiting on a runqueue */
 
 	/* timestamps */
+	/* 任务得到CPU资源运行时刻的时间戳,其实是用于计算CPU粒度调度延迟 */
 	unsigned long long last_arrival,/* when we last ran on a cpu */
+			   /* 任务进入就绪队列时刻的时间戳 */
 			   last_queued;	/* when we were last queued to run */
 };
 #endif /* CONFIG_SCHED_INFO */
@@ -3508,13 +3517,37 @@ static inline int fatal_signal_pending(struct task_struct *p)
 	return signal_pending(p) && __fatal_signal_pending(p);
 }
 
+/*
+ * 函数功能: 检查task是否有pending 的信号
+ *
+ * 参数：
+ * state: task的状态
+ * struct task_struct *p: 待检查的task
+ *
+ * 返回值:
+ * 0: 表示没有pending signal
+ * 1: 表示有pending signal
+ */
 static inline int signal_pending_state(long state, struct task_struct *p)
 {
+	/*
+	 * state需要包含TASK_INTERRUPTIBLE 和 TASK_WAKEKILL 两种状态之一
+	 * 才能进一步判断是否有pending signal,否则返回0
+	 */
 	if (!(state & (TASK_INTERRUPTIBLE | TASK_WAKEKILL)))
 		return 0;
+	/*
+	 * 程序走到这里说明,state一定包含TASK_INTERRUPTIBLE 和 TASK_WAKEKILL 两种状态之一
+	 * 这时检查TIF_SIGPENDING 标记是否设置。没有该标记，直接返回0
+	 */
 	if (!signal_pending(p))
 		return 0;
-
+	/*
+	 * 程序走到这里说明,state一定包含TASK_INTERRUPTIBLE 和 TASK_WAKEKILL 两种状态之一
+	 * 并且task_struct *p 上有pending signal
+	 * 如果state包含TASK_INTERRUPTIBLE,返回1
+	 * 如果task_struct *p 上的pending signal有SIGKILL,则返回1
+	 */
 	return (state & TASK_INTERRUPTIBLE) || __fatal_signal_pending(p);
 }
 

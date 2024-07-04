@@ -65,17 +65,26 @@ static inline void sched_info_reset_dequeued(struct task_struct *t)
  * task was queued to the time that it finally hit a cpu, we call this routine
  * from dequeue_task() to account for possible rq->clock skew across cpus. The
  * delta taken on each cpu would annul the skew.
+ *
+ * 我们感兴趣的是知道从任务第一次排队到最终到达cpu需要多长时间,我们从dequeue_task()调用这个例程来
+ * 说明cpu之间可能存在的rq->时钟偏移.每个cpu上的增量将使偏斜无效。
  */
 static inline void sched_info_dequeued(struct rq *rq, struct task_struct *t)
 {
 	unsigned long long now = rq_clock(rq), delta = 0;
 
-	if (unlikely(sched_info_on()))
+	/* 如果sched_info是开的 */
+	if (unlikely(sched_info_on())) /* 如果有last_queued,那么delta就等于now - t->sched_info.last_queued */
 		if (t->sched_info.last_queued)
 			delta = now - t->sched_info.last_queued;
+	/* 重置t->sched_info.last_queued = 0; */
 	sched_info_reset_dequeued(t);
+	/* 让run_delay加上这个时间 */
 	t->sched_info.run_delay += delta;
-
+	/*
+	 *	if (rq)
+	 *		rq->rq_sched_info.run_delay += delta;
+	 */
 	rq_sched_info_dequeued(rq, delta);
 }
 
@@ -138,6 +147,9 @@ static inline void sched_info_depart(struct rq *rq, struct task_struct *t)
  * Called when tasks are switched involuntarily due, typically, to expiring
  * their time slice.  (This may also be called when switching to or from
  * the idle task.)  We are only called when prev != next.
+ *
+ * 当任务由于时间片到期而非自愿切换时调用.(切换到空闲任务或从空闲任务切换时也可能调用此函数.
+ * 只有在prev != next时调用
  */
 static inline void
 __sched_info_switch(struct rq *rq,
@@ -147,6 +159,8 @@ __sched_info_switch(struct rq *rq,
 	 * prev now departs the cpu.  It's not interesting to record
 	 * stats about how efficient we were at scheduling the idle
 	 * process, however.
+	 *
+	 * prev现在离开cpu.然而,记录关于我们在调度空闲进程方面的效率的统计数据并不有趣.
 	 */
 	if (prev != rq->idle)
 		sched_info_depart(rq, prev);
@@ -158,6 +172,7 @@ static inline void
 sched_info_switch(struct rq *rq,
 		  struct task_struct *prev, struct task_struct *next)
 {
+	/* 如果有sched_info是打开的,那么调用__sched_info_switch */
 	if (unlikely(sched_info_on()))
 		__sched_info_switch(rq, prev, next);
 }

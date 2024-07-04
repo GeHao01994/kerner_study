@@ -87,6 +87,13 @@ unsigned int sysctl_sched_child_runs_first __read_mostly;
  * This option delays the preemption effects of decoupled workloads
  * and reduces their over-scheduling. Synchronous workloads will still
  * have immediate wakeup/sleep latencies.
+ *
+ * SCHED_OTHER唤醒粒度.
+ *
+ * (默认值：1毫秒*（1+ilog（ncpus)), 单位:纳秒)
+ *
+ * 此选项延迟了解耦工作负载的抢占效应,并减少了它们的过度调度.
+ * 同步工作负载仍将具有即时唤醒/睡眠延迟.
  */
 unsigned int sysctl_sched_wakeup_granularity = 1000000UL;
 unsigned int normalized_sysctl_sched_wakeup_granularity = 1000000UL;
@@ -994,30 +1001,41 @@ update_stats_wait_end(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	struct task_struct *p;
 	u64 delta;
-
+	/* 如果schedstat没有使能,那么直接返回 */
 	if (!schedstat_enabled())
 		return;
 
+	/* 用当前的rq_clock减去se->statistics.wait_start得到delta */
 	delta = rq_clock(rq_of(cfs_rq)) - schedstat_val(se->statistics.wait_start);
 
+	/* 如果entity是个task */
 	if (entity_is_task(se)) {
+		/* 拿到这个se的task_struct */
 		p = task_of(se);
+		/* 表示处于迁移过程中的进程,可能不在就绪队列中 */
 		if (task_on_rq_migrating(p)) {
 			/*
 			 * Preserve migrating task's wait time so wait_start
 			 * time stamp can be adjusted to accumulate wait time
 			 * prior to migration.
+			 *
+			 * 保留迁移进程的等待时间,以便可以调整wait_start时间戳以累积迁移前的等待时间。
 			 */
+			/* 这里是把delta写到wait_start里面去 */
 			schedstat_set(se->statistics.wait_start, delta);
 			return;
 		}
 		trace_sched_stat_wait(p, delta);
 	}
 
+	/* 设置se->statistics.wait_max为se->statistics.wait_max和delat的最大值 */
 	schedstat_set(se->statistics.wait_max,
 		      max(schedstat_val(se->statistics.wait_max), delta));
+	/* 让wait_count +1 */
 	schedstat_inc(se->statistics.wait_count);
+	/* 让这个调度对象的wait_sum加上我们这个delta */
 	schedstat_add(se->statistics.wait_sum, delta);
+	/* 设置wait_start等于0 */
 	schedstat_set(se->statistics.wait_start, 0);
 }
 
@@ -1113,19 +1131,25 @@ static inline void
 update_stats_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 
+	/* 如果定义了schedstat */
 	if (!schedstat_enabled())
 		return;
 
 	/*
 	 * Mark the end of the wait period if dequeueing a
 	 * waiting task:
+	 *
+	 * 如果将一个等待的任务退出运行队列,请标记等待期的结束：
 	 */
 	if (se != cfs_rq->curr)
 		update_stats_wait_end(cfs_rq, se);
 
+	/* 如果flag是DEQUEUE_SLEEP,也就是说睡眠,并且entity是个task */
 	if ((flags & DEQUEUE_SLEEP) && entity_is_task(se)) {
+		/* 拿到该se的task_struct */
 		struct task_struct *tsk = task_of(se);
 
+		/* 如果tsk_state是TASK_INTERRUPTIBLE,那么就设置sleep_start,否则就设置block_start */
 		if (tsk->state & TASK_INTERRUPTIBLE)
 			schedstat_set(se->statistics.sleep_start,
 				      rq_clock(rq_of(cfs_rq)));
@@ -2722,6 +2746,7 @@ account_entity_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 static void
 account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+	/* 这边就是让cfs_rq的权重减去se->load.weight */
 	update_load_sub(&cfs_rq->load, se->load.weight);
 	if (!parent_entity(se))
 		update_load_sub(&rq_of(cfs_rq)->load, se->load.weight);
@@ -2731,6 +2756,7 @@ account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		list_del_init(&se->group_node);
 	}
 #endif
+	/* 让cfs_rq的nr_running -1 */
 	cfs_rq->nr_running--;
 }
 
@@ -3495,8 +3521,10 @@ enqueue_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se)
 static inline void
 dequeue_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+	/* 更新权重 */
 	update_load_avg(se, 1);
 
+	/* 让cfs_rq减去这些这个进程的权重等 */
 	cfs_rq->runnable_load_avg =
 		max_t(long, cfs_rq->runnable_load_avg - se->avg.load_avg, 0);
 	cfs_rq->runnable_load_sum =
@@ -3833,17 +3861,26 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	/*
 	 * Update run-time statistics of the 'current'.
+	 *
+	 * 更新“current”的运行时统计信息.
 	 */
 	update_curr(cfs_rq);
+	/* 这边是减去se的负载相关的成员变量 */
 	dequeue_entity_load_avg(cfs_rq, se);
 
+	/* 这边就是更新se->statistics相关的成员 */
 	update_stats_dequeue(cfs_rq, se, flags);
 
+	/* 清掉buddy里的指针 */
 	clear_buddies(cfs_rq, se);
-
+	/* 如果要拔出的是在运行队列里面等待的进程,那么直接把它踢出运行队列
+	 * 这里主要是把它从红黑树里面抹去
+	 */
 	if (se != cfs_rq->curr)
 		__dequeue_entity(cfs_rq, se);
+	/* 设置se->on_rq为0 */
 	se->on_rq = 0;
+	/* 这边是对cfs_rq的一些计数的减法 */
 	account_entity_dequeue(cfs_rq, se);
 
 	/*
@@ -3851,11 +3888,19 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 * min_vruntime if @se is the one holding it back. But before doing
 	 * update_min_vruntime() again, which will discount @se's position and
 	 * can move min_vruntime forward still more.
+	 *
+	 * update_curr()后进行规格化;
+	 * 如果@se阻碍了min_vruntime,那么它也将移动min_vruntime.
+	 * 但在再次执行update_min_vruntime()之前.这将降低@se的位置.并可以进一步向前移动min_vruntime.
 	 */
+
+	/* 如果不是退出队列睡眠,那么让se->vruntime减去cfs_rq->min_vruntime */
 	if (!(flags & DEQUEUE_SLEEP))
 		se->vruntime -= cfs_rq->min_vruntime;
 
-	/* return excess runtime on last dequeue */
+	/* return excess runtime on last dequeue
+	 * 在最后一次出列时返回多余的运行时间
+	 */
 	return_cfs_rq_runtime(cfs_rq);
 
 	update_cfs_shares(cfs_rq);
@@ -3865,6 +3910,10 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 * except when: DEQUEUE_SAVE && !DEQUEUE_MOVE, in this case we'll be
 	 * put back on, and if we advance min_vruntime, we'll be placed back
 	 * further than we started -- ie. we'll be penalized.
+	 *
+	 * 现在,如果@se是阻碍min_vruntime前进的实体,则前进min_vruntime,除非出现以下情况:
+	 * DEQUEUE_SAVE && !DEQUEUE_MOVE,在这种情况下,我们将被重新安排,如果我们提前min_vruntime,
+	 * 我们将比开始时被安排得更远 —— 也就是说,我们将受到惩罚.
 	 */
 	if ((flags & (DEQUEUE_SAVE | DEQUEUE_MOVE)) == DEQUEUE_SAVE)
 		update_min_vruntime(cfs_rq);
@@ -3914,18 +3963,24 @@ static void
 set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	/* 'current' is not kept within the tree. */
+	/* 运行中的进程是不在rq上保留的,所以将其从cfs_rq上dequeue */
 	if (se->on_rq) {
 		/*
 		 * Any task has to be enqueued before it get to execute on
 		 * a CPU. So account for the time it spent waiting on the
 		 * runqueue.
 		 */
+		/* entity即将获得cpu,统计调度延时等. 与put_prev_entity->update_stats_wait_start配对 */
 		update_stats_wait_end(cfs_rq, se);
+		/* 从cfs_rq上移除entity */
 		__dequeue_entity(cfs_rq, se);
+		/* cfs_rq上移除后更新rq的负载 */
 		update_load_avg(se, 1);
 	}
 
+	/* 开始计时se的execute时间,用rq的clock_task赋值给se->exec_start */
 	update_stats_curr_start(cfs_rq, se);
+	/* 更新cfs_rq的curr为se,即挑选出来的next进程 */
 	cfs_rq->curr = se;
 
 	/*
@@ -3939,6 +3994,7 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 			    se->sum_exec_runtime - se->prev_sum_exec_runtime));
 	}
 
+	/* 更新se的prev_sum_exec_runtime */
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
 }
 
@@ -3951,37 +4007,60 @@ wakeup_preempt_entity(struct sched_entity *curr, struct sched_entity *se);
  * 2) pick the "next" process, since someone really wants that to run
  * 3) pick the "last" process, for cache locality
  * 4) do not run the "skip" process, if something else is available
+ *
+ * 选择下一个流程,记住以下事项,按以下顺序:
+ * 1) 在进程/进程组之间保持公平
+ * 2) 选择“next”进程,因为有人真的希望它运行
+ * 3) 选择“last”进程作为缓存位置
+ * 4) 如果有其他可用的程序,请不要运行“跳过”程序
  */
 static struct sched_entity *
 pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
+	/* 拿到红黑树最左边的进程 */
 	struct sched_entity *left = __pick_first_entity(cfs_rq);
 	struct sched_entity *se;
 
 	/*
 	 * If curr is set we have to see if its left of the leftmost entity
 	 * still in the tree, provided there was anything in the tree at all.
+	 *
+	 * 如果设置了curr，我们必须看看它在最左边实体的左边是否仍在树中,前提是树中有任何东西.
 	 */
+
+	/* 如果left为NULL,或者说curr在left的左边,那么left = curr */
 	if (!left || (curr && entity_before(curr, left)))
 		left = curr;
 
+	/* 理想情况下,我们运行最左边的实体 */
 	se = left; /* ideally we run the leftmost entity */
 
 	/*
 	 * Avoid running the skip buddy, if running something else can
 	 * be done without getting too unfair.
+	 *
+	 * 如果可以在不太不公平的情况下完成其他任务,请避免运行skip buddy.
+	 */
+
+	/* 如果是被取到的进程自动放弃运行权利
+	 *
+	 * cfs_rq队列中的*skip指向暂时不需要被调度执行的进程,这样的进程一般通过sched_yield()
+         * (在CFS中是通过yield_task_fair)放弃执行权的,同时在sched_yield设置skip之前,总是将上一个被设置为skip的进程清除掉,以防止放弃
+         * 运行权利的进程永远得不到调度.
 	 */
 	if (cfs_rq->skip == se) {
 		struct sched_entity *second;
-
+		/* 如果se == curr,那么摘取红黑树上第二左的进程节点 */
 		if (se == curr) {
 			second = __pick_first_entity(cfs_rq);
 		} else {
 			second = __pick_next_entity(se);
+			/* 如果second为NULL或者说curr比second还在左,那么设置second = curr */
 			if (!second || (curr && entity_before(curr, second)))
 				second = curr;
 		}
 
+		/* left应该抢占second么? */
 		if (second && wakeup_preempt_entity(second, left) < 1)
 			se = second;
 	}
@@ -3989,41 +4068,63 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	/*
 	 * Prefer last buddy, try to return the CPU to a preempted task.
 	 */
+	/* 如果上一次执行的进程尚在cfs_rq队列中,并且left不能抢占它,这里我们应该能够想到为什么内核线程的active_mm要借用
+         * 上一个进程的active_mm.这样的话上一个activ_mm就不用从tlb中清洗掉,而下一次调度的时候有可能重新调度到该进程,增加了tlb的命中率
+	 * cfs_rq->last为当前的运行进程
+	 */
 	if (cfs_rq->last && wakeup_preempt_entity(cfs_rq->last, left) < 1)
 		se = cfs_rq->last;
 
 	/*
 	 * Someone really wants this to run. If it's not unfair, run it.
+	 *
+	 * cfs_rq->next设置为唤醒的进程
 	 */
 	if (cfs_rq->next && wakeup_preempt_entity(cfs_rq->next, left) < 1)
 		se = cfs_rq->next;
 
+	/* 清除cfs_rq的buddies */
 	clear_buddies(cfs_rq, se);
 
+	/* 返回se */
 	return se;
 }
 
 static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq);
 
+/*
+ * 说明1: 若se->on_rq为1则说明此次是抢占,而非主动调度.
+ * 说明2: 正在运行的进程是不在rq上的,所以prev不在runqueue上,因为set_next_entity时已将它从rq上移除.
+ * 说明3: 主动睡眠时__schedule调deactivate_task将on_rq置0,抢占的情况on_rq一直为1.
+ * 说明4: on_rq写0情况:参考说明3; on_rq写1情况：进程ttwu时;
+ */
 static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 {
 	/*
 	 * If still on the runqueue then deactivate_task()
 	 * was not called and update_curr() has to be done:
 	 */
+	/* on_rq为0说明是主动调度,此前调deactivate_task时包含了update_curr;
+	 * 否则这里需要调update_curr
+	 */
 	if (prev->on_rq)
 		update_curr(cfs_rq);
 
 	/* throttle cfs_rqs exceeding runtime */
+	/* 组调度带宽控制*/
 	check_cfs_rq_runtime(cfs_rq);
-
+	/* 检查prev进程的vruntime是否和min_vruntime差了太多(三倍的sysctl_sched_latency) */
 	check_spread(cfs_rq, prev);
 
+	/* 说明是抢占的情况,则prev需要保持runnable的状态,做些处理 */
 	if (prev->on_rq) {
+		/* 计时,记录开始加入rq的起始时间,和update_stats_wait_end成对,统计调度延时. */
 		update_stats_wait_start(cfs_rq, prev);
 		/* Put 'current' back into the tree. */
+		/* 将prev进程重新加入cfs_rq,因为运行时虽然on_rq为1,但其实已经不在rq上了(进程运行时会被从rq上移除) */
 		__enqueue_entity(cfs_rq, prev);
 		/* in !on_rq case, update occurred at dequeue */
+		/* 重新更新负载 */
 		update_load_avg(prev, 0);
 	}
 	cfs_rq->curr = NULL;
@@ -4556,7 +4657,9 @@ static void start_cfs_slack_bandwidth(struct cfs_bandwidth *cfs_b)
 			HRTIMER_MODE_REL);
 }
 
-/* we know any runtime found here is valid as update_curr() precedes return */
+/* we know any runtime found here is valid as update_curr() precedes return
+ * 我们知道这里找到的任何运行时间都是有效的,因为updatecurr()在返回之前
+ */
 static void __return_cfs_rq_runtime(struct cfs_rq *cfs_rq)
 {
 	struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(cfs_rq->tg);
@@ -4852,11 +4955,16 @@ static void hrtick_start_fair(struct rq *rq, struct task_struct *p)
 
 	SCHED_WARN_ON(task_rq(p) != rq);
 
+	/* 如果cfs的可运行进程数量大于1 */
 	if (rq->cfs.h_nr_running > 1) {
+		/* 这里表示一个调度周期内,se能获得的时间片 */
 		u64 slice = sched_slice(cfs_rq, se);
+		/* 可以使用sum_exec_runtime- prev_sum_exec_runtime计算进程最近一次调度内获取cpu使用权的时间. */
 		u64 ran = se->sum_exec_runtime - se->prev_sum_exec_runtime;
+		/* delta表示时间片减去已经运行的时间 */
 		s64 delta = slice - ran;
 
+		/* 如果小于0,说明时间片已经用完了,那么就重新调度 */
 		if (delta < 0) {
 			if (rq->curr == p)
 				resched_curr(rq);
@@ -4962,6 +5070,8 @@ static void set_next_buddy(struct sched_entity *se);
  * The dequeue_task method is called before nr_running is
  * decreased. We remove the task from the rbtree and
  * update the fair scheduling stats:
+ *
+ * 在减少nr_running之前调用dequeue_task方法。我们从rbtree中删除该任务，并更新公平调度统计信息：
  */
 static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 {
@@ -4970,7 +5080,9 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	int task_sleep = flags & DEQUEUE_SLEEP;
 
 	for_each_sched_entity(se) {
+		/* 拿到cfs_rq */
 		cfs_rq = cfs_rq_of(se);
+		/* 这里就是让entity退出运行队列 */
 		dequeue_entity(cfs_rq, se, flags);
 
 		/*
@@ -4978,9 +5090,13 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		 *
 		 * note: in the case of encountering a throttled cfs_rq we will
 		 * post the final h_nr_running decrement below.
-		*/
+		 *
+		 * 遇到节流cfsrq的末端评估
+		 * 注意: 如果遇到节流的cfs_rq,我们将在下面发布最终的h_nr_running递减量
+		 */
 		if (cfs_rq_throttled(cfs_rq))
 			break;
+		/* 让cfs_rq的h_nr_running-- */
 		cfs_rq->h_nr_running--;
 
 		/* Don't dequeue parent if it has other entities besides us */
@@ -6153,6 +6269,14 @@ wakeup_gran(struct sched_entity *curr, struct sched_entity *se)
 	 *
 	 * This is especially important for buddies when the leftmost
 	 * task is higher priority than the buddy.
+	 *
+	 * 由于它现在正在运行,请将gran从实时时间转换为虚拟时间.
+	 *
+	 * 通过使用“se”而不是“curr”,我们会惩罚较轻的任务,因此它们更容易被抢占.
+	 * 也就是说,如果“se”<“curr”,则产生的gran将更大,因此惩罚较轻的任务,
+	 * 如果otoh“se”>“curr’,则产生了的gran会更小,再次惩罚较轻任务.
+	 *
+	 * 当最左边的任务优先级高于好友时，这对好友来说尤其重要。
 	 */
 	return calc_delta_fair(gran, se);
 }
@@ -6174,11 +6298,22 @@ wakeup_gran(struct sched_entity *curr, struct sched_entity *se)
 static int
 wakeup_preempt_entity(struct sched_entity *curr, struct sched_entity *se)
 {
+	/* vdiff是说curr的虚拟时间比se的虚拟时间的差值 */
 	s64 gran, vdiff = curr->vruntime - se->vruntime;
 
+	/* 如果差值<=0,说明curr->vruntime比较小,则se不能抢占curr,那么直接返回-1 */
 	if (vdiff <= 0)
 		return -1;
 
+	/* 计算调度粒度
+	 * 调度粒度是什么概念呢? 进程调度的时候每次都简单选择vruntime最小的进程调度,其实也不完全是这样.
+	 * 假设进程A和B的vruntime很接近,那么A先运行了一个tick,vruntime比B大了,B又运行一个tick,vruntime又比A大了,切换到A,
+	 * 这样就会在AB间频繁切换,对性能影响很大,因此如果当前进程的时间没有用完,就只有当有进程的vruntime比当前进程小超过调度粒度时,才能进行进程切换.
+	 * 函数上面注释中那个图就是这个意思,我们看下:
+	 * 横坐标表示vruntime,s1 s2 s3分别表示新进程,c表示当前进程,g表示调度粒度。
+	 * s3肯定能抢占c;而s1不可能抢占c.
+	 * s2虽然vruntime比c小,但是在调度粒度之内,能否抢占要看情况,像现在这种状况就不能抢占.
+	 */
 	gran = wakeup_gran(curr, se);
 	if (vdiff > gran)
 		return 1;
@@ -6299,6 +6434,7 @@ preempt:
 static struct task_struct *
 pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct pin_cookie cookie)
 {
+	/* 拿到rq的cfs_rq */
 	struct cfs_rq *cfs_rq = &rq->cfs;
 	struct sched_entity *se;
 	struct task_struct *p;
@@ -6306,9 +6442,11 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct pin_cookie c
 
 again:
 #ifdef CONFIG_FAIR_GROUP_SCHED
+	/* 如果cfs_rq里面没有可运行的进程,那么直接goto idle */
 	if (!cfs_rq->nr_running)
 		goto idle;
 
+	/* 如果prev->sched_class不等于fair_sched_class,那么直接goto simple */
 	if (prev->sched_class != &fair_sched_class)
 		goto simple;
 
@@ -6318,9 +6456,14 @@ again:
 	 *
 	 * Therefore attempt to avoid putting and setting the entire cgroup
 	 * hierarchy, only change the part that actually changes.
+	 *
+	 * 由于dequeue_task_fair()中的set_next_buddy(),下一个任务很可能与当前任务来自同一个cgroup.
+	 *
+	 * 因此,尽量避免放置和设置整个cgroup层次结构,只更改实际更改的部分.
 	 */
 
 	do {
+		/* 拿到当前队列正在运行的sched_entity */
 		struct sched_entity *curr = cfs_rq->curr;
 
 		/*
@@ -6328,11 +6471,16 @@ again:
 		 * have to consider cfs_rq->curr. If it is still a runnable
 		 * entity, update_curr() will update its vruntime, otherwise
 		 * forget we've ever seen it.
+		 *
+		 * 由于我们没有执行put_prev_entity(),因此我们还必须考虑cfg_rq->curr.
+		 * 如果它仍然是一个可运行的实体,update_curr()将更新它的vruntime,否则就忘了我们见过它.
 		 */
+		/* 如果有curr */
 		if (curr) {
+			/* 如果它还在调度队列里面,更新它的vruntime */
 			if (curr->on_rq)
 				update_curr(cfs_rq);
-			else
+			else	/* 否则设置curr为NULL */
 				curr = NULL;
 
 			/*
@@ -6340,23 +6488,33 @@ again:
 			 * throttle and dequeue its entity in the parent(s).
 			 * Therefore the 'simple' nr_running test will indeed
 			 * be correct.
+			 *
+			 * 这个对check_cfs_rq_runtime()的调用将执行节流操作,并使其实体在父级中出列.
+			 * 因此,"simple"的nr_running测试确实是正确的.
 			 */
 			if (unlikely(check_cfs_rq_runtime(cfs_rq)))
 				goto simple;
 		}
 
+		/* pick_next_entity选择CFS就绪队列中的红黑树中最左边的进程 */
 		se = pick_next_entity(cfs_rq, curr);
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
 
+	/* 拿到这个se对应的task_struct */
 	p = task_of(se);
 
 	/*
 	 * Since we haven't yet done put_prev_entity and if the selected task
 	 * is a different task than we started out with, try and touch the
 	 * least amount of cfs_rqs.
+	 *
+	 * 由于我们还没有完成put_prev_entity,如果所选任务与我们开始时的任务不同,请尝试使用最少的cfs_rq.
 	 */
+
+	/* 如果prev和p不同 */
 	if (prev != p) {
+		/* 拿到prev的sched_entity */
 		struct sched_entity *pse = &prev->se;
 
 		while (!(cfs_rq = is_same_group(se, pse))) {
@@ -6372,26 +6530,39 @@ again:
 				se = parent_entity(se);
 			}
 		}
-
+		/* 切换前对prev进程做处理 */
 		put_prev_entity(cfs_rq, pse);
+		/* 对即将运行的next进程做处理 */
 		set_next_entity(cfs_rq, se);
 	}
 
+	/* 在enqueue和dequeue操作返回前,如果cfs的就绪队列上面进程数量足够少,那么我们就调用hrtick_start_fair检查是否需要发起延迟调度抢占rq->curr.
+	 * 之所以在dequeue/enqueue的最后要设计hrtick_timer去推进调度器.
+	 * 在dequeue/enqueue的最后,rq->curr很可能已经运行了一段时间,如果我们要等到System Tick到才去切换进程,那很有可能rq->curr已经运行超过0.75ms了,
+	 * 所以我们需要另外一个hrtimer来推进进程切换,而dequeue/enqueue正好是比较方便去检查rq->curr运行时间进而start hrtick_timer的时间点.
+	 * 这应该是也是提升实时性的一个操作.
+	 */
 	if (hrtick_enabled(rq))
 		hrtick_start_fair(rq, p);
 
 	return p;
 simple:
+
+	/* 拿到该rq的cfs队列 */
 	cfs_rq = &rq->cfs;
 #endif
 
+	/* 如果cfs_rq中没有可运行的进程,那么goto idle */
 	if (!cfs_rq->nr_running)
 		goto idle;
 
+	/* 切换前对prev进程做处理 */
 	put_prev_task(rq, prev);
 
 	do {
+		/* 选择下一个进程 */
 		se = pick_next_entity(cfs_rq, NULL);
+		/* 对即将运行的next进程做处理 */
 		set_next_entity(cfs_rq, se);
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
@@ -6409,6 +6580,9 @@ idle:
 	 * for load-balance and preemption/IRQs are still disabled avoiding
 	 * further scheduler activity on it and we're being very careful to
 	 * re-start the picking loop.
+	 *
+	 * 这是可以的,因为current是on_cpu,这避免了它被挑选用于负载平衡,抢占/IRQ仍然被禁用,避免了它上的进一步调度程序活动,
+	 * 我们非常小心地重新启动挑选循环。
 	 */
 	lockdep_unpin_lock(&rq->lock, cookie);
 	new_tasks = idle_balance(rq);

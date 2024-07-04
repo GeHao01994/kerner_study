@@ -870,6 +870,18 @@ void wq_worker_waking_up(struct task_struct *task, int cpu)
  *
  * Return:
  * Worker task on @cpu to wake up, %NULL if none.
+ *
+ * wq_worker_sleeping- worker要睡觉了
+ * @task: 进入睡眠状态的task
+ *
+ * 当繁忙的worker要睡觉时,在schedule()期间调用此函数.同一cpu上的工作线程可以通过返回指向其任务的指针来唤醒.
+ *
+ * CONTEXT:
+ * spin_lock_irq(rq->lock)
+ *
+ * 返回:
+ * @cpu上要唤醒的工作线程任务,如果没有,则为%NULL.
+ *
  */
 struct task_struct *wq_worker_sleeping(struct task_struct *task)
 {
@@ -880,13 +892,21 @@ struct task_struct *wq_worker_sleeping(struct task_struct *task)
 	 * Rescuers, which may not have all the fields set up like normal
 	 * workers, also reach here, let's not access anything before
 	 * checking NOT_RUNNING.
+	 *
+	 * Rescuers(救援人员),可能不像普通工人那样设置了所有的字段,他们也到达了这里,
+	 * 在检查NOT_RUNNING之前,我们不要访问任何东西.
 	 */
+
+	/* 如果worker->flags带有WORKER_NOT_RUNNING,那么直接返回NULL */
 	if (worker->flags & WORKER_NOT_RUNNING)
 		return NULL;
 
+	/* 拿到这个worker的worker->pool */
 	pool = worker->pool;
 
-	/* this can only happen on the local cpu */
+	/* this can only happen on the local cpu
+	 * 这只发生在本地CPU,如果pool->cpu不是本地CPU,那么直接返回NULL
+	 */
 	if (WARN_ON_ONCE(pool->cpu != raw_smp_processor_id()))
 		return NULL;
 
@@ -900,6 +920,16 @@ struct task_struct *wq_worker_sleeping(struct task_struct *task)
 	 * disabled, which in turn means that none else could be
 	 * manipulating idle_list, so dereferencing idle_list without pool
 	 * lock is safe.
+	 *
+	 * 以下dec_and_test、implied mb、工作列表非空测试序列的对应项在insert_work()中.
+	 * 请阅读评论.
+	 *
+	 * NOT_RUNNING很清楚. 这意味着我们绑定到本地cpu并在其上运行,同时保持rq lock并禁用抢占,
+	 * 这反过来意味着其他cpu都不可能正在操作idle_list,因此在没有池锁的情况下取消引用idle_list是安全的.
+	 */
+	/* 如果pool->nr_running - 1之后为0,说明没有没有正在运行的工作线程,
+	 * 并且worklist不为空,说明还有work需要做,
+	 * 那么就唤醒第一个idel的worker(也就是worker线程)
 	 */
 	if (atomic_dec_and_test(&pool->nr_running) &&
 	    !list_empty(&pool->worklist))

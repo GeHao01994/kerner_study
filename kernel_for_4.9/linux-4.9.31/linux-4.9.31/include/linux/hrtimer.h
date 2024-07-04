@@ -75,34 +75,83 @@ enum hrtimer_restart {
 
 /**
  * struct hrtimer - the basic hrtimer structure
+ *
+ * struct hrtimer - 基本的hrtimer结构体
+ *
  * @node:	timerqueue node, which also manages node.expires,
  *		the absolute expiry time in the hrtimers internal
  *		representation. The time is related to the clock on
  *		which the timer is based. Is setup by adding
  *		slack to the _softexpires value. For non range timers
  *		identical to _softexpires.
+ *
+ * @node:	timerqueue节点,它还管理node.expires,hrtimers内部表示中的绝对到期时间.
+ *		time与计时器所依赖的clock有关.通过将松弛添加到_sofexpires值来设置.
+ *		对于与_sofexpires相同的非范围计时器。
+ *
  * @_softexpires: the absolute earliest expiry time of the hrtimer.
  *		The time which was given as expiry time when the timer
  *		was armed.
+ *
+ * @_softexpires: hrtimer的绝对最早到期时间.计时器启用时作为到期时间给出的时间.
+ *
  * @function:	timer expiry callback function
+ *
+ * @function: 计时器过期回调函数
+ *
  * @base:	pointer to the timer base (per cpu and per clock)
+ *
+ * @base:	指向计时器基数的指针(每个cpu和每个时钟)
+ *
  * @state:	state information (See bit values above)
+ *
+ * @state：状态信息(请参阅上面的位值)
+ *
  * @is_rel:	Set if the timer was armed relative
+ *
+ * @is_rel：如果计时器是相对的,则设置
+ *
  * @start_pid:  timer statistics field to store the pid of the task which
  *		started the timer
+ *
+ * @start_pid: 计时器统计信息字段,用于存储启动计时器的任务的pid
+ *
  * @start_site:	timer statistics field to store the site where the timer
  *		was started
+ *
+ *
+ * @start_site: 计时器统计信息字段,用于存储启动计时器的站点
+ *
  * @start_comm: timer statistics field to store the name of the process which
  *		started the timer
  *
+ * @start_comm: 计时器统计信息字段,用于存储启动计时器的进程的名称
+ *
  * The hrtimer structure must be initialized by hrtimer_init()
+ *
+ * hrtimer结构必须由hrtimer_init()初始化
  */
 struct hrtimer {
+	/* node: 是一个timerqueue_node结构体变量. 这个结构体中有两个成员. */
 	struct timerqueue_node		node;
+	/* _softexpires: 表示该定时器的软超时时间.
+	 * 高精度定时器一般都有一个到期的时间范围,而不像(低精度)定时器那样就是一个时间点.
+	 * 这个时间范围的前时间点就是软超时时间,而后一个时间点就是硬超时时间.达到软超时时间后,还可以再拖一会再调用超时回调函数,
+	 * 而到达硬超时时间后就不能再拖了
+	 */
 	ktime_t				_softexpires;
+	/* function：定时器到期后的回调函数. */
 	enum hrtimer_restart		(*function)(struct hrtimer *);
+	/* 指向包含该高分辨率定时器的的hrtimer_clock_base结构体. */
 	struct hrtimer_clock_base	*base;
+	/* 用来表示该高分辨率定时器当前所处的状态,目前共有两种状态:
+	 * 表示定时器还未激活
+	 * #define HRTIMER_STATE_INACTIVE	0x00
+	 * 表示定时器已激活（入列)
+	 * #define HRTIMER_STATE_ENQUEUED	0x01
+	 */
 	u8				state;
+	/* 表示该定时器的到期时间是否是相对时间. */
 	u8				is_rel;
 #ifdef CONFIG_TIMER_STATS
 	int				start_pid;
@@ -210,7 +259,9 @@ static inline void hrtimer_set_expires(struct hrtimer *timer, ktime_t time)
 {
 	BUILD_BUG_ON(sizeof(struct hrtimer_clock_base) > HRTIMER_CLOCK_BASE_ALIGN);
 
+	/* 设置该定时器的硬超时时间 */
 	timer->node.expires = time;
+	/* 设置该定时器的软超时时间 */
 	timer->_softexpires = time;
 }
 

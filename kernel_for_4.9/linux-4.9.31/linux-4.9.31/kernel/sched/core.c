@@ -291,9 +291,14 @@ static void __hrtick_start(void *arg)
  * Called to set the hrtick timer state.
  *
  * called with rq->lock held and irqs disabled
+ *
+ * 调用以设置hrtick计时器状态.
+ *
+ * 在保持rq->lock锁定且禁用irqs的情况下调用
  */
 void hrtick_start(struct rq *rq, u64 delay)
 {
+	/* 拿到hrtimer */
 	struct hrtimer *timer = &rq->hrtick_timer;
 	ktime_t time;
 	s64 delta;
@@ -301,14 +306,24 @@ void hrtick_start(struct rq *rq, u64 delay)
 	/*
 	 * Don't schedule slices shorter than 10000ns, that just
 	 * doesn't make sense and can cause timer DoS.
+	 *
+	 * 不要将调度切片短于10000ns,这是没有意义的,可能会导致定时器DoS.
 	 */
 	delta = max_t(s64, delay, 10000LL);
+	/* ktime_add_ns = timer->base->get_time() + delta */
 	time = ktime_add_ns(timer->base->get_time(), delta);
 
+	/* 这里是设置该定时器的超时时间 */
 	hrtimer_set_expires(timer, time);
 
+	/* 如果该rq是本CPU的运行队列,更新time之后重启hrtimer计数器 */
 	if (rq == this_rq()) {
 		__hrtick_restart(rq);
+	/* hrtick_csd_pending是用來作為SMP架構下,由處理器A觸發處理器B執行_hrtick_start函式的一個保護機制
+	 *
+	 * 如果hrtick_csd_pending為0,就會透過函式__smp_call_function_single讓RunQueue所在的另一個處理器執行rq->hrtick_csd.func
+	 * 所指到的函式__hrtick_start.並等待該處理器執行完畢後,才重新把hrtick_csd_pending設定為1.
+	 */
 	} else if (!rq->hrtick_csd_pending) {
 		smp_call_function_single_async(cpu_of(rq), &rq->hrtick_csd);
 		rq->hrtick_csd_pending = 1;
@@ -790,9 +805,12 @@ static inline void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 
 static inline void dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 {
+	/* 这边就是update rq的clock */
 	update_rq_clock(rq);
+	/* 如果没有带DEQUEUE_SAVE */
 	if (!(flags & DEQUEUE_SAVE))
 		sched_info_dequeued(rq, p);
+	/* 这边是把该task提出运行队列 */
 	p->sched_class->dequeue_task(rq, p, flags);
 }
 
@@ -816,9 +834,14 @@ void activate_task(struct rq *rq, struct task_struct *p, int flags)
 
 void deactivate_task(struct rq *rq, struct task_struct *p, int flags)
 {
+	/*
+	 * prev是否属于UNINTERRUPTIBLE?
+	 * 当prev属于TASK_UNINTERRUPTIBLE并且不属于PF_FROZEN并且不属于TASK_NOLOAD时,
+	 * 就贡献rq->nr_uninterruptible
+	 */
 	if (task_contributes_to_load(p))
 		rq->nr_uninterruptible++;
-
+	/* 进程出队 */
 	dequeue_task(rq, p, flags);
 }
 
@@ -2800,14 +2823,27 @@ fire_sched_out_preempt_notifiers(struct task_struct *curr,
  *
  * prepare_task_switch sets up locking and calls architecture specific
  * hooks.
+ *
+ * prepare_task_switch - 准备切换任务
+ * @rq: 准备切换的运行队列
+ * @prev: 当前正在切换的任务
+ * @next: 我们要切换到的任务.
+ *
+ * 这是在rq锁保持且中断关闭的情况下调用的. 它必须与上下文切换后的后续finish_task_switch配对.
+ *
+ * prepare_task_switch设置locking并调用特定于体系结构的钩子函数
  */
 static inline void
 prepare_task_switch(struct rq *rq, struct task_struct *prev,
 		    struct task_struct *next)
 {
+	/* 这里是处理sched_info的东西 */
 	sched_info_switch(rq, prev, next);
+	/* perf event的处理 */
 	perf_event_task_sched_out(prev, next);
+	/* 调用notifier->ops->sched_out */
 	fire_sched_out_preempt_notifiers(prev, next);
+	/* 设置next->on_cpu = 1 */
 	prepare_lock_switch(rq, next);
 	prepare_arch_switch(next);
 }
@@ -2968,9 +3004,15 @@ context_switch(struct rq *rq, struct task_struct *prev,
 {
 	struct mm_struct *mm, *oldmm;
 
+	/* 调度前的一些准备工作,这里面的prepare_lock_switch 函数设置next进程的task_struct结构中的on_cpu成员为1,表示next进程马上进入执行状态 */
 	prepare_task_switch(rq, prev, next);
 
+	/* 对于普通进程来说,task_struct数据结构中的mm成员和active_mm成员都指向进程地址空间描述符mm_struct;
+	 * 但是由于内核线程来说是没有进程地址空间的(mm = NULL),但是因为进程调度的需要,需要借用一个进程地址空间,因此有了active_mm成员
+	 */
+	/* mm指向next进程的地址空间描述符struct mm_struct */
 	mm = next->mm;
+	/* oldmm指向prev进程正在使用的地址空间描述符(prev->active_mm) */
 	oldmm = prev->active_mm;
 	/*
 	 * For paravirt, this is coupled with an exit in switch_to to
@@ -2978,14 +3020,21 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	 * one hypercall.
 	 */
 	arch_start_context_switch(prev);
-
+	/* next进程的mm为空,说明这是一个内核线程,需要借用prev进程的活跃进程地址空间active_mm.
+	 * 为什么这里要借用prev->active_mm,而不是prev->mm呢?
+	 * prev进程也有可能是一个内核线程.
+	 */
 	if (!mm) {
 		next->active_mm = oldmm;
+		/* 增加prev->active_mm的mm_count引用计数 */
 		atomic_inc(&oldmm->mm_count);
+		/* 进入lazy tlb魔数,对于arm处理器来说这是一个空函数 */
 		enter_lazy_tlb(oldmm, next);
 	} else
 		switch_mm_irqs_off(oldmm, mm, next);
 
+	/* 如果prev进程也是一个内核线程的情况,prev进程马上就要被换出,因此设置prev->active_mm为NULL,
+	 * 另外就绪队列rq数据机构的成员prev_mm记录了prev->active_mm的值,该值稍后会在finish_task_switch函数中用到 */
 	if (!prev->mm) {
 		prev->active_mm = NULL;
 		rq->prev_mm = oldmm;
@@ -3000,9 +3049,17 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	spin_release(&rq->lock.dep_map, 1, _THIS_IP_);
 
 	/* Here we just switch the register state and the stack. */
+	/* switch_to函数切换进程,从prev进程切换到next进程来运行.
+	 * 该函数执行完成时,CPU运行next进程,prev进程被调度出去,
+	 * 俗称“睡眠”
+	 */
 	switch_to(prev, next, prev);
 	barrier();
 
+	/* finish_task_switch函数中会递减上面增加的mm_count的引用计数.
+	 * 另外finish_task_switch()->finish_lock_switch->finish_lock_switch会设置prev进程的task_struct数据结构的on_cpu成员为0,
+	 * 表示prev进程已经退出执行状态,相当于由next进程来收拾prev进程的“残局”.
+	 */
 	return finish_task_switch(prev);
 }
 
@@ -3368,6 +3425,14 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct pin_cookie cookie
 	/*
 	 * Optimization: we know that if all tasks are in
 	 * the fair class we can call that function directly:
+	 *
+	 * 优化: 我们知道如果所有的进程都在fair class,我们能直接调用函数
+	 */
+
+	/* 这里说得是如果前一个进程调度类是完全公平调度类
+	 * 并且rq->nr_running == rq->cfs.h_nr_running,
+	 * 也就是说所有的进程都在cfs队列里面
+	 * 那么直接调用完全公平算法的pick_next_task
 	 */
 	if (likely(prev->sched_class == class &&
 		   rq->nr_running == rq->cfs.h_nr_running)) {
@@ -3383,6 +3448,8 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct pin_cookie cookie
 	}
 
 again:
+	/* 如果该CPU就绪队列中有其他调度类的进程,那么就遍历整个调度类
+	 * 从stop_sched_class -> dl_sched_class -> rt_sched_class -> fair_sched_class -> idle_sched_class */
 	for_each_class(class) {
 		p = class->pick_next_task(rq, prev, cookie);
 		if (p) {
@@ -3433,6 +3500,42 @@ again:
  *          - return from interrupt-handler to user-space
  *
  * WARNING: must be called with preemption disabled!
+ *
+ * __schedule（）是主要的调度器函数.
+ * 驱动调度器并因此进入该功能的主要方式是:
+ * 1.显式阻塞:mutex、semaphore、 waitqueue等.
+ * 2.在中断和用户空间返回路径上检查TIF_NED_RESCHED标志.例如,请参见arch/x86/entry_64.S.
+ *   为了驱动任务之间的抢占,调度器在定时器中断处理程序schedule_tick()中设置标志.
+ * 3.唤醒并不会真正导致进入schedule().他们将任务添加到运行队列中,仅此而已.
+ *   现在,如果添加到运行队列中的新任务抢占当前任务,则唤醒设置TIF_NED_RESCHED,并在尽可能接近的情况下调用schedule():
+ *   -如果内核是可抢占的(CONFIG_PREEMPT=y):
+ *	-在系统调用或异常上下文中,在下一个最外面的preempt_enable()处.(这可能与wake_up()的spin_unlock()一样快!)
+ *	-在IRQ上下文中,从中断处理程序返回到可抢占上下文
+ *   -如果内核不可抢占(未设置CONFIG_PREEMPT),则在下一步:
+ *	-cond_resched（）调用
+ *	-显式schedule（）调用
+ *	-从系统调用或异常返回到用户空间
+ *	-从中断处理程序返回到用户空间
+ *
+ * 警告：必须在禁用抢占的情况下调用！
+ */
+
+/* __schedule是调度器的核心函数,其作用是让调度器选择和切换一个合适进程运行.
+ * 调度的时机可以分为如下三种.
+ * (1)阻塞操作: 互斥量(mutex)、信号量(semaphore)、等待队列(waitqueue)等.
+ * (2)在中断返回前和系统调用返回用户空间时,去检查TIF_NEED_RESCHED标志位以判断是否需要调度.
+ * (3)将要唤醒的进程(Wakeups)不会马上调用schedule要求被调度,而是会被添加到CFS就绪队列中,并且设置TIF_NEED_RESCHED标志位.
+ * 那么唤醒进程什么时候被唤醒呢?这要根据内核是否具有可抢占功能(CONFIG_PREEMPT=y)分两种情况.
+ * 如果内核可抢占,则:
+ * 如果唤醒动作发生在系统调用或者异常处理上下文中,在下一次调用preempt_enable时会检查是否需要抢占调度.
+ * 如果唤醒动作发生在硬中断处理上下文中,硬件中断处理返回前夕会检查是否要抢占当前进程.
+ * 如果内核不可抢占,则:
+ * 当前进程调用cond_resched时会检查是否要调度;
+ * 主动调度调用schedule();
+ * 系统调用或者异常处理返回用户空间时;
+ * 中断处理完成返回用户空间时.
+ * 前文提到的硬件中断返回前夕和硬件中断返回用户空间前夕是两个不同的概念.
+ * 前者是每次硬件中断返回前夕都会检查是否有进程需要被抢占调度,不管中断发生点是在内核空间,还是用户空间;后者是只有中断发生点在用户空间才会检查.
  */
 static void __sched notrace __schedule(bool preempt)
 {
@@ -3441,9 +3544,11 @@ static void __sched notrace __schedule(bool preempt)
 	struct pin_cookie cookie;
 	struct rq *rq;
 	int cpu;
-
+	/* 拿到当前CPU */
 	cpu = smp_processor_id();
+	/* 拿到当前CPU的运行队列 */
 	rq = cpu_rq(cpu);
+	/* 拿到当前的进程,把它赋值给prev */
 	prev = rq->curr;
 
 	schedule_debug(prev);
@@ -3451,6 +3556,7 @@ static void __sched notrace __schedule(bool preempt)
 	if (sched_feat(HRTICK))
 		hrtick_clear(rq);
 
+	/* 关闭本地中断 */
 	local_irq_disable();
 	rcu_note_context_switch();
 
@@ -3464,23 +3570,54 @@ static void __sched notrace __schedule(bool preempt)
 	cookie = lockdep_pin_lock(&rq->lock);
 
 	rq->clock_skip_update <<= 1; /* promote REQ to ACT */
-
+	/* 拿到prev的非自愿上下文切换次数计数 */
 	switch_count = &prev->nivcsw;
+	/*
+	 * scheduler检查prev的状态state和内核抢占表示
+	 * 如果prev是不可运行的,并且在内核态没有被抢占
+	 *
+	 * 此时当前进程不是处于运行态,并且不是被抢占
+	 * 此时不能只检查抢占计数
+	 * 因为可能某个进程(如网卡轮询)直接调用了schedule
+	 * 如果不判断prev->stat就可能误认为task进程为RUNNING状态
+	 * 到达这里,有两种可能,一种是主动schedule,另外一种是被抢占
+	 * 被抢占有两种情况,一种是时间片到点,一种是时间片没到点
+	 * 时间片到点后,主要是置当前进程的need_resched标志
+	 * 接下来在时钟中断结束后,会preempt_schedule_irq抢占调度
+	 *
+	 * 那么我们正常应该做的是应该将进程prev从就绪队列rq中删除,
+	 * 但是如果当前进程prev有非阻塞等待信号,
+	 * 并且它的状态是TASK_INTERRUPTIBLE
+	 * 我们就不应该从就绪队列总删除它
+	 * 而是配置其状态为TASK_RUNNING,并且把他留在rq中
+	 *
+	 * 如果内核态没有被抢占,并且内核抢占有效
+	 * 即是否同时满足以下条件:
+	 * 1、该进程处于停止状态
+	 * 2、该进程没有在内核态被抢占
+	 */
+
+	/* 如果内核态没有抢占,并且prev不是TASK_RUNNING */
 	if (!preempt && prev->state) {
+		/* 检查它是否有pending的信号,如果有设置其状态为TASK_RUNNING */
 		if (unlikely(signal_pending_state(prev->state, prev))) {
 			prev->state = TASK_RUNNING;
 		} else {
+			/* 把它踢出运行队列 */
 			deactivate_task(rq, prev, DEQUEUE_SLEEP);
+			/* 设置prev的on_rq为0 */
 			prev->on_rq = 0;
 
 			/*
 			 * If a worker went to sleep, notify and ask workqueue
 			 * whether it wants to wake up a task to maintain
 			 * concurrency.
+			 *
+			 * 如果一个worker进入睡眠状态,则通知并询问工作队列是否要唤醒任务以保持并发性.
 			 */
 			if (prev->flags & PF_WQ_WORKER) {
 				struct task_struct *to_wakeup;
-
+				/* 如果有需要唤醒的worker,那么就去唤醒它 */
 				to_wakeup = wq_worker_sleeping(prev);
 				if (to_wakeup)
 					try_to_wake_up_local(to_wakeup, cookie);
@@ -3489,17 +3626,23 @@ static void __sched notrace __schedule(bool preempt)
 		switch_count = &prev->nvcsw;
 	}
 
+	/* 如果task在rq队列里面,更新rq的clock */
 	if (task_on_rq_queued(prev))
 		update_rq_clock(rq);
 
+	/* pick_next_task让进程调度器从就绪队列中选择一个最合适的进程next */
 	next = pick_next_task(rq, prev, cookie);
 	clear_tsk_need_resched(prev);
 	clear_preempt_need_resched();
 	rq->clock_skip_update = 0;
 
+	/* 如果prev不等于next */
 	if (likely(prev != next)) {
+		/* 那么rq的nr_switched(进程切换次数++) */
 		rq->nr_switches++;
+		/* 设置rq->curr = next */
 		rq->curr = next;
+		/* 自愿or非自愿上下文切换次数++ */
 		++*switch_count;
 
 		trace_sched_switch(preempt, prev, next);

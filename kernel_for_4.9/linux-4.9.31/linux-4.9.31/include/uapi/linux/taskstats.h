@@ -152,6 +152,9 @@ struct taskstats {
 	__u64	write_bytes;		/* bytes of write I/O */
 	__u64	cancelled_write_bytes;	/* bytes of cancelled write I/O */
 
+	/* nvcsw/nivcsw是自愿(voluntary)/非自愿(involuntary)上下文切换计数.
+	 * last_switch_count是nvcsw和nivcsw的总和.
+	 */
 	__u64  nvcsw;			/* voluntary_ctxt_switches */
 	__u64  nivcsw;			/* nonvoluntary_ctxt_switches */
 
