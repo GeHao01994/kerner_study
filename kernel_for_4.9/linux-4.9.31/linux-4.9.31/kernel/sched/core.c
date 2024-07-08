@@ -3232,17 +3232,33 @@ unsigned long long task_sched_runtime(struct task_struct *p)
 /*
  * This function gets called by the timer code, with HZ frequency.
  * We call it with interrupts disabled.
+ *
+ * 此函数由定时器代码调用,频率为HZ.
+ * 我们在禁用中断的时候调用它
  */
 void scheduler_tick(void)
 {
+	/* 拿到本地CPU */
 	int cpu = smp_processor_id();
+	/* 拿到本地CPU的rq队列 */
 	struct rq *rq = cpu_rq(cpu);
+	/* 拿到rq队列正在运行的进程 */
 	struct task_struct *curr = rq->curr;
 
+	/* scheduler_tick中和更新时间相关的接口主要是两个,sched_clock_tick(()和update_rq_clock(rq),
+	 * 前者用来更新和调度timer相关的计时统计,后者用来更新percpu的runqueue的时间.
+	 */
+
+	/* 以纳秒为单位将当前时间放入sched_clock_data中,更新sched_clock_data结构体 */
 	sched_clock_tick();
 
+	/* 上锁,更新rq上的统计信息,并执行进程对应调度类的周期性的调度 */
 	raw_spin_lock(&rq->lock);
+	/* 更新当前调度队列rq的clock.即使rq->clock变为当前时间 */
 	update_rq_clock(rq);
+	/* 执行当前运行进程curr的调度类的task_tick函数
+	 * task_tick是调度类中实现的方法,用于处理时钟tick到来时与调度器相关的事情.
+	 */
 	curr->sched_class->task_tick(rq, curr, 0);
 	cpu_load_update_active(rq);
 	calc_global_load_tick(rq);

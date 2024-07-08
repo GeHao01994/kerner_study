@@ -3921,6 +3921,8 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 
 /*
  * Preempt the current task with a newly woken task if needed:
+ *
+ * 如果需要,使用新唤醒的任务抢占当前任务
  */
 static void
 check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
@@ -3929,13 +3931,18 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	struct sched_entity *se;
 	s64 delta;
 
+	/* ideal_runtime是理论运行时间,即该进程更加权重在一个调度周期里分到的实际运行时间 */
 	ideal_runtime = sched_slice(cfs_rq, curr);
+	/* delta_exec是实际运行时间 */
 	delta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
+	/* 如果实际运行时间已经超过了理论运行时间,那么进程要被调度出去,设置该进程中的thread_info中的TIF_NEED_RESCHED标志位 */
 	if (delta_exec > ideal_runtime) {
 		resched_curr(rq_of(cfs_rq));
 		/*
 		 * The current task ran long enough, ensure it doesn't get
 		 * re-elected due to buddy favours.
+		 *
+		 * 目前的任务持续了足够长的时间,以确保它不会因为好友的青睐而再次当选.
 		 */
 		clear_buddies(cfs_rq, curr);
 		return;
@@ -3945,10 +3952,21 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	 * Ensure that a task that missed wakeup preemption by a
 	 * narrow margin doesn't have to wait for a full slice.
 	 * This also mitigates buddy induced latencies under load.
+	 *
+	 * 确保以微弱优势错过唤醒抢占的任务不必等待完整的切片.
+	 * 这也减轻了负载下好友引起的延迟.
+	 */
+
+	/* 系统中有一个变量定义进程最少运行时间sysctl_sched_min_granularity,默认是0.75毫秒.
+	 * 如果该进程实际运行时间小于这个值,也不需要调度.
 	 */
 	if (delta_exec < sysctl_sched_min_granularity)
 		return;
 
+	/* 最后将该进程的虚拟时间和就绪队列红黑树中最左边的调度实体的虚拟时间做比较,
+	 * 如果小于最左边的时间,则不用触发调度.
+	 * 反之,则这个差值大于该进程的理论运行时间,会触发调度.
+	 */
 	se = __pick_first_entity(cfs_rq);
 	delta = curr->vruntime - se->vruntime;
 
@@ -4136,11 +4154,15 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 	/*
 	 * Update run-time statistics of the 'current'.
 	 */
+
+	/* 更新当前进程的vruntime和就绪队列的min_vruntime */
 	update_curr(cfs_rq);
 
 	/*
 	 * Ensure that runnable average is periodically updated.
 	 */
+
+	/* 更新该调度实体的和该就绪队列的平均负载 */
 	update_load_avg(curr, 1);
 	update_cfs_shares(cfs_rq);
 
@@ -4148,6 +4170,8 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 	/*
 	 * queued ticks are scheduled to match the slice, so don't bother
 	 * validating it and just reschedule.
+	 *
+	 * queued tick被调度为与时间片匹配,所以不用费力验证它,只需重新调度即可
 	 */
 	if (queued) {
 		resched_curr(rq_of(cfs_rq));
@@ -4155,12 +4179,15 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 	}
 	/*
 	 * don't let the period tick interfere with the hrtick preemption
+	 *
+	 * 不要让周期tick干扰hrtick抢占
 	 */
 	if (!sched_feat(DOUBLE_TICK) &&
 			hrtimer_active(&rq_of(cfs_rq)->hrtick_timer))
 		return;
 #endif
 
+	/* 如果这个队列上运行的进程不止一个,那么调用check_preempt_tick函数检查当前进程是否需要被调度出去 */
 	if (cfs_rq->nr_running > 1)
 		check_preempt_tick(cfs_rq, curr);
 }
@@ -9136,14 +9163,19 @@ static void rq_offline_fair(struct rq *rq)
 
 /*
  * scheduler tick hitting a task of our scheduling class:
+ *
+ * 调度器勾选了我们调度类的task:
  */
 static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 {
 	struct cfs_rq *cfs_rq;
+	/* 拿到当前运行的task_struct的sched_entity */
 	struct sched_entity *se = &curr->se;
 
 	for_each_sched_entity(se) {
+		/* 拿到该sched_entity的cfs_rq */
 		cfs_rq = cfs_rq_of(se);
+		/* 调用entity_tick检查是否需要调度 */
 		entity_tick(cfs_rq, se, queued);
 	}
 

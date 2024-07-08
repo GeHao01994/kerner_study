@@ -324,17 +324,22 @@ void sched_clock_tick(void)
 {
 	struct sched_clock_data *scd;
 	u64 now, now_gtod;
-
+	/* 如果__sched_clock_stable是STATIC_KEY_INIT_FALSE,那么直接return了 */
 	if (sched_clock_stable())
 		return;
 
+	/* 如果sched_clock_running为0,那么也直接return */
 	if (unlikely(!sched_clock_running))
 		return;
 
+	/* 如果irqs不是disable的,那么报个警告 */
 	WARN_ON_ONCE(!irqs_disabled());
 
+	/* 拿到本地CPU的sched_clock_data */
 	scd = this_scd();
+	/* 获取monotonic clock的时间值,转换为64位纳秒计数器 */
 	now_gtod = ktime_to_ns(ktime_get());
+	/* 获取当前硬件timer的时间 */
 	now = sched_clock();
 
 	scd->tick_raw = now;
