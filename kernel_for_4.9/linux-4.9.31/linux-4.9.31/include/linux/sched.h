@@ -1052,14 +1052,81 @@ extern void wake_up_q(struct wake_q_head *head);
 #define SD_BALANCE_NEWIDLE	0x0002	/* Balance when about to become idle */
 #define SD_BALANCE_EXEC		0x0004	/* Balance on exec */
 #define SD_BALANCE_FORK		0x0008	/* Balance on fork, clone */
+/* 在Linux调度的上下文中,SD_BALANCE_WAKE是一个与调度域(Scheduler Domain)相关的标志位,它用于指示在任务唤醒(wakeup)时进行负载均衡.
+ * 具体来说,当一个任务(进程)被唤醒并准备执行时,调度器会检查该任务所属的调度域是否设置了SD_BALANCE_WAKE标志位.
+ * 如果设置了该标志位,调度器会尝试在调度域内重新分配任务,以优化系统的负载均衡.
+ * 以下是关于SD_BALANCE_WAKE的详细解释:
+ * 作用与目的
+ * 负载均衡: SD_BALANCE_WAKE的主要目的是在任务唤醒时,通过负载均衡来优化系统性能.这有助于避免某些CPU过载而其他CPU空闲的情况,从而提高系统的整体利用率和响应性.
+ * 优化资源分配: 通过在任务唤醒时进行负载均衡,调度器可以更好地管理系统的计算资源,确保任务能够尽快在合适的CPU上执行.
+ * 触发条件
+ * 任务唤醒: 当一个任务(进程)从睡眠状态被唤醒并准备执行时,会触发SD_BALANCE_WAKE的负载均衡机制.
+ * 调度域设置: 只有在任务所属的调度域设置了SD_BALANCE_WAKE标志位时,才会在任务唤醒时进行负载均衡.
+ */
 #define SD_BALANCE_WAKE		0x0010  /* Balance on wakeup */
+/* Linux调度的SD_WAKE_AFFINE是一个调度标志,用于指示调度器在唤醒任务时尽可能地将任务放置在唤醒它的CPU上.
+ * 这个机制是在Linux内核的调度器设计中实现的,特别是在CFS(Completely Fair Scheduler)调度器中有所体现.
+ *
+ * 一、背景与原理
+ * 在Linux系统中,当进程(或任务)被唤醒时,调度器需要为该进程选择一个合适的CPU来执行.这个过程称为选核(或选CPU),它涉及多个因素,如CPU的负载、任务的亲和性(affinity)
+ * 以及系统的拓扑结构等.SD_WAKE_AFFINE就是在这个过程中发挥作用的一个标志。
+ *
+ * SD_WAKE_AFFINE的基本原理是,有唤醒关系的进程(即waker和wakee)往往是相互关联的,它们之间可能存在数据共享或通信.
+ * 因此,将wakee进程放置在waker进程所在的CPU上执行,可以减少缓存未命中(cache-miss)等开销,从而提高系统性能.
+ * 这就是所谓的“亲和性调度”(affine scheduling).
+ *
+ * 二、实现与优化
+ * 实现方式：
+ * 在Linux内核中,SD_WAKE_AFFINE标志是通过sched_domain结构体中的flags字段来设置的.sched_domain是调度器用来组织CPU层次关系的数据结构,它包含了调度域的各种参数和标志.
+ * 当调度器在唤醒一个进程时,会检查该进程的sched_domain是否设置了SD_WAKE_AFFINE标志.如果设置了,调度器会尝试将进程放置在唤醒它的CPU上执行.
+ * 优化机制：
+ * 尽管SD_WAKE_AFFINE可以提高系统性能,但它也可能导致资源竞争和waker进程饥饿的问题,特别是在1:N的唤醒场景下(即一个waker进程唤醒多个wakee进程).
+ * 为了解决这一问题,Linux内核在后续版本中引入了智能的wake-affine逻辑(如COMMIT 62470419e993所示).
+ * 这种优化机制通过识别复杂的唤醒模型(如1:N),并只在认为wake-affine能提升性能时才进行亲和性调度.
+ */
 #define SD_WAKE_AFFINE		0x0020	/* Wake task to waking CPU */
+/* 在Linux调度的上下文中,SD_ASYM_CPUCAPACITY是一个与调度域(Scheduler Domain)相关的标志位,用于指示调度域中的CPU成员具有不同的CPU容量(Capacity)或性能特性.
+ * 这个标志位通常定义在Linux内核的调度器代码中,用于指导调度器在具有异构CPU(即性能不同的CPU)的系统中如何更有效地进行任务分配和负载均衡.
+ *
+ * 具体来说,SD_ASYM_CPUCAPACITY标志位的作用可能包括:
+ * 识别异构CPU: 在具有不同性能特性的CPU(如大小核架构、不同微架构的CPU等)的系统中,SD_ASYM_CPUCAPACITY标志位帮助调度器识别这种异构性.
+ * 优化任务分配: 基于CPU的容量或性能差异,调度器可以做出更智能的决策,将任务分配给最适合的CPU,以提高系统的整体性能和效率.
+ * 负载均衡考虑: 在进行负载均衡时,调度器会考虑CPU的容量差异,避免将过多任务分配给性能较低的CPU,从而导致性能瓶颈.
+ */
 #define SD_ASYM_CPUCAPACITY	0x0040  /* Groups have different max cpu capacities */
+/* Linux调度的SD_SHARE_CPUCAPACITY是一个调度标志,用于指示调度域(sched_domain)中的CPU可以共享CPU资源.
+ * 这个标志在Linux内核的调度器设计中扮演着重要角色,特别是在处理多核CPU和多处理器系统时.
+ *
+ * 一、背景与原理
+ * 在Linux系统中,CPU的算力(capacity)是调度器进行任务分配和负载均衡时考虑的关键因素之一.不同的CPU可能因为架构、频率、核心数等因素而具有不同的算力。
+ * SD_SHARE_CPUCAPACITY标志的引入,旨在帮助调度器更好地理解和利用这些CPU资源,从而实现更高效的任务调度和负载均衡.
+ *
+ * 二、作用与影响
+ * 资源共享: 当调度域中的CPU设置了SD_SHARE_CPUCAPACITY标志时,调度器会将这些CPU视为一个整体,它们在调度过程中可以共享CPU资源.这意味着调度器在分配任务时,会考虑整个调度域的CPU算力,而不是单个CPU的算力.
+ * 负载均衡: 通过共享CPU资源,SD_SHARE_CPUCAPACITY有助于实现更均衡的负载分布.调度器可以根据整个调度域的负载情况,将任务迁移到算力较空闲的CPU上执行,从而提高系统的整体性能.
+ * 优化调度: 除了负载均衡外,SD_SHARE_CPUCAPACITY还可以帮助调度器进行更优化的调度决策.例如,在选择唤醒任务的CPU时,调度器可以考虑整个调度域的CPU算力分布,从而选择最合适的CPU来执行任务.
+ */
 #define SD_SHARE_CPUCAPACITY	0x0080	/* Domain members share cpu capacity */
 #define SD_SHARE_POWERDOMAIN	0x0100	/* Domain members share power domain */
+/* SD_SHARE_PKG_RESOURCES在Linux中表示调度域中的CPU可以共享高速缓存资源.
+ * 在Linux内核中,调度域(scheduling domain)是用于决定任务如何在CPU之间分配的一个抽象概念.
+ * 这些调度域可以基于不同的参数进行配置,以适应不同的硬件架构和工作负载需求.
+ * SD_SHARE_PKG_RESOURCES是这些参数之一,它指示调度域中的CPU可以共享物理包级别的资源,如高速缓存.
+ * 这种共享允许更高效的资源利用,特别是在多核处理器中,其中不同的核心可能共享相同的缓存层次结构.
+ * 在负载均衡的上下文中,SD_SHARE_PKG_RESOURCES的影响是显著的.当任务放置(task placement)时,系统会尽量选择idle的CPU,以优化性能.
+ * 如果没有设置SD_SHARE_PKG_RESOURCES,系统可能会使用migrate_util方式来达到均衡.这表明,在存在SD_SHARE_PKG_RESOURCES的调度域中,
+ * 负载均衡的策略和实现会有所不同,旨在更好地利用共享资源,提高系统的整体性能和效率
+ */
 #define SD_SHARE_PKG_RESOURCES	0x0200	/* Domain members share cpu pkg resources */
 #define SD_SERIALIZE		0x0400	/* Only a single load balancing instance */
 #define SD_ASYM_PACKING		0x0800  /* Place busy groups earlier in the domain */
+/* Linux调度的SD_PREFER_SIBLING是一个调度标志,用于指示调度器在分配任务时,如果可能的话,更倾向于将任务放置在同一个调度域(sched_domain)内的“兄弟”(sibling)CPU上.
+ * 这里的“兄弟”CPU通常指的是在同一物理处理器或封装(package)内的其他逻辑CPU.
+ * 作用与影响
+ * 减少缓存未命中: 将任务放置在同一个物理处理器内的CPU上,可以减少缓存未命中的次数,因为CPU之间的缓存(如L3缓存)是共享的.这样可以提高数据访问的速度,从而提升系统性能.
+ * 优化任务迁移: 在需要迁移任务时,如果目标CPU与当前CPU在同一个调度域内,且为兄弟CPU,那么迁移的开销通常会更小.这是因为它们之间的物理距离较近,共享的资源也更多.
+ * 提高资源利用率: 通过优先考虑兄弟CPU,可以更好地利用物理处理器内的资源,避免资源在不同物理处理器之间的不均衡分配.
+ */
 #define SD_PREFER_SIBLING	0x1000	/* Prefer to place tasks in a sibling domain */
 #define SD_OVERLAP		0x2000	/* sched_domains of this level overlap */
 #define SD_NUMA			0x4000	/* cross-node balancing */
@@ -1108,10 +1175,21 @@ struct sched_domain {
 	struct sched_domain *parent;	/* top domain must be null terminated */
 	struct sched_domain *child;	/* bottom domain must be null terminated */
 	struct sched_group *groups;	/* the balancing groups of the domain */
+	/* 设置此CPU进行负载均衡的最小间隔时间,在上一次负载均衡到这个时间内都不能再进行负载均衡 */
 	unsigned long min_interval;	/* Minimum balance interval ms */
+	/* 设置此CPU进行负载均衡的最长间隔时间,上一次做了负载均衡经过了这个时间一定要再进行一次 */
 	unsigned long max_interval;	/* Maximum balance interval ms */
+	/* 正常情况下,balance_interval定义了均衡的时间间隔,如果cpu繁忙,那么均衡要时间间隔长一些,
+	 * 即时间间隔定义为busy_factor x balance_interval
+	 */
 	unsigned int busy_factor;	/* less balancing by factor if busy */
+	/* 调度域内的不均衡状态达到了一定的程度之后就开始进行负载均衡的操作.
+	 * imbalance_pct这个成员定义了判定不均衡的门限
+	 */
 	unsigned int imbalance_pct;	/* No balance until over watermark */
+	/* 这个成员应该是和nr_balance_failed配合控制负载均衡过程的迁移力度.
+	 * 当nr_balance_failed大于cache_nice_tries的时候,负载均衡会变得更加激进.
+	 */
 	unsigned int cache_nice_tries;	/* Leave cache hot tasks for # tries */
 	unsigned int busy_idx;
 	unsigned int idle_idx;
@@ -1120,19 +1198,27 @@ struct sched_domain {
 	unsigned int forkexec_idx;
 	unsigned int smt_gain;
 
+	/* 每个cpu都有其对应LLC sched domain,而LLC SD记录对应cpu的idle状态得到该domain中busy cpu的个数 */
 	int nohz_idle;			/* NOHZ IDLE status */
+	/* 调度域标志 */
 	int flags;			/* See SD_* */
+	 /* 该sched domain在整个调度域层级结构中的level */
 	int level;
 
 	/* Runtime fields. */
+	/* 上次进行balance的时间点 */
 	unsigned long last_balance;	/* init to jiffies. units in jiffies */
+	/* 定义了该sched domain均衡的基础时间间隔.last_balance加上这个计算得到的均衡时间间隔就是下一次均衡的时间点 */
 	unsigned int balance_interval;	/* initialise to 1. units in ms. */
+	/* 本sched domain中进行负载均衡失败的次数 */
 	unsigned int nr_balance_failed; /* initialise to 0 */
 
 	/* idle_balance() stats */
+	/* 在该domain上进行newidle balance的最大时间长度 */
 	u64 max_newidle_lb_cost;
-	unsigned long next_decay_max_lb_cost;
 
+	unsigned long next_decay_max_lb_cost;
+	/* 平均扫描成本 */
 	u64 avg_scan_cost;		/* select_idle_sibling */
 
 #ifdef CONFIG_SCHEDSTATS
@@ -1173,8 +1259,14 @@ struct sched_domain {
 		void *private;		/* used during construction */
 		struct rcu_head rcu;	/* used during destruction */
 	};
+
+
+	/* 为了降低锁竞争,Sched domain是per-CPU的,该sched domain中的busy cpu的个数,
+	 * 该sched domain中是否有idle的cpu
+	 */
 	struct sched_domain_shared *shared;
 
+	/* span_weight说明该sched domain中CPU的个数 */
 	unsigned int span_weight;
 	/*
 	 * Span of all CPUs in this domain.
@@ -1182,6 +1274,10 @@ struct sched_domain {
 	 * NOTE: this field is variable length. (Allocated dynamically
 	 * by attaching extra space to the end of the structure,
 	 * depending on how many CPUs the kernel has booted up with)
+	 *
+	 * 此域中所有CPU的跨度.
+	 *
+	 * 注意: 此字段的长度可变. (根据内核启动的CPU数量,通过在结构末端附加额外空间来动态分配)
 	 */
 	unsigned long span[0];
 };
@@ -1212,8 +1308,11 @@ struct sd_data {
 	struct sched_group_capacity **__percpu sgc;
 };
 
+/* 内核中有一个数据结构struct sched_domain_topology_level来描述CPU的层次关系 */
 struct sched_domain_topology_level {
+	/* 函数指针,用于指定某个SDTL层级的cpumask位图 */
 	sched_domain_mask_f mask;
+	/* 函数指针,用于指定某个SDTL层级的标志位 */
 	sched_domain_flags_f sd_flags;
 	int		    flags;
 	int		    numa_level;

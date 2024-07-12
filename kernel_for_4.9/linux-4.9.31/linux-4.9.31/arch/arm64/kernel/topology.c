@@ -54,12 +54,16 @@ static int __init parse_core(struct device_node *core, int cluster_id,
 	int cpu;
 	struct device_node *t;
 
+	/* 这边就是将core的thread1 thread2 ...输入到name中去 */
 	do {
 		snprintf(name, sizeof(name), "thread%d", i);
+		/* 然后在core底下找到thread的device_node */
 		t = of_get_child_by_name(core, name);
 		if (t) {
 			leaf = false;
+			/* 如果找到了,那么得到CPU的id */
 			cpu = get_cpu_for_node(t);
+			/* 设置相应的cpu的cpu_topology结构体 */
 			if (cpu >= 0) {
 				cpu_topology[cpu].cluster_id = cluster_id;
 				cpu_topology[cpu].core_id = core_id;
@@ -75,6 +79,7 @@ static int __init parse_core(struct device_node *core, int cluster_id,
 		i++;
 	} while (t);
 
+	/* 这边也是去设置相应的cpu的cpu_topology结构体 */
 	cpu = get_cpu_for_node(core);
 	if (cpu >= 0) {
 		if (!leaf) {
@@ -107,13 +112,18 @@ static int __init parse_cluster(struct device_node *cluster, int depth)
 	 * First check for child clusters; we currently ignore any
 	 * information about the nesting of clusters and present the
 	 * scheduler with a flat list of them.
+	 *
+	 * 首先检查子集群;我们目前忽略任何关于集群嵌套的信息,并向调度器提供它们的平面列表.
 	 */
 	i = 0;
 	do {
+		/* 这边将cluster1 cluster2 cluster3 ...输入到name里面去 */
 		snprintf(name, sizeof(name), "cluster%d", i);
+		/* 从cluster里面找到cluster1 cluster2 cluster3 子节点 */
 		c = of_get_child_by_name(cluster, name);
 		if (c) {
 			leaf = false;
+			/* 对cluster递归调用parse_cluster */
 			ret = parse_cluster(c, depth + 1);
 			of_node_put(c);
 			if (ret != 0)
@@ -125,11 +135,15 @@ static int __init parse_cluster(struct device_node *cluster, int depth)
 	/* Now check for cores */
 	i = 0;
 	do {
+		/* 这边就是将cluster1的core0、core1、core2 ...输入到name中去 */
 		snprintf(name, sizeof(name), "core%d", i);
+		/* 找到相关的device_node */
 		c = of_get_child_by_name(cluster, name);
 		if (c) {
+			/* 如果找到了,设置has_cores为true */
 			has_cores = true;
 
+			/* 如果depth 等于0,那么报个err吧 */
 			if (depth == 0) {
 				pr_err("%s: cpu-map children should be clusters\n",
 				       c->full_name);
@@ -138,6 +152,7 @@ static int __init parse_cluster(struct device_node *cluster, int depth)
 			}
 
 			if (leaf) {
+				/* 这边是parse_core */
 				ret = parse_core(c, cluster_id, core_id++);
 			} else {
 				pr_err("%s: Non-leaf cluster with core %s\n",
@@ -167,6 +182,7 @@ static int __init parse_dt_topology(void)
 	int ret = 0;
 	int cpu;
 
+	/* 这边去找到/cpus的device_node */
 	cn = of_find_node_by_path("/cpus");
 	if (!cn) {
 		pr_err("No CPU information found in DT\n");
@@ -176,6 +192,34 @@ static int __init parse_dt_topology(void)
 	/*
 	 * When topology is provided cpu-map is essentially a root
 	 * cluster with restricted subnodes.
+	 *
+	 * 当提供拓扑结构时,cpu映射本质上是一个具有受限子节点的根集群.
+	 */
+
+	/* 这边就是去找设备树的/cpus的cpu-map节点
+	 *
+	 * 范例如下:
+	 *
+	 * cpu-map {
+	 *	cluster0 {
+	 *		core0 {
+	 *			cpu = <&cpu0>;
+	 *		};
+	 *		core1 {
+	 *			cpu = <&cpu1>;
+	 *		};
+	 *	};
+	 *
+	 *	cluster1 {
+	 *		core0 {
+	 *			cpu = <&cpu2>;
+	 *		};
+	 *		core1 {
+	 *			cpu = <&cpu3>;
+	 *		};
+	 *	};
+	 * };
+	 *
 	 */
 	map = of_get_child_by_name(cn, "cpu-map");
 	if (!map)
@@ -220,16 +264,21 @@ static void update_siblings_masks(unsigned int cpuid)
 	for_each_possible_cpu(cpu) {
 		cpu_topo = &cpu_topology[cpu];
 
+		/* 如果两个CPU的cluster_id不一样,那么直接continue,找到下一个 */
 		if (cpuid_topo->cluster_id != cpu_topo->cluster_id)
 			continue;
 
+		/* 如果一样,那么设置cpuid 到轮询到的cpu_topo->core_sibling */
 		cpumask_set_cpu(cpuid, &cpu_topo->core_sibling);
+		/* 如果两个cpu不相等的话,那么也把cpu设置到cpuid_topo->core_sibling,也就是说互相设置 */
 		if (cpu != cpuid)
 			cpumask_set_cpu(cpu, &cpuid_topo->core_sibling);
 
+		/* 如果core_id不一样,那么可以continue了 */
 		if (cpuid_topo->core_id != cpu_topo->core_id)
 			continue;
 
+		/* 如果core_id一样,那么设置cpuid到cpu_topo->thread_sibling */
 		cpumask_set_cpu(cpuid, &cpu_topo->thread_sibling);
 		if (cpu != cpuid)
 			cpumask_set_cpu(cpu, &cpuid_topo->thread_sibling);

@@ -1880,6 +1880,9 @@ EXPORT_SYMBOL_GPL(cpu_bit_bitmap);
 const DECLARE_BITMAP(cpu_all_bits, NR_CPUS) = CPU_BITS_ALL;
 EXPORT_SYMBOL(cpu_all_bits);
 
+/* 内核对CPU的管理是通过bitmap来管理的,并且定义了possible、present、online和active这四种状态 */
+
+/* __cpu_possible_mask: 表示系统中有多少个可以运行(现在运行或者将来某个时间点运行)的CPU核心 */
 #ifdef CONFIG_INIT_ALL_POSSIBLE
 struct cpumask __cpu_possible_mask __read_mostly
 	= {CPU_BITS_ALL};
@@ -1888,12 +1891,15 @@ struct cpumask __cpu_possible_mask __read_mostly;
 #endif
 EXPORT_SYMBOL(__cpu_possible_mask);
 
+/* __cpu_online_mask: 表示系统中有多少个正在处于运行状态(online)的CPU核心 */
 struct cpumask __cpu_online_mask __read_mostly;
 EXPORT_SYMBOL(__cpu_online_mask);
 
+/* __cpu_present_mask表示系统中有多少个具备online条件的CPU核心,它们不一定都处于online状态,有的CPU核心可能被热插拔了 */
 struct cpumask __cpu_present_mask __read_mostly;
 EXPORT_SYMBOL(__cpu_present_mask);
 
+/* __cpu_active_mask表示系统中有多少个活跃的CPU核心 */
 struct cpumask __cpu_active_mask __read_mostly;
 EXPORT_SYMBOL(__cpu_active_mask);
 

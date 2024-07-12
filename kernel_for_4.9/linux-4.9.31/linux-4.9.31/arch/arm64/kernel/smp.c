@@ -594,17 +594,24 @@ acpi_parse_gic_cpu_interface(struct acpi_subtable_header *header,
  * Enumerate the possible CPU set from the device tree and build the
  * cpu logical map array containing MPIDR values related to logical
  * cpus. Assumes that cpu_logical_map(0) has already been initialized.
+ *
+ * 从设备树中枚举possible CPU集,并构建包含与逻辑CPU相关的MPIDR值的CPU逻辑映射阵列.
+ * 假设cpu_logical_map(0)已经初始化.
  */
 static void __init of_parse_and_init_cpus(void)
 {
 	struct device_node *dn = NULL;
 
+	/* 去找到cpu type的device_node */
 	while ((dn = of_find_node_by_type(dn, "cpu"))) {
+		/* 这里实际上取该节点的reg属性,当成他的hwid */
 		u64 hwid = of_get_cpu_mpidr(dn);
 
+		/* 如果hwid == INVALID_HWID(ULONG_MAX),那么goto next */
 		if (hwid == INVALID_HWID)
 			goto next;
 
+		/* if (cpu_logical_map(i) == hwid),那么就报错之后 goto next */
 		if (is_mpidr_duplicate(cpu_count, hwid)) {
 			pr_err("%s: duplicate cpu reg properties in the DT\n",
 				dn->full_name);
@@ -616,15 +623,25 @@ static void __init of_parse_and_init_cpus(void)
 		 * must be assigned logical id 0. Record it so that
 		 * the logical map built from DT is validated and can
 		 * be used.
+		 *
+		 * 编号方案要求启动CPU必须分配logical id 0.
+		 * 记录它,以便验证并使用从DT构建的逻辑映射.
 		 */
+
+		/* 如果hwid == cpu_logical_map(0) */
 		if (hwid == cpu_logical_map(0)) {
+			/* 因为启动CPU必须分配logical id 0,所以说如果bootcpu_valid已经被赋值了
+			 * 那么就duplicate了,那么pr_err之后 goto next
+			 */
 			if (bootcpu_valid) {
 				pr_err("%s: duplicate boot cpu reg property in DT\n",
 					dn->full_name);
 				goto next;
 			}
 
+			/* 设置bootcpu_valid等于true */
 			bootcpu_valid = true;
+			/* 把它所在的node id 设置到cpu_to_node_map以及per_cpu(numa_node, cpu)上 */
 			early_map_cpu_to_node(0, of_node_to_nid(dn));
 
 			/*
@@ -632,18 +649,24 @@ static void __init of_parse_and_init_cpus(void)
 			 * initialized and the boot cpu doesn't need
 			 * the enable-method so continue without
 			 * incrementing cpu.
+			 *
+			 * cpu_logical_map已经初始化,boot cpu不需要enable-method,所以不增长cpu的continue
 			 */
 			continue;
 		}
 
+		/* 如果cpu_count >= NR_CPUS,那么goto next */
 		if (cpu_count >= NR_CPUS)
 			goto next;
 
 		pr_debug("cpu logical map 0x%llx\n", hwid);
+		/* 把它设置到__cpu_logical_map数组里面去 */
 		cpu_logical_map(cpu_count) = hwid;
 
+		/* 把它所在的node id 设置到cpu_to_node_map以及per_cpu(numa_node, cpu)上 */
 		early_map_cpu_to_node(cpu_count, of_node_to_nid(dn));
 next:
+		/* cpu_count++ */
 		cpu_count++;
 	}
 }
@@ -652,11 +675,15 @@ next:
  * Enumerate the possible CPU set from the device tree or ACPI and build the
  * cpu logical map array containing MPIDR values related to logical
  * cpus. Assumes that cpu_logical_map(0) has already been initialized.
+ *
+ * 从设备树或ACPI中枚举possible CPU集,并构建包含与逻辑CPU相关的MPIDR值的CPU逻辑映射阵列.
+ * 假设cpu_logical_map(0)已经初始化.
  */
 void __init smp_init_cpus(void)
 {
 	int i;
 
+	/* 如果acpi_disabled,那么就走设备树的道路 */
 	if (acpi_disabled)
 		of_parse_and_init_cpus();
 	else
@@ -664,14 +691,18 @@ void __init smp_init_cpus(void)
 		 * do a walk of MADT to determine how many CPUs
 		 * we have including disabled CPUs, and get information
 		 * we need for SMP init
+		 *
+		 * 轮询MADT,以确定我们有多少CPU(包括禁用的CPU),并获得SMP初始化所需的信息.
 		 */
 		acpi_table_parse_madt(ACPI_MADT_TYPE_GENERIC_INTERRUPT,
 				      acpi_parse_gic_cpu_interface, 0);
 
+	/* 如果cpu_count 大于 nr_cpu_ids,那么报一行警告 */
 	if (cpu_count > nr_cpu_ids)
 		pr_warn("Number of cores (%d) exceeds configured maximum of %d - clipping\n",
 			cpu_count, nr_cpu_ids);
 
+	/* 如果bootcpu_valid等于false,那么报err之后return */
 	if (!bootcpu_valid) {
 		pr_err("missing boot CPU MPIDR, not enabling secondaries\n");
 		return;
@@ -683,9 +714,17 @@ void __init smp_init_cpus(void)
 	 * and ACPI MADT entries) can be retrieved by matching the cpu hwid
 	 * with entries in cpu_logical_map while initializing the cpus.
 	 * If the cpu set-up fails, invalidate the cpu_logical_map entry.
+	 *
+	 * 在启用cpu之前,我们需要设置cpu_logical_map entries 以便在初始化cpu时通过将cpu hwid与cpu_logial_map中的条目匹配来检索cpu处理器描述条目
+	 * (DT cpu节点和ACPI MADT条目).
+	 * 如果cpu设置失败,请使cpu_logical_map条目无效.
 	 */
+
+	/* 从1到nr_cpu_ids，进行初始化 */
 	for (i = 1; i < nr_cpu_ids; i++) {
+		/* 如果不等于INVALID_HWID */
 		if (cpu_logical_map(i) != INVALID_HWID) {
+			/* 这里会初始化该CPU,并把它设置到__cpu_possible_mask里,如果NG了,那么把相关的logical map设置为INVALID_HWID */
 			if (smp_cpu_setup(i))
 				cpu_logical_map(i) = INVALID_HWID;
 		}

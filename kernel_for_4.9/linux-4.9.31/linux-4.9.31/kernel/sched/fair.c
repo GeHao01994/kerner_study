@@ -7429,10 +7429,14 @@ void update_group_capacity(struct sched_domain *sd, int cpu)
 	unsigned long capacity;
 	unsigned long interval;
 
+	/* 这边拿到sched_domain的均衡的基础时间间隔 */
 	interval = msecs_to_jiffies(sd->balance_interval);
+	/* 看interval取1 - max_load_balance_interval范围内的数 */
 	interval = clamp(interval, 1UL, max_load_balance_interval);
+	/* 设置sched_group_capacity的next_update为jiffies + interval */
 	sdg->sgc->next_update = jiffies + interval;
 
+	/* 如果没有child,那么直接更新cpu的capacity了,然后return */
 	if (!child) {
 		update_cpu_capacity(sd, cpu);
 		return;
@@ -7475,6 +7479,7 @@ void update_group_capacity(struct sched_domain *sd, int cpu)
 		 * span the current group.
 		 */
 
+		/* 否则就加上sched_domain下面所有的capacity */
 		group = child->groups;
 		do {
 			capacity += group->sgc->capacity;
@@ -7482,6 +7487,7 @@ void update_group_capacity(struct sched_domain *sd, int cpu)
 		} while (group != child->groups);
 	}
 
+	/* 把capacity赋值给sdg->sgc->capacity */
 	sdg->sgc->capacity = capacity;
 }
 
