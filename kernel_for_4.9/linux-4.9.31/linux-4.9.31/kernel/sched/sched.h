@@ -909,15 +909,20 @@ DECLARE_PER_CPU(struct sched_domain *, sd_numa);
 DECLARE_PER_CPU(struct sched_domain *, sd_asym);
 
 struct sched_group_capacity {
+	/* 引用计算,可能多个sd共享一个sg和sgc */
 	atomic_t ref;
 	/*
 	 * CPU capacity of this group, SCHED_CAPACITY_SCALE being max capacity
 	 * for a single CPU.
 	 */
+	/* 该sg中可用于cfs任务的总算力(约为此sg中各个cpu的算力之和) */
 	unsigned int capacity;
+	/* 下一次更新算力的时间点 */
 	unsigned long next_update;
+	/* 该sg中是否有由于affinity原因产生不均衡的问题 */
 	int imbalance; /* XXX unrelated to capacity but shared group state */
 
+	/* 该sg包含的cpu */
 	unsigned long cpumask[0]; /* iteration mask */
 };
 

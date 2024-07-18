@@ -1118,6 +1118,14 @@ extern void wake_up_q(struct wake_q_head *head);
  * 负载均衡的策略和实现会有所不同,旨在更好地利用共享资源,提高系统的整体性能和效率
  */
 #define SD_SHARE_PKG_RESOURCES	0x0200	/* Domain members share cpu pkg resources */
+/* SD_SERIALIZE是sched_domain结构体中一个标志位(flag),它用于控制对该调度域内CPU的访问方式.
+ * 在Linux内核的调度器上下文中,SD_SERIALIZE标志的主要作用是表明在访问或修改该调度域内的某些资源或状态时,需要采取额外的序列化(或称为同步)措施来避免竞争条件.
+ * 具体来说,当SD_SERIALIZE被设置时,调度器在访问或修改该调度域相关的资源(如负载信息、运行队列等)时,会采取某种形式的锁或其他同步机制来确保数据的一致性和完整性.
+ * 这是因为在多处理器系统中,多个处理器可能同时尝试访问或修改同一调度域内的数据,如果没有适当的同步机制,就可能导致数据竞争和不一致.
+ * 然而,值得注意的是,SD_SERIALIZE 的使用并不是无条件的.它通常只在特定情况下被设置,比如在某些特定类型的调度域(如跨NUMA节点的调度域)中,
+ * 或者当调度器认为需要更强的同步保证时.
+ * 此外,SD_SERIALIZE 的使用也会带来性能开销,因为同步操作(如加锁和解锁)会消耗处理器资源.
+ */
 #define SD_SERIALIZE		0x0400	/* Only a single load balancing instance */
 #define SD_ASYM_PACKING		0x0800  /* Place busy groups earlier in the domain */
 /* Linux调度的SD_PREFER_SIBLING是一个调度标志,用于指示调度器在分配任务时,如果可能的话,更倾向于将任务放置在同一个调度域(sched_domain)内的“兄弟”(sibling)CPU上.
@@ -1180,7 +1188,7 @@ struct sched_domain {
 	/* 设置此CPU进行负载均衡的最长间隔时间,上一次做了负载均衡经过了这个时间一定要再进行一次 */
 	unsigned long max_interval;	/* Maximum balance interval ms */
 	/* 正常情况下,balance_interval定义了均衡的时间间隔,如果cpu繁忙,那么均衡要时间间隔长一些,
-	 * 即时间间隔定义为busy_factor x balance_interval
+	 * 即时间间隔定义为busy_factor * balance_interval
 	 */
 	unsigned int busy_factor;	/* less balancing by factor if busy */
 	/* 调度域内的不均衡状态达到了一定的程度之后就开始进行负载均衡的操作.
