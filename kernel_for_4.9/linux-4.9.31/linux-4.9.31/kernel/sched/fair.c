@@ -8059,7 +8059,7 @@ static inline void update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sd
 		/*
 		 * 更新算力没有必要更新的太频繁,这里做了两个限制:
 		 * 1.只有local group才进行算力更新,
-		 * 2.对于new idle类型的balance通过时间间隔来减少频繁的更新算力,这个时间间隔来自balance_interval:
+		 * 2.对于newidle类型的balance通过时间间隔来减少频繁的更新算力,这个时间间隔来自balance_interval:
 		 * jiffies + msecs_to_jiffies(sd->balance_interval).
 		 * 3.其它类型的idle可以更新算力
 		 */
@@ -8505,7 +8505,7 @@ static struct sched_group *find_busiest_group(struct lb_env *env)
 		 * In the CPU_NEWLY_IDLE, CPU_NOT_IDLE cases, use
 		 * imbalance_pct to be conservative.
 		 */
-		/*如果本地CPU不是idle状态,那么比较本地调度组的平均负载和最繁忙调度组的平均负载,这里使用了imbalance_pct系数,它在sd_init函数中初始化,默认为125.
+		/* 如果本地CPU不是idle状态,那么比较本地调度组的平均负载和最繁忙调度组的平均负载,这里使用了imbalance_pct系数,它在sd_init函数中初始化,默认为125.
 		 * 如果本地调度组的平均负载大于等于最繁忙组的平均负载,说明调度域不忙,不需要做负载均衡
 		 */
 		if (100 * busiest->avg_load <=
@@ -8714,7 +8714,7 @@ static int should_we_balance(struct lb_env *env)
 	 * is eligible for doing load balancing at this and above domains.
 	 */
 	/* 如果当前CPU是空闲CPU或者组里第一个CPU,那么当前CPU可以做负载均衡,即只有当前CPU是该调度域的第一个CPU或者当前CPU是idle CPU才可以做负载均衡.
-	 * 举个例子,CPU0和CPU1同属于第一个调度域,加上CPU0和CPU1都不是idle cpu,CPU1运行load_balance(),所以不能做负载均衡,
+	 * 举个例子,CPU0和CPU1同属于第一个调度域,假设CPU0和CPU1都不是idle cpu,CPU1运行load_balance(),所以不能做负载均衡,
 	 * 只有CPU0运行load_balance时才可以做负载均衡,道理比较简单,就是默认约定优先由调度域中的第一个CPU做负载均衡.
 	 * 假设CPU0不是空闲CPU,CPU1处于idle状态,那么CPU才可以做负载均衡
 	 */
@@ -8783,7 +8783,7 @@ static int load_balance(int this_cpu, struct rq *this_rq,
 	 */
 	cpumask_copy(cpus, cpu_active_mask);
 
-	/* 对应的idle type 的 balance计算加1,在cat /proc/schedstat 中打印 */
+	/* 对应的idle type 的 balance计数加1,在cat /proc/schedstat 中打印 */
 	schedstat_inc(sd->lb_count[idle]);
 
 redo:
@@ -9509,13 +9509,13 @@ static void rebalance_domains(struct rq *rq, enum cpu_idle_type idle)
 		 * Decay the newidle max times here because this is a regular
 		 * visit to all the domains. Decay ~1% per second.
 		 *
-		 * 在此处衰减新的空闲最大时间,因为这是对所有域的定期访问.每秒衰减约1%.
+		 * 在此处衰减newidle最大时间,因为这是对所有域的定期访问.每秒衰减约1%.
 		 *
 		 * next_decay_max_lb_cost: max_newidle_lb_cost会记录最近在该sched domain上进行newidle balance的最大时间长度,
 		 * 这个max cost不是一成不变的,它有一个衰减过程,每秒衰减1%,这个成员就是用来控制衰减的.
 		 *
 		 * max_newidle_lb_cost: 在该domain上进行newidle balance的最大时间长度(即newidle balance的开销).
-		 * 每次在该domain上进行new idle balance的时候都会记录时长,然后把最大值记录在这个成员中.
+		 * 每次在该domain上进行newidle balance的时候都会记录时长,然后把最大值记录在这个成员中.
 		 * 这个值会随着时间衰减,防止一次极值会造成永久的影响.
 		 */
 
