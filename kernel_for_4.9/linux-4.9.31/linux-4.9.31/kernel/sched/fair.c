@@ -124,6 +124,8 @@ unsigned int sysctl_sched_cfs_bandwidth_slice = 5000UL;
 /*
  * The margin used when comparing utilization with CPU capacity:
  * util * 1024 < capacity * margin
+ *
+ * 将利用率与CPU容量进行比较时使用的余量: util * 1024 < capacity * margin
  */
 unsigned int capacity_margin = 1280; /* ~20% */
 
@@ -5616,18 +5618,43 @@ static long effective_load(struct task_group *tg, int cpu, long wl, long wg)
 
 #endif
 
+/* 每次waker唤醒wakee的时候都会调用record_wakee来更新上面的成员 */
+/* 每隔一秒对wakee_flips进行衰减.
+ * 如果一个线程能够经常的唤醒不同的其他线程,那么该线程的wakee_flips会保持在一个较高的值.
+ * 相反,如果仅仅是偶尔唤醒一次其他线程,和某个固定的线程有唤醒关系,那么这里的wakee_flips应该会趋向0B、如果上次唤醒的不是p,
+ * 那么要切换wakee,并累加wakee翻转次数
+ * Waker唤醒wakee的场景中,有两种placement思路:
+ * 一种是聚合的思路,即让waker和wakee尽量的close,从而提高cache hit.
+ * 另外一种思考是分散,即让load尽量平均分配在多个cpu上.不同的唤醒模型使用不同的放置策略.
+ * 我们来看看下面两种简单的唤醒模型:(1) 在1：N模型中,一个server会不断的唤醒多个不同的client
+ * (2) 1：1模型,线程A和线程B不断的唤醒对方在1:N模型中,如果N是一个较大的数值,那么让waker和wakee尽量的close会导致负荷的极度不平均,
+ * 这会waker所在的sched domain会承担太多的task,从而引起性能下降.
+ * 在1：1模型中,让waker和wakee尽量的close不存在这样的问题,同时还能提高性能.
+ * 当然,实际的程序中,唤醒关系可能没有那么简单,一个wakee可能是另外一个关系中的waker,交互可能是M：N的形式.
+ * 考虑这样一个场景: waker把wakee拉近,而wakee自身的wakeeflips比较大,那么更多的线程也会拉近waker所在的sched domain,从而进一步加剧CPU资源的竞争.
+ * 因此waker和wakee的wakee flips的数值都不能太大,太大的时候应该禁止wake affine.
+ * 内核中通过wake_wide来判断是否使能wake affine.
+ */
 static void record_wakee(struct task_struct *p)
 {
 	/*
 	 * Only decay a single time; tasks that have less then 1 wakeup per
 	 * jiffy will not have built up many flips.
+	 *
+	 * 只衰减一次;
+	 * 每jiffy唤醒次数少于1次的任务不会产生很多flips
 	 */
+	/* 如果jiffies比current->wakee_flip_decay_ts + HZ大,那么衰减current->wakee_flips */
 	if (time_after(jiffies, current->wakee_flip_decay_ts + HZ)) {
+		/* current->wakee_flips / 2 */
 		current->wakee_flips >>= 1;
+		/* 设置上次进行酸碱的时间点为本jiffies */
 		current->wakee_flip_decay_ts = jiffies;
 	}
 
+	/* 如果current->last_wakee(也就是说上次唤醒的线程不是本进程) */
 	if (current->last_wakee != p) {
+		/* 设置上次唤醒的进程为本进程,让current->wakee_flips++ */
 		current->last_wakee = p;
 		current->wakee_flips++;
 	}
@@ -5649,15 +5676,40 @@ static void record_wakee(struct task_struct *p)
  * Waker/wakee being client/server, worker/dispatcher, interrupt source or
  * whatever is irrelevant, spread criteria is apparent partner count exceeds
  * socket size.
+ *
+ * 通过切换频率启发式方法检测M:N唤醒者/被唤醒者关系.
+ *
+ * 如果一个唤醒者唤醒多个任务,那么它应该以大约是其任一被唤醒者N倍高的频率唤醒与上一次不同的任务.
+ *
+ * 为了确定我们是应该让负载分散还是合并到共享缓存中,我们会寻找一个伙伴中的llc_size的“翻转”频率的最小值,以及另一个伙伴中比该值高lls_size倍的频率.
+ *
+ * 如果这两个条件都满足,我们可以相对确定这种关系是非一夫一妻制的,即伙伴数量超过了插槽（socket）数量.
+ *
+ * 唤醒者/被唤醒者是客户端/服务器、工作者/调度器、中断源或任何其他角色都无关紧要,分散的标准是明显的伙伴数量超过了插槽数量
  */
 static int wake_wide(struct task_struct *p)
 {
+
+	/* 这里的场景是current task唤醒任务p的场景,master是current唤醒不同线程的次数,slave是被唤醒的任务p唤醒不同线程的次数. */
 	unsigned int master = current->wakee_flips;
 	unsigned int slave = p->wakee_flips;
+	/* Wake affine场景下任务放置要走快速路径,即在LLC上选择空闲的CPU.
+	 * sd_llc_size是LLC domain上CPU的个数.
+	 * Wake affine本质上是把wakee线程们拉到waker所在的LLC domain,如果超过了LLC domain的cpu个数,那么必然有任务需要等待,这也就失去了wake affine提升性能的初衷.
+	 * 对于手机平台,llc domain是MC domain.
+	 */
 	int factor = this_cpu_read(sd_llc_size);
 
+	/* 一般而言,执行更多唤醒动作(并且唤醒不同task)的任务是master,因此这里根据翻转次数来交换master和slave,确保master的翻转次数大于slave */
 	if (master < slave)
 		swap(master, slave);
+	/* Slave和master的wakee_flips如果比较小,那么启动wake affine,否则disable wake affine,走正常选核逻辑.
+	 * 这里的or逻辑是存疑的,因为master和slave其一的wakee_flips比较小就会wake affine,这会使得任务太容易在LLC domain堆积了.
+	 * 在1：N模型中(例如手机转屏的时候,一个线程会唤醒非常非常多的线程来处理configChange消息),master的wakee_flips巨大无比,slave的wakee_flips非常小,如果仍然wake affine是不合理的.
+	 *
+	 * 如果判断需要进行wake affine,那么我们需要在waking cpu和该任务的prev cpu中选择一个CPU,后续在该CPU的LLC domain上进行wakeaffine.
+	 * 选择waking cpu还是prev cpu的逻辑是在wake_affine中实现
+	 */
 	if (slave < factor || master < slave * factor)
 		return 0;
 	return 1;
@@ -5675,23 +5727,35 @@ static int wake_affine(struct sched_domain *sd, struct task_struct *p,
 
 	idx	  = sd->wake_idx;
 	this_cpu  = smp_processor_id();
+	/* 算出prev_cpu的cfs_rq->runnable_load_avg; */
 	load	  = source_load(prev_cpu, idx);
+	/* 算出this_cpu的cfs_rq->runnable_load_avg; */
 	this_load = target_load(this_cpu, idx);
 
 	/*
 	 * If sync wakeup then subtract the (maximum possible)
 	 * effect of the currently running task from the load
 	 * of the current CPU:
+	 *
+	 * 如果同步唤醒,则从当前CPU的负载中减去当前运行任务的(最大可能)影响:
 	 */
+
+	/* 如果是同步唤醒 */
 	if (sync) {
+		/* 拿到当前进程的task_group */
 		tg = task_group(current);
+		/* 拿到当前进程的负载贡献值 */
 		weight = current->se.avg.load_avg;
 
+		/* this_load - weight */
 		this_load += effective_load(tg, this_cpu, -weight, -weight);
+		/* load - weight */
 		load += effective_load(tg, prev_cpu, 0, -weight);
 	}
 
+	/* 拿到要唤醒进程的task_group */
 	tg = task_group(p);
+	/* 拿到要唤醒进程的负载贡献值 */
 	weight = p->se.avg.load_avg;
 
 	/*
@@ -5702,30 +5766,49 @@ static int wake_affine(struct sched_domain *sd, struct task_struct *p,
 	 *
 	 * Otherwise check if either cpus are near enough in load to allow this
 	 * task to be woken on this_cpu.
+	 *
+	 * 在低负载情况下,如果prev_cpu(前一个CPU)和this_cpu(当前CPU)的负载由于该同步操作降至0处于空闲状态,那么总会存在负载不平衡的情况.
+	 * 然而,在这种情况下,实际上并没有太多可以做的,所以这也算是一种好的状态.
+	 *
+	 * 否则,检查这两个CPU的负载是否相近到足以允许该任务在当前CPU(this_cpu)上被唤醒.
+	 *
+	 * 这段描述涉及到Linux调度器(scheduler)在处理任务迁移(或唤醒)时的一个场景,特别是在考虑CPU负载和空闲状态时.
+	 * Linux调度器负责决定哪个任务应该在哪个CPU上运行,以优化系统性能和响应能力.
+	 * 在这种情况下,如果两个CPU都相对空闲,那么即使存在轻微的负载不平衡,调度器也可能不会进行任务迁移,因为这可能会引入不必要的开销.
+	 * 然而,如果两个CPU的负载相近,那么调度器可能会考虑在当前CPU上唤醒任务,以减少跨CPU的迁移开销.
 	 */
+
+	/* this_eff_load = 100 * capacity_of(prev_cpu) */
 	this_eff_load = 100;
 	this_eff_load *= capacity_of(prev_cpu);
 
+	/* prev_eff_load =(100 + (sd->imbalance_pct - 100) / 2 ) * capacity_of(this_cpu) */
 	prev_eff_load = 100 + (sd->imbalance_pct - 100) / 2;
 	prev_eff_load *= capacity_of(this_cpu);
 
+	/* 如果this_load > 0,那说明还有任务 */
 	if (this_load > 0) {
+		/* 那么this_eff_load = this_eff_load *(this_load + effective_load(tg, this_cpu, weight, weight));
+		 * 这里应该说的是p把current从当前CPU上挤下去后,CPU上CFS任务的总负载 */
 		this_eff_load *= this_load +
 			effective_load(tg, this_cpu, weight, weight);
-
+		/* 这里原封不动？ */
 		prev_eff_load *= load + effective_load(tg, prev_cpu, 0, weight);
 	}
 
+	/* balanced = this_eff_load和prev_eff_load大小比 */
 	balanced = this_eff_load <= prev_eff_load;
 
 	schedstat_inc(p->se.statistics.nr_wakeups_affine_attempts);
 
+	/* 如果this_eff_load > prev_eff_load,那么等于0 */
 	if (!balanced)
 		return 0;
 
 	schedstat_inc(sd->ttwu_move_affine);
 	schedstat_inc(p->se.statistics.nr_wakeups_affine);
 
+	/* 如果this_eff_load <= prev_eff_load返回1 */
 	return 1;
 }
 
@@ -5742,46 +5825,58 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p,
 	int load_idx = sd->forkexec_idx;
 	int imbalance = 100 + (sd->imbalance_pct-100)/2;
 
+	/*根据sd_flag数值,设定load_idx数值(只有被wakeup的进程才会设置) */
 	if (sd_flag & SD_BALANCE_WAKE)
 		load_idx = sd->wake_idx;
 
+	/* 开始对sd内的所有sg遍历 */
 	do {
 		unsigned long load, avg_load;
 		int local_group;
 		int i;
 
 		/* Skip over this group if it has no CPUs allowed */
+		/* sg内的cpu与进程的cpu亲和数没有交集,直接进行下次遍历 */
 		if (!cpumask_intersects(sched_group_cpus(group),
 					tsk_cpus_allowed(p)))
 			continue;
 
+		/* 由于sd是最底层MC SDTL,所以cpumask_weight(sched_group_cpus(group))=1
+		 * local_group目的是确定this_cpu是否在本次遍历的group中
+		 */
 		local_group = cpumask_test_cpu(this_cpu,
 					       sched_group_cpus(group));
 
-		/* Tally up the load of all CPUs in the group */
+		/* Tally up the load of all CPUs in the group
+		 * 统计组中所有CPU的负载
+		 */
 		avg_load = 0;
 
+		/* 在这个group计算累加负载 */
 		for_each_cpu(i, sched_group_cpus(group)) {
 			/* Bias balancing toward cpus of our domain */
 			if (local_group)
 				load = source_load(i, load_idx);
 			else
 				load = target_load(i, load_idx);
-
+			/* 累加负载,后面会归一化为相对负载 */
 			avg_load += load;
 		}
 
 		/* Adjust by relative CPU capacity of the group */
 		avg_load = (avg_load * SCHED_CAPACITY_SCALE) / group->sgc->capacity;
 
+		/* 根据每次遍历的local_group的数值,来update相应的一些决策变量 */
 		if (local_group) {
 			this_load = avg_load;
+		/* 获取最小load的group */
 		} else if (avg_load < min_load) {
 			min_load = avg_load;
 			idlest = group;
 		}
 	} while (group = group->next, group != sd->groups);
 
+	/* 如果idlest == NULL 或者说100 * this_load < imbalance * min_load */
 	if (!idlest || 100*this_load < imbalance*min_load)
 		return NULL;
 	return idlest;
@@ -5801,14 +5896,18 @@ find_idlest_cpu(struct sched_group *group, struct task_struct *p, int this_cpu)
 	int i;
 
 	/* Check if we have any choice: */
+	/* 如果group->group_weight == 1,说明只有这个CPU,那么直接返回就好了 */
 	if (group->group_weight == 1)
 		return cpumask_first(sched_group_cpus(group));
 
 	/* Traverse only the allowed CPUs */
+	/* 对group中的CPU和该task allow的CPU进行遍历 */
 	for_each_cpu_and(i, sched_group_cpus(group), tsk_cpus_allowed(p)) {
+		/* 如果该CPU处于idle状态 */
 		if (idle_cpu(i)) {
 			struct rq *rq = cpu_rq(i);
 			struct cpuidle_state *idle = idle_get_state(rq);
+			/* cpu处于idle并且退出时延最小,那么cpu肯定是最浅idle状态的cpu了,idle状态越深,退出时延越大 */
 			if (idle && idle->exit_latency < min_exit_latency) {
 				/*
 				 * We give priority to a CPU whose idle state
@@ -5818,6 +5917,7 @@ find_idlest_cpu(struct sched_group *group, struct task_struct *p, int this_cpu)
 				min_exit_latency = idle->exit_latency;
 				latest_idle_timestamp = rq->idle_stamp;
 				shallowest_idle_cpu = i;
+			/* 如果退出时延是最小退出时延并且此cpu之前进入过idle状态.那么挑选刚刚进入idle的cpu最为idle状态最浅的cpu.注释很清楚 */
 			} else if ((!idle || idle->exit_latency == min_exit_latency) &&
 				   rq->idle_stamp > latest_idle_timestamp) {
 				/*
@@ -5828,6 +5928,7 @@ find_idlest_cpu(struct sched_group *group, struct task_struct *p, int this_cpu)
 				latest_idle_timestamp = rq->idle_stamp;
 				shallowest_idle_cpu = i;
 			}
+		 /* 如果没有cpu处于idle,那么选择load最轻的cpu作为返回值 */
 		} else if (shallowest_idle_cpu == -1) {
 			load = weighted_cpuload(i);
 			if (load < min_load || (load == min_load && i == this_cpu)) {
@@ -5837,6 +5938,7 @@ find_idlest_cpu(struct sched_group *group, struct task_struct *p, int this_cpu)
 		}
 	}
 
+	/* 根据系统是否有idle cpu来决策是选择最浅idle状态的cpu还是选择最轻负载的cpu */
 	return shallowest_idle_cpu != -1 ? shallowest_idle_cpu : least_loaded_cpu;
 }
 
@@ -6047,24 +6149,41 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, int t
 /*
  * Try and locate an idle core/thread in the LLC cache domain.
  */
+
+/* select_idle_sibling函数优先选择idle CPU,如果没找到idle CPU,那么只能选择prev CPU或wakeup CPU.
+ * 参数target指prev CPU或wakeup CPU中的一个.
+ */
 static int select_idle_sibling(struct task_struct *p, int prev, int target)
 {
 	struct sched_domain *sd;
 	int i;
 
+	/* 如果target是idle cpu,那么直接返回target */
 	if (idle_cpu(target))
 		return target;
 
 	/*
 	 * If the previous cpu is cache affine and idle, don't be stupid.
 	 */
+	/* cpus_share_cache函数判断两个CPU是否具有cache亲缘性.
+	 * 若它们同属于一个SMT或MC调度域,则共享L1 cache或L2 cache,这是通过Per-CPU变量sd_llc_id来判断的,sd_llc_id变量在update_top_cache_domain函数中赋值.
+	 * update_top_cache_domain函数会从下而上遍历和查找第一个包含SD_SHARE_PKG_RESOURCES标志位的调度域,
+	 * 并把调度域中第一个CPU ID赋值给sd_llc_id变量.
+	 * 通常SMT或MC调度域的CPU会设置SD_SHARE_PKG_RESOURCES标志位.
+	 * cpu_share_cache函数判断两个CPU是否在同一个包含SD_SHARE_PKG_RESOURCES标志位的调度域中,从而知道他们是否具有cache亲缘性.
+	 */
+
+	/* 如果prev和target不相等,并且他们是共享cache,并且prev是idle cpu,那么就选择prev */
 	if (prev != target && cpus_share_cache(prev, target) && idle_cpu(prev))
 		return prev;
 
+	/* 拿到指向第一个包含SD_SHARE_PKG_RESOURCES标志位的调度域.
+	 * 以4核CPU为例,包含MC和DIE的SDTL层级,那么sd_llc指向CPU对应的MC调度域 */
 	sd = rcu_dereference(per_cpu(sd_llc, target));
 	if (!sd)
 		return target;
 
+	/* CONFIG_SCHED_SMT未定义为空函数 */
 	i = select_idle_core(p, sd, target);
 	if ((unsigned)i < nr_cpumask_bits)
 		return i;
@@ -6137,18 +6256,31 @@ static inline int task_util(struct task_struct *p)
  *
  * In that case WAKE_AFFINE doesn't make sense and we'll let
  * BALANCE_WAKE sort things out.
+ *
+ * 如果task @p不适合唤醒的CPU @cpu或前一个CPU@prev_CPU的容量,请禁用WAKE_AFFINE.
+ *
+ * 在这种情况下,WAKE_AFFINE没有意义,我们会让BALANCE_WAKE来解决问题.
  */
 static int wake_cap(struct task_struct *p, int cpu, int prev_cpu)
 {
 	long min_cap, max_cap;
 
+	/* 拿到prev_cpu和本cpu最小的capacity */
 	min_cap = min(capacity_orig_of(prev_cpu), capacity_orig_of(cpu));
+	/* 获得该cpu rd的最大cpu的capacity */
 	max_cap = cpu_rq(cpu)->rd->max_cpu_capacity;
 
-	/* Minimum capacity is close to max, no need to abort wake_affine */
+	/* Minimum capacity is close to max, no need to abort wake_affine
+	 * 最小容量接近最大,无需中止wake_affiine
+	 */
+
+	/* 如果max_cap - min_cap < max_cap >> 3,也就是不超过max_cap - min_cap < max_cap /8
+	 * 大小核能力悬殊不超过12.5%
+	 */
 	if (max_cap - min_cap < max_cap >> 3)
 		return 0;
 
+	/* min_cap * 1024 < task_util(p) * 1280 */
 	return min_cap * 1024 < task_util(p) * capacity_margin;
 }
 
@@ -6163,24 +6295,63 @@ static int wake_cap(struct task_struct *p, int cpu, int prev_cpu)
  * Returns the target cpu number.
  *
  * preempt must be disabled.
+ *
+ * select_task_rq_fair: 在设置了"sd_flag"标志的域中为唤醒任务选择目标运行队列.
+ * 在实践中,这是SD_BALANCE_WAKE、SD_BALANCE_FORK或SD_BALANCE _EXEC.
+ *
+ * 通过选择最空闲组中最空闲的cpu来平衡负载,或者在某些情况下,如果域设置了SD_WAKE_AFFINE,则选择空闲的兄弟cpu.
+ *
+ * 返回目标cpu编号. 必须禁用抢占
+ */
+
+/* 参数p表示要唤醒的进程,prev_cpu指上一次运行该进程的CPU,sd_flag为SD_BALANCE_WAKE,
+ * wake_flags为0.
  */
 static int
 select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_flags)
 {
 	struct sched_domain *tmp, *affine_sd = NULL, *sd = NULL;
+	/* 拿到本地CPU */
 	int cpu = smp_processor_id();
 	int new_cpu = prev_cpu;
 	int want_affine = 0;
+	/* sync为0表示不需要同步
+	 *
+	 * Wakeup有两种,一种是sync wakeup,另外一种是non-sync wakeup.
+	 *
+	 * 所谓sync wakeup就是waker在唤醒wakee的时候就已经知道自己很快就进入sleep 状态,而在调用try_to_wake_up的时候最好不要进行抢占,
+	 * 因为waker很快就主动发起调度了.
+	 * 此外,一般而言,waker和wakee会有一定的亲和性(例如它们通过share memory进行通信),
+	 * 在SMP场景下,waker和wakee调度在一个CPU上执行的时候往往可以获取较佳的性能.
+	 * 而如果在try_to_wake_up的时候就进行调度,这时候wakee往往会调度到系统中其他空闲的CPU上去.
+	 * 这时候,通过sync wakeup,我们往往可以避免不必要的CPU bouncing.
+	 * 对于non-sync wakeup而言,waker和wakee没有上面描述的同步关系,waker在唤醒wakee之后,它们之间是独立运作,因此在唤醒的时候就可以尝试去触发一次调度.
+	 *
+	 * 当然,也不是说sync wakeup就一定不调度,假设waker在CPU A上唤醒wakee,而根据wakee进程的cpus_allowed成员发现它根本不能在CPU A上调度执行,
+	 * 那么管他sync不sync,这时候都需要去尝试调度(调用reschedule_idle函数),反正waker和wakee命中注定是天各一方(在不同的CPU上执行).
+	 */
 	int sync = wake_flags & WF_SYNC;
 
+	/* 如果sd_flag带了SD_BALANCE_WAKE
+	 * want_affine表示wake up CPU是进程允许运行的CPU,有机会用wake up CPU来唤醒以及运行这个进程.
+	 */
 	if (sd_flag & SD_BALANCE_WAKE) {
 		record_wakee(p);
+		/* 如果wake_wide返回0,
+		 * 在异构的cpu当中,如果大核能力悬殊过大,放在能力更大的cpu上或许可以获得更好的性能,所以,又需要判断能力是否有悬殊.
+		 * 注意这里的亲和性会在当前cpu与task原来所在的cpu之间进行选择.
+		 * 然后看看当前CPU有没有在p的cpus_list里面
+		 * 如果都满足,那么就走快速路径
+		 */
 		want_affine = !wake_wide(p) && !wake_cap(p, cpu, prev_cpu)
 			      && cpumask_test_cpu(cpu, tsk_cpus_allowed(p));
 	}
 
 	rcu_read_lock();
+	/* 从wake up CPU开始从下至上遍历调度域 */
 	for_each_domain(cpu, tmp) {
+
+		/* 如果该调度域不参与负载均衡,那么break */
 		if (!(tmp->flags & SD_LOAD_BALANCE))
 			break;
 
@@ -6188,29 +6359,41 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 		 * If both cpu and prev_cpu are part of this domain,
 		 * cpu is a valid SD_WAKE_AFFINE target.
 		 */
+
+		/* 如果wakeup cpu和prev_cpu在同一个调度域且这个调度域包含了SD_WAKE_AFFINE标志位,那么affine_sd调度域具有亲和性 */
 		if (want_affine && (tmp->flags & SD_WAKE_AFFINE) &&
 		    cpumask_test_cpu(prev_cpu, sched_domain_span(tmp))) {
 			affine_sd = tmp;
 			break;
 		}
 
+		/* 如果tmp调度域的flags有包含我们传进来的sd_flag,那么sd = tmp,这里的作用是找到支持sd_flag的最高层级的sd */
 		if (tmp->flags & sd_flag)
-			sd = tmp;
+			sd = tmp; /* 如果want_affine 等于false,那么直接break吧 */
 		else if (!want_affine)
 			break;
 	}
 
+	/* 当找到亲和性调度域时 */
 	if (affine_sd) {
 		sd = NULL; /* Prefer wake_affine over balance flags */
+		/* 如果wakeup CPU和prev CPU不是同一个CPU,那么可以考虑使用wakeup CPU来唤醒进程.
+		 * wake_affine会重新计算wake cpu和prev cpu的负载情况.
+		 * 如果wakeup CPU的负载加上唤醒进程的负载比prev CPU负载小,那么wakeup CPU是可以唤醒进程的
+		 *
+		 * wake_affine希望把被唤醒进程尽可能地运行在wakeup CPU上,这样可以让一些有相关性的进程尽可能地运行在具有cache共享的调度域中,获得一些cache-hit带来的性能提升
+		 */
 		if (cpu != prev_cpu && wake_affine(affine_sd, p, prev_cpu, sync))
 			new_cpu = cpu;
 	}
 
 	if (!sd) {
-		if (sd_flag & SD_BALANCE_WAKE) /* XXX always ? */
+		if (sd_flag & SD_BALANCE_WAKE) /* XXX always ? */	/* 选择一个合适的CPU */
 			new_cpu = select_idle_sibling(p, prev_cpu, new_cpu);
 
+	/* 有sd表示tmp->flags & sd_flags为true */
 	} else while (sd) {
+		/* 否则开始从下遍历查找最悠闲的调度组和最悠闲的CPU来唤醒该进程 */
 		struct sched_group *group;
 		int weight;
 
@@ -6219,12 +6402,14 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 			continue;
 		}
 
+		/* 找到最闲的group */
 		group = find_idlest_group(sd, p, cpu, sd_flag);
 		if (!group) {
 			sd = sd->child;
 			continue;
 		}
 
+		/* 找到最闲的group中最idle的CPU */
 		new_cpu = find_idlest_cpu(group, p, cpu);
 		if (new_cpu == -1 || new_cpu == cpu) {
 			/* Now try balancing at a lower domain level of cpu */
@@ -6232,11 +6417,16 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 			continue;
 		}
 
-		/* Now try balancing at a lower domain level of new_cpu */
+		/* Now try balancing at a lower domain level of new_cpu
+		 * 现在尝试在new_cpu的较低域domain level进行平衡
+		 */
 		cpu = new_cpu;
+		/* 拿到该sched_span_weight */
 		weight = sd->span_weight;
 		sd = NULL;
+		/* 对于这个cpu的每个sched_domain */
 		for_each_domain(cpu, tmp) {
+			/* 如果weight <= tpm->span_weight,那么也就是说较低的sched_domain,MC->DIE */
 			if (weight <= tmp->span_weight)
 				break;
 			if (tmp->flags & sd_flag)

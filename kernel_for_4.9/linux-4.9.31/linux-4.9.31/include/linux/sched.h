@@ -1202,6 +1202,14 @@ struct sched_domain {
 	unsigned int busy_idx;
 	unsigned int idle_idx;
 	unsigned int newidle_idx;
+	/* wake_idx的主要作用是在任务唤醒时,帮助调度器决定在哪些CPU上查找空闲的CPU来放置被唤醒的任务.
+	 * 具体来说,当一个任务被唤醒时,调度器需要决定这个任务应该在哪一个CPU上运行.
+	 * 如果当前CPU(即唤醒任务的CPU)是合适的,那么任务可能就在这个CPU上继续运行.
+	 * 但是,如果当前CPU负载较重或者不是最优的选择,调度器可能会考虑将任务迁移到另一个CPU上.
+	 * 这时,wake_idx就派上用场了.
+	 * 它提供了一个起始点,调度器从这个起始点开始,在当前的调度域(或跨调度域,取决于调度策略)中搜索合适的CPU来放置被唤醒的任务.
+	 * wake_idx 的值通常基于某种启发式算法或策略来确定,旨在减少搜索时间并找到尽可能好的CPU放置位置
+	 */
 	unsigned int wake_idx;
 	unsigned int forkexec_idx;
 	unsigned int smt_gain;
@@ -1737,8 +1745,11 @@ struct task_struct {
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 	unsigned int cpu;	/* current CPU */
 #endif
+	/* 该线程唤醒不同wakee的次数,wakee_flips数值越大,则说明该线程唤醒多个不同的任务,并且数值越大,说明唤醒频率较快 */
 	unsigned int wakee_flips;
+	/* wakee_flips会随时间衰减,这里定义了上次进行衰减的时间点 */
 	unsigned long wakee_flip_decay_ts;
+	/* 该线程上次唤醒的线程 */
 	struct task_struct *last_wakee;
 
 	int wake_cpu;

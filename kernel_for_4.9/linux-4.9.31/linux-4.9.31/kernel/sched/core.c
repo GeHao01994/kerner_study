@@ -1674,6 +1674,10 @@ int select_task_rq(struct task_struct *p, int cpu, int sd_flags, int wake_flags)
 {
 	lockdep_assert_held(&p->pi_lock);
 
+	/* 如果tsk_nr_cpus_allowed(p) > 1,
+	 * task_struct结构体中有一个成员,叫nr_cpus_allowed,它表示的意义是该进程允许使用的cpu的数量(即该进程可以在多少个不同的cpu上调度)
+	 * 那么就调用相关调度类的select_task_rq选择一个CPU运行唤醒进程
+	 */
 	if (tsk_nr_cpus_allowed(p) > 1)
 		cpu = p->sched_class->select_task_rq(p, cpu, sd_flags, wake_flags);
 	else
@@ -2078,6 +2082,16 @@ static void ttwu_queue(struct task_struct *p, int cpu, int wake_flags)
  *
  * Return: %true if @p was woken up, %false if it was already running.
  * or @state didn't match @p's state.
+ *
+ * try_to_wake-up-唤醒一个线程
+ * @p: 要唤醒的线程
+ * @state: 可以被唤醒的任务状态的掩码
+ * @wake_flags: 唤醒修改器标志(WF_*)
+ *
+ * 如果还没有,就把它放在运行队列中.
+ * "current"线程始终在运行队列上(除非正在进行实际的重新调度),因此您可以执行更简单的"current->state = TASK_RUNNING"来标记自己可运行,而不会产生额外开销.
+ *
+ * 返回: 如果@p被唤醒,则返回%true,如果它已经在运行,则返回%false.或者@state与@p的状态不匹配.
  */
 static int
 try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
@@ -2090,21 +2104,29 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	 * need to ensure that CONDITION=1 done by the caller can not be
 	 * reordered with p->state check below. This pairs with mb() in
 	 * set_current_state() the waiting thread does.
+	 *
+	 * 如果我们要唤醒一个等待条件的线程,我们需要确保调用者完成的CONDITION=1
+	 * 不能通过下面的p->state检查重新排序.
+	 * 这与等待线程执行的set_current_state()中的mb()配对.
 	 */
 	smp_mb__before_spinlock();
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
+	/* 如果说p->state & state不等于0,那么就goto out */
 	if (!(p->state & state))
 		goto out;
 
 	trace_sched_waking(p);
 
 	success = 1; /* we're going to change ->state */
+	/* task_cpu(p)说的是上次运行的CPU */
 	cpu = task_cpu(p);
 
 	/*
 	 * Ensure we load p->on_rq _after_ p->state, otherwise it would
 	 * be possible to, falsely, observe p->on_rq == 0 and get stuck
 	 * in smp_cond_load_acquire() below.
+	 *
+	 * 确保我们加载p->on_rq在after _p->state,否则可能会错误地观察到p->on-rq==0,并陷入下面的smp_cond_load_acquire().
 	 *
 	 * sched_ttwu_pending()                 try_to_wake_up()
 	 *   [S] p->on_rq = 1;                  [L] P->state
@@ -2157,9 +2179,12 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	 */
 	smp_cond_load_acquire(&p->on_cpu, !VAL);
 
+	/* 设置进程的sched_contributes_to_load */
 	p->sched_contributes_to_load = !!task_contributes_to_load(p);
+	/* 设置进程的状态为TASK_WAKING */
 	p->state = TASK_WAKING;
 
+	/* 选择一个进程来唤醒CPU,这里的p->wake_cpu指该进程上次运行的CPU,即prev_cpu */
 	cpu = select_task_rq(p, p->wake_cpu, SD_BALANCE_WAKE, wake_flags);
 	if (task_cpu(p) != cpu) {
 		wake_flags |= WF_MIGRATED;
@@ -2234,6 +2259,14 @@ out:
  *
  * It may be assumed that this function implies a write memory barrier before
  * changing the task state if and only if any tasks are woken up.
+ *
+ * wake_up_pprocess - 唤醒特定进程
+ * @p: 要唤醒的进程.
+ *
+ * 尝试唤醒指定的进程并将其移动到可运行进程集.
+ * 返回: 如果进程被唤醒,则返回1; 如果进程已在运行,则返回0.
+ *
+ * 可以假设,只有当任何任务被唤醒时,此函数才意味着在更改任务状态之前存在写内存屏障.
  */
 int wake_up_process(struct task_struct *p)
 {
