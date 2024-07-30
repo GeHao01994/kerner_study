@@ -242,21 +242,28 @@ static const struct reserved_mem_ops rmem_cma_ops = {
 
 static int __init rmem_cma_setup(struct reserved_mem *rmem)
 {
+	/* 拿到align */
 	phys_addr_t align = PAGE_SIZE << max(MAX_ORDER - 1, pageblock_order);
+	/* 拿到mask */
 	phys_addr_t mask = align - 1;
 	unsigned long node = rmem->fdt_node;
 	struct cma *cma;
 	int err;
 
+	/* 如果该设备树结点没有reusable或者说有no-map属性,那么返回EINVAL */
 	if (!of_get_flat_dt_prop(node, "reusable", NULL) ||
 	    of_get_flat_dt_prop(node, "no-map", NULL))
 		return -EINVAL;
 
+	/* 如果rmem->base & mask 或者说rmem->size & mask还有数,那么说明没有align,返回-EINVAL */
 	if ((rmem->base & mask) || (rmem->size & mask)) {
 		pr_err("Reserved memory: incorrect alignment of CMA region\n");
 		return -EINVAL;
 	}
 
+	/* cma_init_reserved_mem从保留内存块里面获取一块地址为base、大小为size的内存,这里用dtb中解析出来的地址信息来初始化CMA,
+	 * 用来创建和初始化struct cma
+	 */
 	err = cma_init_reserved_mem(rmem->base, rmem->size, 0, &cma);
 	if (err) {
 		pr_err("Reserved memory: unable to setup CMA region\n");

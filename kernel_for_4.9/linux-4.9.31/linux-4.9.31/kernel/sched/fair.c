@@ -7757,6 +7757,7 @@ static inline int get_sd_load_idx(struct sched_domain *sd,
 	return load_idx;
 }
 
+/* (delta + (sched_avg_period() - rt_avg)) / total or 1.0 - rt_avg / total */
 static unsigned long scale_rt_capacity(int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
@@ -7767,17 +7768,27 @@ static unsigned long scale_rt_capacity(int cpu)
 	 * Since we're reading these variables without serialization make sure
 	 * we read them once before doing sanity checks on them.
 	 */
+
+	/* age_stamp表示在CPU启动后运行队列首次运行时设置起始时间,后续周期性进行更新; */
 	age_stamp = READ_ONCE(rq->age_stamp);
+	/* 累计的RT平均运行时间,每0.5秒减半处理,用于计算CFS负载减去RT在CFS负载平衡中使用的时间百分比; */
 	avg = READ_ONCE(rq->rt_avg);
+	/* delta = rq->clock - age_stamp */
 	delta = __rq_clock_broken(rq) - age_stamp;
 
+	/* 如果小于0,那么设置delta = 0 */
 	if (unlikely(delta < 0))
 		delta = 0;
 
+	/* (u64)sysctl_sched_time_avg * NSEC_PER_MSEC / 2 + delta
+	 * sysctl_sched_time_avg表示:period over which we average the RT time consumption, measured in ms.(我们平均RT时间消耗的时段,以毫秒为单位.)
+	 */
 	total = sched_avg_period() + delta;
 
+	/* used = avg / total */
 	used = div_u64(avg, total);
 
+	/* 如果used < 1024,那么return 1024 - used */
 	if (likely(used < SCHED_CAPACITY_SCALE))
 		return SCHED_CAPACITY_SCALE - used;
 
@@ -7786,17 +7797,21 @@ static unsigned long scale_rt_capacity(int cpu)
 
 static void update_cpu_capacity(struct sched_domain *sd, int cpu)
 {
+	/* 获取per_cpu变量cpu_scale */
 	unsigned long capacity = arch_scale_cpu_capacity(sd, cpu);
 	struct sched_group *sdg = sd->groups;
 
+	/* cpu_capacity_orig成员表示该CPU的原本计算能力 */
 	cpu_rq(cpu)->cpu_capacity_orig = capacity;
-
+	/* 算力折扣系数由scale_rt_capacity()给出,其含义为一段时间内,非"RT 时间"占比 */
 	capacity *= scale_rt_capacity(cpu);
+	/* 除以1024 */
 	capacity >>= SCHED_CAPACITY_SHIFT;
 
 	if (!capacity)
 		capacity = 1;
 
+	/* 更新相关sgc capacity: cpu rq的cpu_capacity、sgc capacity */
 	cpu_rq(cpu)->cpu_capacity = capacity;
 	sdg->sgc->capacity = capacity;
 }
@@ -9677,7 +9692,7 @@ void update_max_interval(void)
 static void rebalance_domains(struct rq *rq, enum cpu_idle_type idle)
 {
 	int continue_balancing = 1;
-	/* 拿到该CPU所在的CPU */
+	/* 拿到该rq所在的CPU */
 	int cpu = rq->cpu;
 	unsigned long interval;
 	struct sched_domain *sd;

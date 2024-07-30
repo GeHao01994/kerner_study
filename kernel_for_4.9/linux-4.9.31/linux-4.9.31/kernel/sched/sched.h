@@ -682,12 +682,17 @@ struct rq {
 
 	struct list_head cfs_tasks;
 
+	/* 累计的RT平均运行时间,每0.5秒减半处理,用于计算CFS负载减去RT在CFS负载平衡中使用的时间百分比; */
 	u64 rt_avg;
+	/* 在CPU启动后运行队列首次运行时设置起始时间,后续周期性进行更新; */
 	u64 age_stamp;
+	/* 记录CPU进入idle状态的时间点,用于计算avg_idle.在该CPU执行任务期间,该值等于0 */
 	u64 idle_stamp;
+	/* 记录CPU的平均idle时间 */
 	u64 avg_idle;
 
 	/* This is used to determine avg_idle's max value */
+	/* 该CPU进行new idle balance的最大开销 */
 	u64 max_idle_balance_cost;
 #endif
 

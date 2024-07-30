@@ -591,6 +591,7 @@ static int __init __reserved_mem_reserve_reg(unsigned long node,
 	const __be32 *prop;
 	int nomap, first = 1;
 
+	/* 拿到reg的prop */
 	prop = of_get_flat_dt_prop(node, "reg", &len);
 	if (!prop)
 		return -ENOENT;
@@ -601,21 +602,29 @@ static int __init __reserved_mem_reserve_reg(unsigned long node,
 		return -EINVAL;
 	}
 
+	/* 如果定义了no-map属性,那么说明这段内存操作系统根本不需要进行地址映射,
+	 * 也就是说这块内存是不归操作系统内存管理模块来管理的,而是归于具体的驱动使用(在device tree中,设备节点可以定义memory-region节点来引用
+	 * 在memory node中定义的保留内存,具体可以参考reserved-memory.txt文件)
+	 */
 	nomap = of_get_flat_dt_prop(node, "no-map", NULL) != NULL;
 
 	while (len >= t_len) {
+		/* 拿到base */
 		base = dt_mem_next_cell(dt_root_addr_cells, &prop);
+		/* 拿到size */
 		size = dt_mem_next_cell(dt_root_size_cells, &prop);
 
+		/* 如果size不等于0,early_init_dt_reserve_memory_arch等于0,那么就pr_debug,表示保存成功了 */
 		if (size &&
 		    early_init_dt_reserve_memory_arch(base, size, nomap) == 0)
 			pr_debug("Reserved memory: reserved region for node '%s': base %pa, size %ld MiB\n",
 				uname, &base, (unsigned long)size / SZ_1M);
-		else
+		else /* 否则就失败了 */
 			pr_info("Reserved memory: failed to reserve memory for node '%s': base %pa, size %ld MiB\n",
 				uname, &base, (unsigned long)size / SZ_1M);
 
 		len -= t_len;
+		/* 如果first = 1,那么调用fdt_reserved_mem_save_node,把它添加到reserved_mem[reserved_mem_count]里 */
 		if (first) {
 			fdt_reserved_mem_save_node(node, uname, base, size);
 			first = 0;
@@ -657,28 +666,51 @@ static int __init __fdt_scan_reserved_mem(unsigned long node, const char *uname,
 	const char *status;
 	int err;
 
+	/* found变量记录了是否搜索到一个reserved-memory节点,如果没有,我们的首要目标是找到一个reserved-memory节点.
+	 * reserved-memory节点的特点包括:是root node的子节点(depth == 1),node name是"reserved-memory",这可以过滤掉一大票无关节点,从而加快搜索速度.
+	 */
 	if (!found && depth == 1 && strcmp(uname, "reserved-memory") == 0) {
+	/* reserved-memory节点应该包括#address-cells、#size-cells和range属性,
+	 * 并且#address-cells和#size-cells的属性值应该等于根节点对应的属性值,
+	 * 如果检查通过(__reserved_mem_check_root),那么说明找到了一个正确的reserved-memory节点,可以去往下一个节点了.
+	 * 当然,下一个节点往往是reserved-memory节点的subnode,也就是真正的定义各段保留内存的节点.
+	 * 更详细的关于reserved-memory的设备树定义可以参考Documentation\devicetree\bindings\reserved-memory\reserved-memory.txt文件.
+	 */
 		if (__reserved_mem_check_root(node) != 0) {
 			pr_err("Reserved memory: unsupported node format, ignoring\n");
 			/* break scan */
 			return 1;
 		}
+		/* 把found设置为1之后返回 */
 		found = 1;
 		/* scan next node */
 		return 0;
+	/* 没有找到reserved-memory节点之前,of_scan_flat_dt会不断的遍历下一个节点,
+	 * 而在__fdt_scan_reserved_mem函数中返回0表示让搜索继续,如果返回1,表示搜索停止.
+	 */
 	} else if (!found) {
 		/* scan next node */
 		return 0;
+	/* 如果找到了一个reserved-memory节点,并且完成了对其所有subnode的scan,那么是退出整个reserved memory的scan过程了. */
 	} else if (found && depth < 2) {
 		/* scanning of /reserved-memory has been finished */
 		return 1;
 	}
 
+	/* 如果定义了status属性,那么要求其值必须要是ok或者okay,当然,你也可以不定义该属性(这是一般的做法). */
 	status = of_get_flat_dt_prop(node, "status", NULL);
 	if (status && strcmp(status, "okay") != 0 && strcmp(status, "ok") != 0)
 		return 0;
 
+	/* 定义reserved memory有两种方法,一种是静态定义,也就是定义了reg属性,这时候,可以通过调用__reserved_mem_reserve_reg函数解析reg的(address,size)的二元数组,
+	 * 逐一对每一个定义的memory region进行预留.实际的预留内存动作可以调用memblock_reserve或者memblock_remove,具体调用哪一个是和该节点是否定义no-map属性相关,
+	 * 如果定义了no-map属性,那么说明这段内存操作系统根本不需要进行地址映射,也就是说这块内存是不归操作系统内存管理模块来管理的,
+	 * 而是归于具体的驱动使用(在device tree中,设备节点可以定义memory-region节点来引用在memory node中定义的保留内存,具体可以参考reserved-memory.txt文件).
+	 */
 	err = __reserved_mem_reserve_reg(node, uname);
+	/* 另外一种定义reserved memory的方法是动态定义,也就是说定义了该内存区域的size(也可以定义alignment或者alloc-range进一步约定动态分配的reserved memory属性,
+	 *不过这些属性都是option的),但是不指定具体的基地址,让操作系统自己来分配这段memory.
+	 */
 	if (err == -ENOENT && of_get_flat_dt_prop(node, "size", NULL))
 		fdt_reserved_mem_save_node(node, uname, 0, 0);
 
@@ -698,14 +730,21 @@ void __init early_init_fdt_scan_reserved_mem(void)
 	int n;
 	u64 base, size;
 
+	/* 这个initial_boot_params是指的设备树的起始地址,后面会做偏移 */
 	if (!initial_boot_params)
 		return;
 
 	/* Process header /memreserve/ fields */
+	/* dts有个这个数据块
+	 * /memreserve/ 0x80000000 0x00010000;
+	 */
 	for (n = 0; ; n++) {
+		/* 拿到/memreserve/的起始地址和size */
 		fdt_get_mem_rsv(initial_boot_params, n, &base, &size);
+		/* 如果size为空,那么跳出循环 */
 		if (!size)
 			break;
+		/* 这里主要是把它放到memblock_reserve(base, size); */
 		early_init_dt_reserve_memory_arch(base, size, 0);
 	}
 
@@ -1197,8 +1236,10 @@ void __init __weak early_init_dt_add_memory_arch(u64 base, u64 size)
 int __init __weak early_init_dt_reserve_memory_arch(phys_addr_t base,
 					phys_addr_t size, bool nomap)
 {
+	/* 如果设置了nomap,那么调用memblock_remove */
 	if (nomap)
 		return memblock_remove(base, size);
+	/* 否则调用memblock_reserve */
 	return memblock_reserve(base, size);
 }
 

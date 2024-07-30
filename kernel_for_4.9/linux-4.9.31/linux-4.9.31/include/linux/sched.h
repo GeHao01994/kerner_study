@@ -1136,6 +1136,13 @@ extern void wake_up_q(struct wake_q_head *head);
  * 提高资源利用率: 通过优先考虑兄弟CPU,可以更好地利用物理处理器内的资源,避免资源在不同物理处理器之间的不均衡分配.
  */
 #define SD_PREFER_SIBLING	0x1000	/* Prefer to place tasks in a sibling domain */
+/*
+ * SD_OVERLAP: 这个标志位表示当前层级的调度域与其他层级的调度域存在重叠.
+ * 在多级调度域结构中,不同层级的调度域可能会包含相同的CPU.
+ * 例如,一个CPU可能同时属于一个核心域(Core Domain)和一个物理CPU域(Physical Domain),
+ * 这时这两个域就存在重叠.
+ * SD_OVERLAP标志位用于标识这种重叠情况,以便内核在进行负载均衡时能够正确地处理.
+ */
 #define SD_OVERLAP		0x2000	/* sched_domains of this level overlap */
 #define SD_NUMA			0x4000	/* cross-node balancing */
 

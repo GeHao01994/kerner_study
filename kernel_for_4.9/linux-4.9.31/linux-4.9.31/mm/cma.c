@@ -174,35 +174,51 @@ int __init cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
 	phys_addr_t alignment;
 
 	/* Sanity checks */
+	/* 如果cma_area_count == ARRAY_SIZE(cma_areas),说明已经满了,那么直接返回-ENOSPC */
 	if (cma_area_count == ARRAY_SIZE(cma_areas)) {
 		pr_err("Not enough slots for CMA reserved regions!\n");
 		return -ENOSPC;
 	}
 
+	/* 如果size为0,或者说memblock不是reserves区域,那么也返回-EINVAL */
 	if (!size || !memblock_is_region_reserved(base, size))
 		return -EINVAL;
 
 	/* ensure minimal alignment required by mm core */
+	/* 确保mm core所需的最小对齐 */
 	alignment = PAGE_SIZE <<
 			max_t(unsigned long, MAX_ORDER - 1, pageblock_order);
 
-	/* alignment should be aligned with order_per_bit */
+	/* alignment should be aligned with order_per_bit
+	 * alignment应与order_per_bit对齐
+	 */
 	if (!IS_ALIGNED(alignment >> PAGE_SHIFT, 1 << order_per_bit))
 		return -EINVAL;
 
+	/* 如果base和size没有align,那么直接返回-EINVAL */
 	if (ALIGN(base, alignment) != base || ALIGN(size, alignment) != size)
 		return -EINVAL;
 
 	/*
 	 * Each reserved area must be initialised later, when more kernel
 	 * subsystems (like slab allocator) are available.
+	 *
+	 * 稍后,当有更多的内核子系统(如slab分配器)可用时,必须对每个保留区域进行初始化
 	 */
+
+	/* 取一个cma_areas结构体 */
 	cma = &cma_areas[cma_area_count];
+	/* 拿到base_pfn */
 	cma->base_pfn = PFN_DOWN(base);
+	/* count表示它的page数量 */
 	cma->count = size >> PAGE_SHIFT;
+	/* 设置cma->order_per_bit */
 	cma->order_per_bit = order_per_bit;
+	/* 把这个cma返回出去 */
 	*res_cma = cma;
+	/* cma_area_count++ */
 	cma_area_count++;
+	/* totalcma_pages += cma->count */
 	totalcma_pages += (size / PAGE_SIZE);
 
 	return 0;

@@ -39,6 +39,14 @@ int __init __weak early_init_dt_alloc_reserved_memory_arch(phys_addr_t size,
 	/*
 	 * We use __memblock_alloc_base() because memblock_alloc_base()
 	 * panic()s on allocation failure.
+	 *
+	 * 我们使用__memblock_alloc_base(),因为memblock_alloc_base会在分配失败时触发panic()
+	 *
+	 */
+
+	/* 如果end == 0的话
+	 * #define MEMBLOCK_ALLOC_ANYWHERE	(~(phys_addr_t)0)
+	 * 那么end = 0xffffffff....
 	 */
 	end = !end ? MEMBLOCK_ALLOC_ANYWHERE : end;
 	base = __memblock_alloc_base(size, align, end);
@@ -47,12 +55,17 @@ int __init __weak early_init_dt_alloc_reserved_memory_arch(phys_addr_t size,
 
 	/*
 	 * Check if the allocated region fits in to start..end window
+	 *
+	 * 检查分配的区域是否适合start..end窗口
 	 */
+
+	/* 如果base < start,那么free掉分配的memblock */
 	if (base < start) {
 		memblock_free(base, size);
 		return -ENOMEM;
 	}
 
+	/* 把base带出去 */
 	*res_base = base;
 	if (nomap)
 		return memblock_remove(base, size);
@@ -94,6 +107,8 @@ void __init fdt_reserved_mem_save_node(unsigned long node, const char *uname,
 /**
  * res_mem_alloc_size() - allocate reserved memory described by 'size', 'align'
  *			  and 'alloc-ranges' properties
+ *
+ * res_mem_alloc_size() - 分配由"size"、"align"和"alloc range"属性描述的保留内存
  */
 static int __init __reserved_mem_alloc_size(unsigned long node,
 	const char *uname, phys_addr_t *res_base, phys_addr_t *res_size)
@@ -106,6 +121,7 @@ static int __init __reserved_mem_alloc_size(unsigned long node,
 	int nomap;
 	int ret;
 
+	/* 如果没有名为"size"的prop,那么直接返回-EINVAL */
 	prop = of_get_flat_dt_prop(node, "size", &len);
 	if (!prop)
 		return -EINVAL;
@@ -114,10 +130,14 @@ static int __init __reserved_mem_alloc_size(unsigned long node,
 		pr_err("invalid size property in '%s' node.\n", uname);
 		return -EINVAL;
 	}
+
+	/* 拿到size */
 	size = dt_mem_next_cell(dt_root_size_cells, &prop);
 
+	/* 如果定义了no-map属性,那么nomap就为true */
 	nomap = of_get_flat_dt_prop(node, "no-map", NULL) != NULL;
 
+	/* 如果定义了alignment */
 	prop = of_get_flat_dt_prop(node, "alignment", &len);
 	if (prop) {
 		if (len != dt_root_addr_cells * sizeof(__be32)) {
@@ -125,20 +145,38 @@ static int __init __reserved_mem_alloc_size(unsigned long node,
 				uname);
 			return -EINVAL;
 		}
+		/* 拿到align */
 		align = dt_mem_next_cell(dt_root_addr_cells, &prop);
 	}
 
-	/* Need adjust the alignment to satisfy the CMA requirement */
+	/* Need adjust the alignment to satisfy the CMA requirement
+	 * 需要调整对齐以满足CMA要求
+	 */
+
+	/* 如果定义了CMA,然后
+	 * 检查到dts中有compatible匹配(CMA这里为“shared-dma-pool”)
+	 * device tree中可以包含reserved-memory node,在该节点的child node中,可以定义各种保留内存的信息。
+	 * compatible属性是shared-dma-pool的那个节点是专门用于建立 global CMA area的.
+	 *
+	 * 对于reusable属性,其有reserved memory这样的属性,当驱动程序不使用这些内存的时候,OS可以使用这些内存;
+	 * 而当驱动程序从这个CMA area分配memory的时候,OS可以释放这些内存,让驱动可以使用它.
+	 *
+	 * no-map属性与地址映射有关,如果没有no-map属性,那么OS就会为这段memory创建地址映射,象其他普通内存一样.
+	 * 但是对于no-map属性,往往是专用
+	 */
 	if (IS_ENABLED(CONFIG_CMA)
 	    && of_flat_dt_is_compatible(node, "shared-dma-pool")
 	    && of_get_flat_dt_prop(node, "reusable", NULL)
 	    && !of_get_flat_dt_prop(node, "no-map", NULL)) {
+		/* 如果是CMA区域,那么取pageblock_order和MAX_ORDER - 1的最大值 */
 		unsigned long order =
 			max_t(unsigned long, MAX_ORDER - 1, pageblock_order);
 
+		/* align就为刚刚order个PAGE */
 		align = max(align, (phys_addr_t)PAGE_SIZE << order);
 	}
 
+	/* 这里是去找alloc-ranges的prop */
 	prop = of_get_flat_dt_prop(node, "alloc-ranges", &len);
 	if (prop) {
 
@@ -151,10 +189,13 @@ static int __init __reserved_mem_alloc_size(unsigned long node,
 		base = 0;
 
 		while (len > 0) {
+			/* 拿到该prop的start地址 */
 			start = dt_mem_next_cell(dt_root_addr_cells, &prop);
+			/* 通过start + size 等到end地址 */
 			end = start + dt_mem_next_cell(dt_root_size_cells,
 						       &prop);
 
+			/* 去分配内存作为reserves_memory */
 			ret = early_init_dt_alloc_reserved_memory_arch(size,
 					align, start, end, nomap, &base);
 			if (ret == 0) {
@@ -167,6 +208,7 @@ static int __init __reserved_mem_alloc_size(unsigned long node,
 		}
 
 	} else {
+		/* 如果没有分配区域,那么设置去end = memblock.current_limit里面去分配 */
 		ret = early_init_dt_alloc_reserved_memory_arch(size, align,
 							0, 0, nomap, &base);
 		if (ret == 0)
@@ -190,6 +232,11 @@ static const struct of_device_id __rmem_of_table_sentinel
 
 /**
  * res_mem_init_node() - call region specific reserved memory init code
+ *			 调用特定区域的保留内存初始化代码
+ */
+
+/* __reserved_mem_init_node会遍历__reservedmem_of_table section中的内容,检查到dts中有compatible匹配(CMA这里为"shared-dma-pool")就进一步执行对应的initfn.
+ * 通过RESERVEDMEM_OF_DECLARE定义的都会被链接到__reservedmem_of_table这个section段中,最终会调到使用RESERVEDMEM_OF_DECLARE定义的函数
  */
 static int __init __reserved_mem_init_node(struct reserved_mem *rmem)
 {
@@ -263,22 +310,37 @@ void __init fdt_init_reserved_mem(void)
 	/* check for overlapping reserved regions */
 	__rmem_check_for_overlap();
 
+	/* 遍历每一个reserved memory region */
 	for (i = 0; i < reserved_mem_count; i++) {
 		struct reserved_mem *rmem = &reserved_mem[i];
 		unsigned long node = rmem->fdt_node;
 		int len;
 		const __be32 *prop;
 		int err = 0;
-
+		/* 每一个需要被其他node引用的node都需要定义"phandle",或者"linux,phandle".
+		 * 虽然在实际的device tree source中看不到这个属性,实际上dtc会完美的处理这一切的.
+		 */
 		prop = of_get_flat_dt_prop(node, "phandle", &len);
 		if (!prop)
 			prop = of_get_flat_dt_prop(node, "linux,phandle", &len);
 		if (prop)
 			rmem->phandle = of_read_number(prop, len/4);
-
+		/* size等于0的memory region表示这是一个动态分配region,base address尚未定义,
+		 * 因此我们需要通过__reserved_mem_alloc_size函数对节点进行分析(size、alignment等属性),
+		 * 然后调用memblock的alloc接口函数进行memory block的分配,最终的结果是确定base address和size,
+		 * 并将这段memory region从memory type的数组中移到reserved type的数组中.
+		 * 当然,如果定义了no-map属性,那么这段memory会从系统中之间删除(memory type和reserved type数组中都没有这段memory的定义).
+		 */
 		if (rmem->size == 0)
 			err = __reserved_mem_alloc_size(node, rmem->name,
 						 &rmem->base, &rmem->size);
+		/* 保留内存有两种使用场景,一种是被特定的驱动使用,这时候在特定驱动的初始化函数(probe函数)中自然会进行处理,
+		 * 还有一种场景就是被所有驱动或者内核模块使用,例如CMA，per-device Coherent DMA的分配等,这时候,
+		 * 我们需要借用device tree的匹配机制进行这段保留内存的初始化动作.
+		 * 有兴趣的话可以看看RESERVEDMEM_OF_DECLARE的定义，这里就不再描述了
+		 */
+
+		/* 上面的__reserved_mem_alloc_size一切顺利也会返回0 */
 		if (err == 0)
 			__reserved_mem_init_node(rmem);
 	}
