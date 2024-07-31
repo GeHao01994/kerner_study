@@ -51,17 +51,28 @@ static phys_addr_t size_cmdline = -1;
 static phys_addr_t base_cmdline;
 static phys_addr_t limit_cmdline;
 
+/* cma=nn[MG]@[start][MG][-end[MG]]
+ * 例如:
+ * "cma=20M@0x68000000-0x70000000"
+ */
 static int __init early_cma(char *p)
 {
 	pr_debug("%s(%s)\n", __func__, p);
+	/* 拿到大小,也就是上面的20M,这个函数会给你计算大小,最终得到的是20 * 2^20 */
 	size_cmdline = memparse(p, &p);
+	/* 如果后面不是@,那么直接return 0了 */
 	if (*p != '@')
 		return 0;
+	/* 这边计算跳过@之后取后面的数值,对于上面的例子是0x68000000 */
 	base_cmdline = memparse(p + 1, &p);
+	/* 拿到之后判断下一个是不是‘-’
+	 * 如果不是的话,limit_cmdline就等于base_cmdline + size_cmdline,对于上面例子来说就是0x68000000 + 20 * 2^20 */
 	if (*p != '-') {
 		limit_cmdline = base_cmdline + size_cmdline;
 		return 0;
 	}
+
+	/* 如果下一个是‘-’的话,那么limit_cmdline就等于‘-’后面的数值,也就是0x70000000 */
 	limit_cmdline = memparse(p + 1, &p);
 
 	return 0;
@@ -103,6 +114,12 @@ static inline __maybe_unused phys_addr_t cma_early_percent_memory(void)
  * called by arch specific code once the early allocator (memblock or bootmem)
  * has been activated and all other subsystems have already allocated/reserved
  * memory.
+ *
+ * dma_tiguous_reserve() - 用于连续内存处理的保留区域
+ * @limit: 保留内存的结束地址(可选,任意为0).
+ *
+ * 此函数从早期分配器保留内存.
+ * 一旦早期分配器(memblock或bootmem)被激活,并且所有其他子系统都已经分配/保留了内存,就应该由特定于arch的代码调用它.
  */
 void __init dma_contiguous_reserve(phys_addr_t limit)
 {
@@ -112,25 +129,38 @@ void __init dma_contiguous_reserve(phys_addr_t limit)
 	bool fixed = false;
 
 	pr_debug("%s(limit %08lx)\n", __func__, (unsigned long)limit);
-
+	/* 这边就是表示说有cmdline的情况 */
 	if (size_cmdline != -1) {
+		/* 那么设置selected_size、selected_base、selected_limit */
 		selected_size = size_cmdline;
 		selected_base = base_cmdline;
 		selected_limit = min_not_zero(limit_cmdline, limit);
+		/* 如果base_cmdline + size_cmdline == limit_cmdline,也就是说刚好,那么fixed = true */
 		if (base_cmdline + size_cmdline == limit_cmdline)
 			fixed = true;
 	} else {
+		/* 这里表示通过configure来配置内存大小
+		 *
+		 * #define CMA_SIZE_MBYTES CONFIG_CMA_SIZE_MBYTES
+		 * static const phys_addr_t size_bytes = (phys_addr_t)CMA_SIZE_MBYTES * SZ_1M;
+		 */
 #ifdef CONFIG_CMA_SIZE_SEL_MBYTES
 		selected_size = size_bytes;
+		/* CONFIG_CMA_SIZE_SEL_PERCENTAGE表示指定物理内存容量的百分比
+		 * (total_pages * CONFIG_CMA_SIZE_PERCENTAGE / 100) << PAGE_SHIFT;
+		 */
 #elif defined(CONFIG_CMA_SIZE_SEL_PERCENTAGE)
 		selected_size = cma_early_percent_memory();
+		/* CONFIG_CMA_SIZE_SEL_MIN就是选size_bytes和cma_early_percent_memory的最小值 */
 #elif defined(CONFIG_CMA_SIZE_SEL_MIN)
 		selected_size = min(size_bytes, cma_early_percent_memory());
+		/* CONFIG_CMA_SIZE_SEL_MIN就是选size_bytes和cma_early_percent_memory的最大值 */
 #elif defined(CONFIG_CMA_SIZE_SEL_MAX)
 		selected_size = max(size_bytes, cma_early_percent_memory());
 #endif
 	}
 
+	/* 如果selected_size ！=0,并且dma_contiguous_default_area不为NULL,那么才去设置做下面的操作 */
 	if (selected_size && !dma_contiguous_default_area) {
 		pr_debug("%s: reserving %ld MiB for global area\n", __func__,
 			 (unsigned long)selected_size / SZ_1M);
@@ -145,7 +175,7 @@ void __init dma_contiguous_reserve(phys_addr_t limit)
 /**
  * dma_contiguous_reserve_area() - reserve custom contiguous area
  * @size: Size of the reserved area (in bytes),
- * @base: Base address of the reserved area optional, use 0 for any
+ * @base: Base address of the reserved area (optional, use 0 for any).
  * @limit: End address of the reserved memory (optional, 0 for any).
  * @res_cma: Pointer to store the created cma region.
  * @fixed: hint about where to place the reserved area
@@ -158,6 +188,19 @@ void __init dma_contiguous_reserve(phys_addr_t limit)
  *
  * If @fixed is true, reserve contiguous area at exactly @base.  If false,
  * reserve in range from @base to @limit.
+ *
+ * dma_tiguous_reserve_area() - 保留自定义连续区域
+ * @size: 保留区域的大小(以字节为单位).
+ * @base: 可选保留区域的基址,任意使用0.
+ * @limit: 保留内存的结束地址（可选，任意为0）.
+ * @res_cma: 用于存储创建的cma区域的指针.
+ * @fixed: 提示保留区域应该放置在哪里
+ *
+ * 此函数保留早期分配器的内存.一旦早期分配器(memblock或bootmem)被激活,并且所有其他子系统都已经分配/保留了内存,
+ * 就应该由特定于arch的代码调用它.此功能允许为特定设备创建自定义保留区域。
+ *
+ * 如果@fixed为真,则在确切的@base地址上保留连续的内存区域.
+ * 如果为假,则在 @base到@limit 的范围内保留内存.
  */
 int __init dma_contiguous_reserve_area(phys_addr_t size, phys_addr_t base,
 				       phys_addr_t limit, struct cma **res_cma,
@@ -165,6 +208,7 @@ int __init dma_contiguous_reserve_area(phys_addr_t size, phys_addr_t base,
 {
 	int ret;
 
+	/* 去建立cma的关系 */
 	ret = cma_declare_contiguous(base, size, limit, 0, 0, fixed, res_cma);
 	if (ret)
 		return ret;

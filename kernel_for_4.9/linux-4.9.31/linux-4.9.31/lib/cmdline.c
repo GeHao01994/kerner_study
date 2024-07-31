@@ -122,14 +122,22 @@ EXPORT_SYMBOL(get_options);
  *
  *	Parses a string into a number.  The number stored at @ptr is
  *	potentially suffixed with K, M, G, T, P, E.
+ *
+ *	memparse - 将带有mem后缀的字符串解析为数字
+ *	@ptr: 解析从哪里开始
+ *	@retptr: (output)解析完成后指向下一个char的可选指针
+ *
+ *	将字符串解析为数字.存储在@ptr的数字可能后缀为K、M、G、T、P、E.
  */
 
 unsigned long long memparse(const char *ptr, char **retptr)
 {
 	char *endptr;	/* local pointer to end of parsed string */
 
+	/* strtoull() - 将字符串转换为无符号长整型 */
 	unsigned long long ret = simple_strtoull(ptr, &endptr, 0);
-
+	/* 看它后面的单位是什么,例如66G */
+	/* 实际上这里就是控制它的大小,如果是66G那么就乘以2^30 */
 	switch (*endptr) {
 	case 'E':
 	case 'e':

@@ -96,23 +96,35 @@ static void cma_clear_bitmap(struct cma *cma, unsigned long pfn,
 
 static int __init cma_activate_area(struct cma *cma)
 {
+	/* static inline unsigned long cma_bitmap_maxno(struct cma *cma)
+	 * {
+	 *	return cma->count >> cma->order_per_bit;
+	 * }
+	 *
+	 * 算它位图的大小
+	 */
 	int bitmap_size = BITS_TO_LONGS(cma_bitmap_maxno(cma)) * sizeof(long);
 	unsigned long base_pfn = cma->base_pfn, pfn = base_pfn;
+	/* 算出它有多少个pageblock_order */
 	unsigned i = cma->count >> pageblock_order;
 	struct zone *zone;
 
+	/* 这里就是分配bitmap的内存 */
 	cma->bitmap = kzalloc(bitmap_size, GFP_KERNEL);
 
 	if (!cma->bitmap)
 		return -ENOMEM;
 
+	/* 如果!pfn_valid,然后报个WARN */pageblock_order
 	WARN_ON_ONCE(!pfn_valid(pfn));
+	/* 拿到该page的zone */
 	zone = page_zone(pfn_to_page(pfn));
 
 	do {
 		unsigned j;
 
 		base_pfn = pfn;
+		/* 这里就是对该pageblock的每个page去做循环 */
 		for (j = pageblock_nr_pages; j; --j, pfn++) {
 			WARN_ON_ONCE(!pfn_valid(pfn));
 			/*
@@ -120,7 +132,12 @@ static int __init cma_activate_area(struct cma *cma)
 			 * specified to be in the same zone. Make this
 			 * simple by forcing the entire CMA resv range
 			 * to be in the same zone.
+			 *
+			 * alloc_contig_range要求指定的pfn范围位于同一区域.
+			 * 这个通过强制整个CMA resv范围位于同一zone,可以很简单地实现.
 			 */
+
+			/* 判断是不是同一个zone,如果不是,那么就goto err */
 			if (page_zone(pfn_to_page(pfn)) != zone)
 				goto err;
 		}
@@ -146,6 +163,7 @@ static int __init cma_init_reserved_areas(void)
 {
 	int i;
 
+	/* 对每个cma区域进行active */
 	for (i = 0; i < cma_area_count; i++) {
 		int ret = cma_activate_area(&cma_areas[i]);
 
@@ -241,6 +259,20 @@ int __init cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
  *
  * If @fixed is true, reserve contiguous area at exactly @base.  If false,
  * reserve in range from @base to @limit.
+ *
+ * cma_declare_contiguous() - 保留自定义的连续内存区域
+ * @base: 保留区域的基地址(可选),如果不指定,则使用 0 表示任意地址.
+ * @size: 保留区域的大小(以字节为单位).
+ * @limit: 保留内存区域的结束地址(可选),如果不指定,则使用 0 表示任意结束地址.
+ * @alignment: CMA区域的对齐要求,应为2的幂或零.
+ * @order_per_bit: 在位图中,一个位代表的页面order.
+ * @fixed: 提示保留区域应该放置在哪里.
+ * @res_cma: 指向存储创建的CMA(连续内存分配器)区域的指针.
+ *
+ * 这个函数从早期的内存分配器中保留内存.它应该在早期分配器(如memblock或bootmem)被激活且所有其他子系统都已经分配/保留了内存之后,
+ * 由特定架构的代码调用.此函数允许创建自定义的保留区域.
+ *
+ * 如果@fixed为真,则在确切的@base地址上保留连续的内存区域.如果为假,则在@base到@limit的范围内保留内存.
  */
 int __init cma_declare_contiguous(phys_addr_t base,
 			phys_addr_t size, phys_addr_t limit,
@@ -258,6 +290,10 @@ int __init cma_declare_contiguous(phys_addr_t base,
 	 * physical address of the highmem boundary so it's justifiable to get
 	 * the physical address from it.  On x86 there is a validation check for
 	 * this case, so the following workaround is needed to avoid it.
+	 *
+	 * high_memory 并不是直接映射的内存,因此获取它的物理地址是不合适的.
+	 * 但是,检查highmem边界的物理地址是有用的,因此从它那里获取物理地址是有正当理由的.
+	 * 在 x86 架构上,对于这种情况有一个验证检查,因此需要以下变通方法来避免这个问题
 	 */
 	highmem_start = __pa_nodebug(high_memory);
 #else
@@ -266,40 +302,57 @@ int __init cma_declare_contiguous(phys_addr_t base,
 	pr_debug("%s(size %pa, base %pa, limit %pa alignment %pa)\n",
 		__func__, &size, &base, &limit, &alignment);
 
+	/* 如果说cma_areas已经满了,那么就返回-ENOSPC */
 	if (cma_area_count == ARRAY_SIZE(cma_areas)) {
 		pr_err("Not enough slots for CMA reserved regions!\n");
 		return -ENOSPC;
 	}
 
+	/* 如果size为0,那么返回-EINVAL */
 	if (!size)
 		return -EINVAL;
 
+	/* 如果有align但是align又不是2的order次幂,那么返回-EINVAL */
 	if (alignment && !is_power_of_2(alignment))
 		return -EINVAL;
 
 	/*
 	 * Sanitise input arguments.
+	 * 对输入参数进行检验
 	 * Pages both ends in CMA area could be merged into adjacent unmovable
 	 * migratetype page by page allocator's buddy algorithm. In the case,
 	 * you couldn't get a contiguous memory, which is not what we want.
+	 *
+	 * 在CMA(连续内存分配器)区域的两端,页面可能会被页面分配器的伙伴算法合并到相邻的不可移动迁移类型页中.
+	 * 在这种情况下,你可能无法获得连续的内存,而这并不是我们想要的.
 	 */
+	/* 这里就要算出alignment和PAGE_SIZE <<(MAX_ORDER - 1,pageblock_order的最大值)的最大值 */
 	alignment = max(alignment,  (phys_addr_t)PAGE_SIZE <<
 			  max_t(unsigned long, MAX_ORDER - 1, pageblock_order));
+	/* 让base进行ALIGN */
 	base = ALIGN(base, alignment);
+	/* size进行ALIGN */
 	size = ALIGN(size, alignment);
+	/* limit也进行align的操作 */
 	limit &= ~(alignment - 1);
 
+	/* 如果base等于0,那么设置fixed设置为false */
 	if (!base)
 		fixed = false;
 
 	/* size should be aligned with order_per_bit */
+	/* 如果size >> PAGE_SHIFT没有和order_per_bit对齐,那么也返回-EINVAL */
 	if (!IS_ALIGNED(size >> PAGE_SHIFT, 1 << order_per_bit))
 		return -EINVAL;
 
 	/*
 	 * If allocating at a fixed base the request region must not cross the
 	 * low/high memory boundary.
+	 *
+	 * 如果在固定基地址进行分配,那么请求的区域必须不能跨越低内存(low memory)和高内存(high memory)的边界.
 	 */
+
+	/* 如果fixed定义了,如果base < highmem_start < base + size,说明他跨越了低内存和高内存的边界,那么报个err之后返回-EINVAL */
 	if (fixed && base < highmem_start && base + size > highmem_start) {
 		ret = -EINVAL;
 		pr_err("Region at %pa defined on low/high memory boundary (%pa)\n",
@@ -311,12 +364,19 @@ int __init cma_declare_contiguous(phys_addr_t base,
 	 * If the limit is unspecified or above the memblock end, its effective
 	 * value will be the memblock end. Set it explicitly to simplify further
 	 * checks.
+	 *
+	 * 如果限制未指定或高于memblock的结束地址,那么它的有效值将被视为memblock的结束地址.
+	 * 为了简化后续的检查,建议明确设置这个限制
 	 */
+
 	if (limit == 0 || limit > memblock_end)
 		limit = memblock_end;
 
 	/* Reserve memory */
 	if (fixed) {
+		/* 如果这块区域已经是reserves了,那么直接返回-EBUSY
+		 * 如果这块区域还不是reserves,那么把它添加到reserves
+		 */
 		if (memblock_is_region_reserved(base, size) ||
 		    memblock_reserve(base, size) < 0) {
 			ret = -EBUSY;
@@ -330,15 +390,23 @@ int __init cma_declare_contiguous(phys_addr_t base,
 		 * If the requested region crosses the low/high memory boundary,
 		 * try allocating from high memory first and fall back to low
 		 * memory in case of failure.
+		 *
+		 * 保留区域中的所有页面必须来自同一zone.
+		 * 如果请求的区域越过低/高内存边界,请尝试先从高内存分配,如果失败,则回退到低内存.
 		 */
+
+		/* 如果base < highmen_start < limit */
 		if (base < highmem_start && limit > highmem_start) {
+			/* 从highmem_start ~ limit分配memblock */
 			addr = memblock_alloc_range(size, alignment,
 						    highmem_start, limit,
 						    MEMBLOCK_NONE);
 			limit = highmem_start;
 		}
 
+		/* 如果addr是空 */
 		if (!addr) {
+			/* 那么从base - limit分配memblock */
 			addr = memblock_alloc_range(size, alignment, base,
 						    limit,
 						    MEMBLOCK_NONE);
@@ -351,11 +419,15 @@ int __init cma_declare_contiguous(phys_addr_t base,
 		/*
 		 * kmemleak scans/reads tracked objects for pointers to other
 		 * objects but this address isn't mapped and accessible
+		 *
+		 * kmemleak扫描/读取被跟踪的对象以查找指向其他对象的指针,但此地址未映射且无法访问
 		 */
 		kmemleak_ignore_phys(addr);
+		/* 设置base */
 		base = addr;
 	}
 
+	/* cma_init_reserved_mem从保留内存块里面获取一块地址为base、大小为size的内存,用解析出来的地址信息来初始化CMA */
 	ret = cma_init_reserved_mem(base, size, order_per_bit, res_cma);
 	if (ret)
 		goto err;

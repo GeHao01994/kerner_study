@@ -1961,25 +1961,36 @@ void __init init_cma_reserved_pageblock(struct page *page)
 	struct page *p = page;
 
 	do {
+		/* 清除PG_reserved */
 		__ClearPageReserved(p);
+		/* 设置page->_refcount为0 */
 		set_page_count(p, 0);
 	} while (++p, --i);
 
+	/* 设置pageblock的migratetype为MIGRATE_CMA */
 	set_pageblock_migratetype(page, MIGRATE_CMA);
 
+	/* 如果pageblock_order >= MAX_ORDER */
 	if (pageblock_order >= MAX_ORDER) {
 		i = pageblock_nr_pages;
 		p = page;
 		do {
+			/* 设置page->_refcount为1 */
 			set_page_refcounted(p);
+			/* 用MAX_ORDER - 1作为order去free到链表里面去 */
 			__free_pages(p, MAX_ORDER - 1);
 			p += MAX_ORDER_NR_PAGES;
 		} while (i -= MAX_ORDER_NR_PAGES);
 	} else {
+		/* 设置page->_refcount为1 */
 		set_page_refcounted(page);
+		/* 把它free到order为pageblock_order的free链表里面去 */
 		__free_pages(page, pageblock_order);
 	}
 
+	/* 技术,包括page_zone(page)->managed_pages += count;
+	 * 以及totalram_pages += count;
+	 */
 	adjust_managed_page_count(page, pageblock_nr_pages);
 }
 #endif
