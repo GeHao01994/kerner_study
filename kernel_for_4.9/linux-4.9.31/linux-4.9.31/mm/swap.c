@@ -98,15 +98,31 @@ static void __put_compound_page(struct page *page)
 	 * hugetlb. This is because hugetlb page does never have PageLRU set
 	 * (it's never listed to any LRU lists) and no memcg routines should
 	 * be called for hugetlb (it has a separate hugetlb_cgroup.)
+	 *
+	 * __page_cache_release()应该被用于THP(透明大页)而不是用于hugetlb(巨大页).
+	 * 这是因为hugetlb页面永远不会设置PageLRU(它从未被加入到任何LRU列表中),
+	 * 并且对于hugetlb来说,不应该调用任何memcg(内存控制组)例程(因为它有一个独立的hugetlb_cgroup来处理).
 	 */
+
+	/* 如果不是HUGETLB,那么就调用__page_cache_release */
 	if (!PageHuge(page))
 		__page_cache_release(page);
+	/* 去拿到复合页面的析构函数
+	 *
+	 * static inline compound_page_dtor *get_compound_page_dtor(struct page *page)
+	 * {
+	 *	VM_BUG_ON_PAGE(page[1].compound_dtor >= NR_COMPOUND_DTORS, page);
+	 *	return compound_page_dtors[page[1].compound_dtor];
+	 * }
+	 */
 	dtor = get_compound_page_dtor(page);
+	/* 调用这析构函数 */
 	(*dtor)(page);
 }
 
 void __put_page(struct page *page)
 {
+	/* 如果该page是复合页面 */
 	if (unlikely(PageCompound(page)))
 		__put_compound_page(page);
 	else

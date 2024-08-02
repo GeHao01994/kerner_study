@@ -170,28 +170,40 @@ unlock_ret:
  * Return the number of global page reservations that must be dropped.
  * The return value may only be different than the passed value (delta)
  * in the case where a subpool minimum size must be maintained.
+ *
+ * 子池用于释放和取消预留页面.
+ * 该函数返回必须放弃的全局页面预留数.
+ *
+ * 返回值仅在需要保持子池最小大小时可能与传入的值（差值）不同。
  */
 static long hugepage_subpool_put_pages(struct hugepage_subpool *spool,
 				       long delta)
 {
+	/* 先拿到ret */
 	long ret = delta;
 
+	/* 如果子池为NULL,那么直接返回delta */
 	if (!spool)
 		return delta;
 
 	spin_lock(&spool->lock);
 
+	/* 如果spool->max_hpages不等于-1,那么spool->used_hpages -=delta,应为该page要被释放了 */
 	if (spool->max_hpages != -1)		/* maximum size accounting */
 		spool->used_hpages -= delta;
 
 	 /* minimum size accounting */
+	/* 如果spool->min_hpages != -1,并且used_hpages < min_hpages */
 	if (spool->min_hpages != -1 && spool->used_hpages < spool->min_hpages) {
+		/* 如果rsv_hpages + delta <= min_hpages,就是说加上这个还小于最小预留了,那么返回0,让他预留 */
 		if (spool->rsv_hpages + delta <= spool->min_hpages)
 			ret = 0;
-		else
+		else	/* 否则就返回超过的值 */
 			ret = spool->rsv_hpages + delta - spool->min_hpages;
 
+		/* 让spool->rsv_hpages加上它 */
 		spool->rsv_hpages += delta;
+		/* 如果spool->rsv_hpages 大于min_hpages,那么设置spool->rsv_hpages = spool->min_hpages */
 		if (spool->rsv_hpages > spool->min_hpages)
 			spool->rsv_hpages = spool->min_hpages;
 	}
@@ -199,6 +211,8 @@ static long hugepage_subpool_put_pages(struct hugepage_subpool *spool,
 	/*
 	 * If hugetlbfs_put_super couldn't free spool due to an outstanding
 	 * quota reference, free it now.
+	 *
+	 * 如果hugetlbfs_put_super由于未完成的配额引用而无法释放spool,请立即释放它.
 	 */
 	unlock_or_release_subpool(spool);
 
@@ -859,8 +873,11 @@ static bool vma_has_reserves(struct vm_area_struct *vma, long chg)
 
 static void enqueue_huge_page(struct hstate *h, struct page *page)
 {
+	/* 拿到node id */
 	int nid = page_to_nid(page);
+	/* 把它放到hugepage_freelists里面去 */
 	list_move(&page->lru, &h->hugepage_freelists[nid]);
+	/* 相关计数+1 */
 	h->free_huge_pages++;
 	h->free_huge_pages_node[nid]++;
 }
@@ -1032,13 +1049,19 @@ static void destroy_compound_gigantic_page(struct page *page,
 	int nr_pages = 1 << order;
 	struct page *p = page + 1;
 
+	/* 设置page[1].compound_mapcount = 0 */
 	atomic_set(compound_mapcount_ptr(page), 0);
+	/* 从 1 ~ nr_pages进行循环 */
 	for (i = 1; i < nr_pages; i++, p = mem_map_next(p, page, i)) {
+		/* WRITE_ONCE(page->compound_head, 0); */
 		clear_compound_head(p);
+		/* 设置他们的_refcount = 1 */
 		set_page_refcounted(p);
 	}
 
+	/* page[1].compound_order = 0 */
 	set_compound_order(page, 0);
+	/* 清除该PG_head */
 	__ClearPageHead(page);
 }
 
@@ -1169,11 +1192,17 @@ static void update_and_free_page(struct hstate *h, struct page *page)
 {
 	int i;
 
+	/* gigantic表示巨大的,
+	 * hstate_is_gigantic表示huge_page_order(h) >= MAX_ORDER;
+	 * 但是gigantic_page_supported == false,那么直接返回
+	 */
 	if (hstate_is_gigantic(h) && !gigantic_page_supported())
 		return;
 
+	/* 更新hr_huge_pages计数 */
 	h->nr_huge_pages--;
 	h->nr_huge_pages_node[page_to_nid(page)]--;
+	/* 对里面的每个page都清除这些flags */
 	for (i = 0; i < pages_per_huge_page(h); i++) {
 		page[i].flags &= ~(1 << PG_locked | 1 << PG_error |
 				1 << PG_referenced | 1 << PG_dirty |
@@ -1181,12 +1210,17 @@ static void update_and_free_page(struct hstate *h, struct page *page)
 				1 << PG_writeback);
 	}
 	VM_BUG_ON_PAGE(hugetlb_cgroup_from_page(page), page);
+	/* 设置他们的虚构函数index为NULL_COMPOUND_DTOR */
 	set_compound_page_dtor(page, NULL_COMPOUND_DTOR);
+	/* 设置他们的_refcount为1 */
 	set_page_refcounted(page);
-	if (hstate_is_gigantic(h)) {
+	/* 如果是巨大的hstate */
+	if (hstate_is_gigantic(h)) {	/* 清除compound_page的一些标志 */
 		destroy_compound_gigantic_page(page, huge_page_order(h));
+		/* 一页一页去释放page */
 		free_gigantic_page(page, huge_page_order(h));
 	} else {
+		/* 这就是把page直接释放到相关的oder的freelist */
 		__free_pages(page, huge_page_order(h));
 	}
 }
@@ -1232,42 +1266,94 @@ void free_huge_page(struct page *page)
 	/*
 	 * Can't pass hstate in here because it is called from the
 	 * compound page destructor.
+	 *
+	 * 不能在这里传递hstate,因为它是从复合页面析构函数中调用.
 	 */
 	struct hstate *h = page_hstate(page);
+	/* 拿到node id */
 	int nid = page_to_nid(page);
+	/* 拿到(page)->private,这里可能是hugepage_subpool? */
 	struct hugepage_subpool *spool =
 		(struct hugepage_subpool *)page_private(page);
 	bool restore_reserve;
 
+	/* 设置(page)->private = 0 */
 	set_page_private(page, 0);
 	page->mapping = NULL;
+	/* 如果_refcount或_mapcount,那么报个BUG吧 */
 	VM_BUG_ON_PAGE(page_count(page), page);
 	VM_BUG_ON_PAGE(page_mapcount(page), page);
+	/* 如果PG_private被设置的 */
+	/* PagePrivate页面标志是用来指示在释放巨页时必须恢复巨页的预留 */
+	/* 巨页释放是由函数free_huge_folio()执行的.
+	 * 这个函数是hugetlbfs复合页的析构器.
+	 * 因此,它只传递一个指向页面结构体的指针.
+	 * 当一个巨页被释放时,可能需要进行预留计算.如果该页与包含保留的子池相关联,或者该页在错误路径上被释放,必须恢复全局预留计数,就会出现这种情况.
+	 * page->private字段指向与该页相关的任何子池.如果PagePrivate标志被设置,它表明全局预留计数应该被调整
+	 *
+	 * 该函数首先调用hugepage_subpool_put_pages()来处理该页.如果这个函数返回一个0的值(不等于传递的1的值),
+	 * 它表明预留与子池相关联,这个新释放的页面必须被用来保持子池预留的数量超过最小值.因此,在这种情况下,全局resv_huge_pages计数器被递增.
+	 *
+	 * 如果页面中设置了PagePrivate标志,那么全局resv_huge_pages计数器将永远被递增.
+	 */
 	restore_reserve = PagePrivate(page);
+	/* 清除PG_private */
 	ClearPagePrivate(page);
 
 	/*
 	 * A return code of zero implies that the subpool will be under its
 	 * minimum size if the reservation is not restored after page is free.
 	 * Therefore, force restore_reserve operation.
+	 *
+	 * 如果subpool的返回码为0,则意味着子池将处于最小大小状态,如果页面在释放后没有恢复预留空间,故强制执行restore_reserve操作.
+	 */
+
+	/* 有一个结构体hstate与每个巨页尺寸相关联.
+	 * hstate跟踪所有指定大小的巨页.
+	 * 一个子池代表一个hstate中的页面子集,它与一个已挂载的hugetlbfs文件系统相关
+	 * 当一个hugetlbfs文件系统被挂载时,可以指定min_size选项,它表示文件系统所需的最小的巨页数量.
+	 * 如果指定了这个选项,与min_size相对应的巨页的数量将被预留给文件系统使用.
+	 * 这个数字在结构体hugepage_subpool的min_hpages字段中被跟踪.
+	 * 在挂载时,hugetlb_acct_memory(min_hpages)被调用以预留指定数量的巨页.如果它们不能被预留,挂载就会失败.
+	 *
+	 * 当从子池中获取或释放页面时,会调用hugepage_subpool_get/put_pages()函数.
+	 * hugepage_subpool_get/put_pages被传递给巨页数量,以此来调整子池的“已用页面”计数(get为下降,put为上升).
+	 * 通常情况下,如果子池中没有足够的页面,它们会返回与传递的相同的值或一个错误.
+	 *
+	 * 然而,如果预留与子池相关联,可能会返回一个小于传递值的返回值.这个返回值表示必须进行的额外全局池调整的数量.
+	 * 例如,假设一个子池包含3个预留的巨页,有人要求5个.
+	 * 与子池相关的3个预留页可以用来满足部分请求.
+	 * 但是,必须从全局池中获得2个页面.为了向调用者转达这一信息,将返回值2.然后,调用者要负责从全局池中获取另外两个页面.
 	 */
 	if (hugepage_subpool_put_pages(spool, 1) == 0)
 		restore_reserve = true;
 
 	spin_lock(&hugetlb_lock);
+	/*  static void clear_page_huge_active(struct page *page)
+	 * {
+	 *	VM_BUG_ON_PAGE(!PageHeadHuge(page), page);
+	 *	ClearPagePrivate(&page[1]);
+	 * }
+	 */
 	clear_page_huge_active(page);
 	hugetlb_cgroup_uncharge_page(hstate_index(h),
 				     pages_per_huge_page(h), page);
+	/* 如果该page需要保留,那么该hstates->resv_huge_pages +1 */
 	if (restore_reserve)
 		h->resv_huge_pages++;
 
+	/* surplus_huge_pages_node表示每个内存节点中临时巨型页的数量 */
 	if (h->surplus_huge_pages_node[nid]) {
 		/* remove the page from active list */
+		/* 把它从active list里面拔出来 */
 		list_del(&page->lru);
+		/* 释放掉这些页面 */
 		update_and_free_page(h, page);
+		/* 相关计数 -1 */
 		h->surplus_huge_pages--;
 		h->surplus_huge_pages_node[nid]--;
 	} else {
+		/* 不然这里就是把它放到hstate的freelists里面去 */
 		arch_clear_hugepage_flags(page);
 		enqueue_huge_page(h, page);
 	}
@@ -1277,9 +1363,33 @@ void free_huge_page(struct page *page)
 static void prep_new_huge_page(struct hstate *h, struct page *page, int nid)
 {
 	INIT_LIST_HEAD(&page->lru);
+	/* static inline void set_compound_page_dtor(struct page *page,
+	 *		enum compound_dtor_id compound_dtor)
+	 * {
+	 *	VM_BUG_ON_PAGE(compound_dtor >= NR_COMPOUND_DTORS, page);
+	 *	page[1].compound_dtor = compound_dtor;
+	 * }
+	 *
+	 * page[1].compound_dtor = compound_dtor;
+	 * 看起来它只是一个简单的赋值,实际上它是compound_page_dtors数组的index
+	 * 通过它来找到对应的析构函数
+	 *
+	 * compound_page_dtor * const compound_page_dtors[] = {
+	 *	NULL,
+	 *	free_compound_page,
+	 * #ifdef CONFIG_HUGETLB_PAGE
+	 *	free_huge_page,
+	 * #endif
+	 * #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+	 *	free_transhuge_page,
+	 * #endif
+	 * };
+	 */
 	set_compound_page_dtor(page, HUGETLB_PAGE_DTOR);
 	spin_lock(&hugetlb_lock);
+	/* 设置cgroup */
 	set_hugetlb_cgroup(page, NULL);
+	/* h->nr_huge_page++ */
 	h->nr_huge_pages++;
 	h->nr_huge_pages_node[nid]++;
 	spin_unlock(&hugetlb_lock);
@@ -2178,7 +2288,13 @@ static void __init hugetlb_hstate_alloc_pages(struct hstate *h)
 {
 	unsigned long i;
 
+	/* 从0 到max_huge_pages - 1进行分配 */
 	for (i = 0; i < h->max_huge_pages; ++i) {
+		/* 如果huge_page_order(h) >= MAX_ORDER
+		 * 通过bootmem进行分配
+		 *
+		 * 否则,通过伙伴系统进行分配
+		 */
 		if (hstate_is_gigantic(h)) {
 			if (!alloc_bootmem_huge_page(h))
 				break;
@@ -2186,6 +2302,8 @@ static void __init hugetlb_hstate_alloc_pages(struct hstate *h)
 					 &node_states[N_MEMORY]))
 			break;
 	}
+
+	/* 设置max_huge_pages = i */
 	h->max_huge_pages = i;
 }
 
@@ -2193,11 +2311,23 @@ static void __init hugetlb_init_hstates(void)
 {
 	struct hstate *h;
 
+	/* 对于hstate数组里面所有的成员 */
 	for_each_hstate(h) {
+		/* 记录最小的minimum_order */
 		if (minimum_order > huge_page_order(h))
 			minimum_order = huge_page_order(h);
 
-		/* oversize hugepages were init'ed in early boot */
+		/* oversize hugepages were init'ed in early boot
+		 * 在启动早期,超大尺寸的大页内存已被初始化
+		 */
+
+		/* static inline bool hstate_is_gigantic(struct hstate *h)
+		 * {
+		 *	return huge_page_order(h) >= MAX_ORDER;
+		 * }
+		 *
+		 * 这里对hugetbl进行分配页面
+		 */
 		if (!hstate_is_gigantic(h))
 			hugetlb_hstate_alloc_pages(h);
 	}
@@ -2778,14 +2908,21 @@ static int __init hugetlb_init(void)
 {
 	int i;
 
+	/* 检查是否支持huge pages: 函数hugepages_supported()检查系统是否支持huge pages.
+	 * 如果不是,则返回0并退出.
+	 */
 	if (!hugepages_supported())
 		return 0;
-
+	/* 如果在hstate数组里面没有找到default_hstate_size */
 	if (!size_to_hstate(default_hstate_size)) {
+		/* 那么设置default_hstate_size = HPAGE_SIZE(一般为PMD_SHIFT) */
 		default_hstate_size = HPAGE_SIZE;
-		if (!size_to_hstate(default_hstate_size))
+		/* 如果设置了default_hstate_size,在hstate数组里面还是没有找到,那么初始化并添加它到hstate里面去 */
+		if (!size_to_hstate(default_hstate_size))/* 这里就是算出它的order,并且带入到里面 */
+			/* 这个就是是初始化hstate */
 			hugetlb_add_hstate(HUGETLB_PAGE_ORDER);
 	}
+	/* 这个就是拿到它在hstate数组里面的index */
 	default_hstate_idx = hstate_index(size_to_hstate(default_hstate_size));
 	if (default_hstate_max_huge_pages) {
 		if (!default_hstate.max_huge_pages)
@@ -2794,8 +2931,10 @@ static int __init hugetlb_init(void)
 
 	hugetlb_init_hstates();
 	gather_bootmem_prealloc();
+	/* 这里就是输出hugepages的log */
 	report_hugepages();
 
+	/* 这边是创建sysfs接口 */
 	hugetlb_sysfs_init();
 	hugetlb_register_all_nodes();
 	hugetlb_cgroup_file_init();
@@ -2826,25 +2965,38 @@ void __init hugetlb_add_hstate(unsigned int order)
 	struct hstate *h;
 	unsigned long i;
 
+	/* 如果PAGE << order的大小已经在hstate里面了,那么说明指定了两次,那么报个警告了return */
 	if (size_to_hstate(PAGE_SIZE << order)) {
 		pr_warn("hugepagesz= specified twice, ignoring\n");
 		return;
 	}
+
+	/* 如果hugetlb_max_hstate >= HUGE_MAX_HSTATE(arm64为4),那么报个警告 */
 	BUG_ON(hugetlb_max_hstate >= HUGE_MAX_HSTATE);
+	/* 如果order==0,也报个警告 */
 	BUG_ON(order == 0);
+	/* hstate取下一个没有用过的hstate */
 	h = &hstates[hugetlb_max_hstate++];
+	/* 设置其order = 传进来的 order */
 	h->order = order;
+	/* 设置其mask */
 	h->mask = ~((1ULL << (order + PAGE_SHIFT)) - 1);
+	/* 设置其nr_huge_pages = 0 */
 	h->nr_huge_pages = 0;
+	/* 设置其free_huge_pages = 0 */
 	h->free_huge_pages = 0;
+	/* 初始化所有的hugepage_freelists */
 	for (i = 0; i < MAX_NUMNODES; ++i)
 		INIT_LIST_HEAD(&h->hugepage_freelists[i]);
+	/* 初始化其hugepage_activelist链表 */
 	INIT_LIST_HEAD(&h->hugepage_activelist);
 	h->next_nid_to_alloc = first_memory_node;
 	h->next_nid_to_free = first_memory_node;
+	/* 设置其name */
 	snprintf(h->name, HSTATE_NAME_LEN, "hugepages-%lukB",
 					huge_page_size(h)/1024);
 
+	/* 设置其全局变量parsed_hstate为本次的hstate */
 	parsed_hstate = h;
 }
 
@@ -2853,6 +3005,9 @@ static int __init hugetlb_nrpages_setup(char *s)
 	unsigned long *mhp;
 	static unsigned long *last_mhp;
 
+	/* 如果说parsed_valid_hugepagesz为false,那么说明它是一个bad_size,
+	 * 那么报一行警告了直接返回
+	 */
 	if (!parsed_valid_hugepagesz) {
 		pr_warn("hugepages = %s preceded by "
 			"an unsupported hugepagesz, ignoring\n", s);
@@ -2862,6 +3017,8 @@ static int __init hugetlb_nrpages_setup(char *s)
 	/*
 	 * !hugetlb_max_hstate means we haven't parsed a hugepagesz= parameter yet,
 	 * so this hugepages= parameter goes to the "default hstate".
+	 *
+	 * !hugetlb_max_hstate意味着我们还没有解析hugepagesz=参数,因此这个hugepages=参数会被分配到"默认的 hstate".
 	 */
 	else if (!hugetlb_max_hstate)
 		mhp = &default_hstate_max_huge_pages;

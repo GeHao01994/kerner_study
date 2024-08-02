@@ -297,25 +297,49 @@ unsigned long hugetlb_get_unmapped_area(struct file *file, unsigned long addr,
 #define HSTATE_NAME_LEN 32
 /* Defines one hugetlb page size */
 struct hstate {
+	/* 分配永久巨型页并添加到巨型页池中的时候,
+	 * 在允许的内存节点集合中轮流从每个内存节点分配永久巨型页,
+	 * 这个成员用来记录下次从哪个内存节点分配永久巨型页
+	 */
 	int next_nid_to_alloc;
+	/* 从巨型页池释放空闲巨型页的时候,
+	 * 在允许的内存节点集合中轮流从每个内存节点释放巨型页,这个成员用来记录下次从哪个内存节点释放巨型页
+	 */
 	int next_nid_to_free;
+	/* 巨型页的长度,页的阶数 */
 	unsigned int order;
+	/* 巨型页页号的掩码,将虚拟地址和掩码按位与,得到巨型页页号 */
 	unsigned long mask;
+	/* 永久巨型页的最大数量 */
 	unsigned long max_huge_pages;
+	/* 巨型页的数量 */
 	unsigned long nr_huge_pages;
+	/* 空闲巨型页的数量 */
 	unsigned long free_huge_pages;
+	/* 这是一个全局的(per-hstate)预留的巨页的计数.
+	 * 预留的巨页只对预留它们的任务可用.
+	 * 因此,一般可用的巨页的数量被计算为(free_huge_pages - resv_huge_pages)
+	 */
 	unsigned long resv_huge_pages;
+	/* 临时巨型页的数量 */
 	unsigned long surplus_huge_pages;
+	/* 临时巨型页的最大数量 */
 	unsigned long nr_overcommit_huge_pages;
+	/* 把已分配出去的巨型页链接起来 */
 	struct list_head hugepage_activelist;
+	/* 每个内存节点一个空闲巨型页链表 */
 	struct list_head hugepage_freelists[MAX_NUMNODES];
+	/* 每个内存节点中巨型页的数量 */
 	unsigned int nr_huge_pages_node[MAX_NUMNODES];
+	/* 每个内存节点中空闲巨型页的数量 */
 	unsigned int free_huge_pages_node[MAX_NUMNODES];
+	/* 每个内存节点中临时巨型页的数量 */
 	unsigned int surplus_huge_pages_node[MAX_NUMNODES];
 #ifdef CONFIG_CGROUP_HUGETLB
 	/* cgroup control files */
 	struct cftype cgroup_files[5];
 #endif
+	/* 内存池名称 */
 	char name[HSTATE_NAME_LEN];
 };
 
@@ -475,6 +499,8 @@ static inline spinlock_t *huge_pte_lockptr(struct hstate *h,
  * Some platform decide whether they support huge pages at boot
  * time. Some of them, such as powerpc, set HPAGE_SHIFT to 0
  * when there is no such support
+ *
+ * 一些平台在启动时决定它们是否支持大页.其中一些平台,比如powerpc,在没有这种支持时将HPAGE_SHIFT设置为0.
  */
 #define hugepages_supported() (HPAGE_SHIFT != 0)
 #endif

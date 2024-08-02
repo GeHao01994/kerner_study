@@ -805,6 +805,7 @@ static inline void get_page(struct page *page)
 
 static inline void put_page(struct page *page)
 {
+	/* 拿到复合页面的头,你拿到中间或者尾怎么释放页面呢? */
 	page = compound_head(page);
 	/* static inline int put_page_testzero(struct page *page)
 	 * {

@@ -183,8 +183,16 @@ struct page;	/* forward declaration */
 
 static inline struct page *compound_head(struct page *page)
 {
+	/* 这边是拿到page->compound_head
+	 *
+	 * static __always_inline void set_compound_head(struct page *page, struct page *head)
+	 * {
+	 *	WRITE_ONCE(page->compound_head, (unsigned long)head + 1);
+	 * }
+	 */
 	unsigned long head = READ_ONCE(page->compound_head);
 
+	/* 如果head & 1还有值,那说明不是头页面,那么head -1 取头页面 */
 	if (unlikely(head & 1))
 		return (struct page *) (head - 1);
 	return page;
