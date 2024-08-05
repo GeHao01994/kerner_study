@@ -1927,26 +1927,44 @@ struct zonelist *huge_zonelist(struct vm_area_struct *vma, unsigned long addr,
  * mempolicy is only ever changed by the task itself.
  *
  * N.B., it is the caller's responsibility to free a returned nodemask.
+ *
+ * init_nodemask_of_mempolicy
+ *
+ * 如果当前任务的内存策略是"默认"(即为NULL),则函数返回false以表示采用默认策略.
+ * 否则,该函数会将针对"绑定"(bind)或"交错"(interleave)策略的策略节点掩码(nodemask)提取到参数nodemask中,
+ * 或者将参数nodemask初始化为包含单个节点的掩码,这适用于"首选"(preferred)或"本地"(local)策略,并返回true以表示存在非默认内存策略.
+ *
+ * 我们不需要对内存策略进行引用计数(即不使用mpol_get/put),因为当前任务正在检查其自身的内存策略,且任务的内存策略只能由任务本身进行更改.
+ *
+ * 注意,释放返回的nodemask是调用者的责任.
  */
 bool init_nodemask_of_mempolicy(nodemask_t *mask)
 {
 	struct mempolicy *mempolicy;
 	int nid;
 
+	/* 如果mask && current->mempolicy == 0,那么返回false */
 	if (!(mask && current->mempolicy))
 		return false;
 
 	task_lock(current);
+	/* 拿到当前进程的mempolicy */
 	mempolicy = current->mempolicy;
 	switch (mempolicy->mode) {
+	/* MPOL_PREFERRED: 优先在指定一个或多个节点内分配内存,当分配失败时去其他节点分配内存 */
 	case MPOL_PREFERRED:
+		/* MPOL_F_LOCAL表示本地node */
 		if (mempolicy->flags & MPOL_F_LOCAL)
 			nid = numa_node_id();
-		else
+		else	/* 否则拿那preferred_node指定的内存 */
 			nid = mempolicy->v.preferred_node;
+		/* 设置nid到mask */
 		init_nodemask_of_node(mask, nid);
 		break;
 
+	/* MPOL_BIND: 必须在指定的一个或多个节点分配内存,如果分配失败,即使其他节点有内存也会进行Swap或OOM.
+	 * MPOL_INTERLEAVE: 从指定的一个或多个节点内交错分配内存.
+	 */
 	case MPOL_BIND:
 		/* Fall through */
 	case MPOL_INTERLEAVE:

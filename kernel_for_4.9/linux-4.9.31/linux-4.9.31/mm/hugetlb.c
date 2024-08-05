@@ -1512,6 +1512,10 @@ static int alloc_fresh_huge_page(struct hstate *h, nodemask_t *nodes_allowed)
  * Attempt to keep persistent huge pages more or less
  * balanced over allowed nodes.
  * Called with hugetlb_lock locked.
+ *
+ * 从下一个节点中释放池中的大页面以供使用.
+ * 尝试在允许的节点上保持持久性大页面的相对平衡.
+ * 调用时,hugetlb_lock已被锁定.
  */
 static int free_pool_huge_page(struct hstate *h, nodemask_t *nodes_allowed,
 							 bool acct_surplus)
@@ -1523,12 +1527,18 @@ static int free_pool_huge_page(struct hstate *h, nodemask_t *nodes_allowed,
 		/*
 		 * If we're returning unused surplus pages, only examine
 		 * nodes with surplus pages.
+		 *
+		 * 如果我们正在返回未使用的多余页面,那么只检查那些拥有多余页面的节点
 		 */
+
+		/* (如果acct_surplus == false 或者说h->surplus_huge_pages_node[node]不为0) 并且hugepage_freelists不为空 */
 		if ((!acct_surplus || h->surplus_huge_pages_node[node]) &&
 		    !list_empty(&h->hugepage_freelists[node])) {
+			/* 找到该page */
 			struct page *page =
 				list_entry(h->hugepage_freelists[node].next,
 					  struct page, lru);
+			/* 从lru里面删除 */
 			list_del(&page->lru);
 			h->free_huge_pages--;
 			h->free_huge_pages_node[node]--;
@@ -1536,6 +1546,8 @@ static int free_pool_huge_page(struct hstate *h, nodemask_t *nodes_allowed,
 				h->surplus_huge_pages--;
 				h->surplus_huge_pages_node[node]--;
 			}
+
+			/* 释放页面 */
 			update_and_free_page(h, page);
 			ret = 1;
 			break;
@@ -2363,18 +2375,30 @@ static void try_to_free_low(struct hstate *h, unsigned long count,
 {
 	int i;
 
+	/* 如果hstate是巨大的,那么它释放不了进伙伴系统啊 */
 	if (hstate_is_gigantic(h))
 		return;
-
+	/* 否则,对node_allowed里面的每个node */
 	for_each_node_mask(i, *nodes_allowed) {
 		struct page *page, *next;
+		/* 首先拿到该node的hugepage_freelists链表 */
 		struct list_head *freel = &h->hugepage_freelists[i];
+		/* 对该链表的成员进行轮询 */
 		list_for_each_entry_safe(page, next, freel, lru) {
+			/* 如果count >= h->nr_huge_pages,那么return */
+			/* 实际上就是,假设我原来是5个hugepages,但我现在echo 3 > /sys/kernel/mm/hugepages/hugepages-xxxxxKB/nr_hugepages
+			 * 这里就要释放
+			 */
 			if (count >= h->nr_huge_pages)
 				return;
+			/* 如果page是HighMem,那么continue */
 			if (PageHighMem(page))
 				continue;
+			/* 把它从该node hugepage_freelists里面拔掉 */
 			list_del(&page->lru);
+			/* 把该page还到伙伴系统里面去,并且h->nr_huge_pages--;
+			 * h->nr_huge_pages_node[page_to_nid(page)]--;
+			 */
 			update_and_free_page(h, page);
 			h->free_huge_pages--;
 			h->free_huge_pages_node[page_to_nid(page)]--;
@@ -2392,6 +2416,10 @@ static inline void try_to_free_low(struct hstate *h, unsigned long count,
  * Increment or decrement surplus_huge_pages.  Keep node-specific counters
  * balanced by operating on them in a round-robin fashion.
  * Returns 1 if an adjustment was made.
+ *
+ * 增加或减少surplus_huge_pages. 通过以轮询方式对特定于节点的计数器进行操作来保持其平衡.
+ *
+ * 如果进行了调整,则返回1.
  */
 static int adjust_pool_surplus(struct hstate *h, nodemask_t *nodes_allowed,
 				int delta)
@@ -2400,12 +2428,15 @@ static int adjust_pool_surplus(struct hstate *h, nodemask_t *nodes_allowed,
 
 	VM_BUG_ON(delta != -1 && delta != 1);
 
+	/* delta < 0 应该表示的是减小的意思 */
 	if (delta < 0) {
+		/* 去找surplus_huge_pages_node */
 		for_each_node_mask_to_alloc(h, nr_nodes, node, nodes_allowed) {
 			if (h->surplus_huge_pages_node[node])
 				goto found;
 		}
 	} else {
+		/* 这边就是看增加到哪里,增加到h->surplus_huge_pages_node[node] < h->nr_huge_pages_node[node] */
 		for_each_node_mask_to_free(h, nr_nodes, node, nodes_allowed) {
 			if (h->surplus_huge_pages_node[node] <
 					h->nr_huge_pages_node[node])
@@ -2415,6 +2446,7 @@ static int adjust_pool_surplus(struct hstate *h, nodemask_t *nodes_allowed,
 	return 0;
 
 found:
+	/* 这里就是进行计数操作 */
 	h->surplus_huge_pages += delta;
 	h->surplus_huge_pages_node[node] += delta;
 	return 1;
@@ -2426,6 +2458,7 @@ static unsigned long set_max_huge_pages(struct hstate *h, unsigned long count,
 {
 	unsigned long min_count, ret;
 
+	/* 如果(huge_page_order(h) >= MAX_ORDER),但是又不支持gigantic_page,那么直接返回max_huge_pages */
 	if (hstate_is_gigantic(h) && !gigantic_page_supported())
 		return h->max_huge_pages;
 
@@ -2439,29 +2472,42 @@ static unsigned long set_max_huge_pages(struct hstate *h, unsigned long count,
 	 * not critical, though, it just means the overall size of the
 	 * pool might be one hugepage larger than it needs to be, but
 	 * within all the constraints specified by the sysctls.
+	 *
+	 * 增加池大小
+	 * 首先,将页面从过剩状态移出.然后,通过分配新的大页面来弥补剩余的差额.
+	 *
+	 * 我们可能会在这里与__alloc_buddy_huge_page(()发生竞争,并无法将过剩的大页面转换为正常的大页面.
+	 * 不过,这并不关键,它只是意味着池的总体大小可能比实际需要的大一个大页面的大小.但仍在所有由系统控制(sysctls)指定的约束范围内.
 	 */
 	spin_lock(&hugetlb_lock);
+	/* 如果h->surplus_huge_pages有数量,并且count > h->nr_huge_pages - h->surplus_huge_pages */
 	while (h->surplus_huge_pages && count > persistent_huge_pages(h)) {
+		/* 这里就是较小临时页面,也正如上面所说,将页面从过剩状态移出.然后,通过分配新的大页面来弥补剩余的差额 */
 		if (!adjust_pool_surplus(h, nodes_allowed, -1))
 			break;
 	}
 
+	/* 如果count > h->nr_huge_pages - h->surplus_huge_pages,因为h->surplus_huge_pages最终会被还到伙伴系统中去,所以这里先减去 */
 	while (count > persistent_huge_pages(h)) {
 		/*
 		 * If this allocation races such that we no longer need the
 		 * page, free_huge_page will handle it by freeing the page
 		 * and reducing the surplus.
+		 *
+		 * 如果此分配竞争使得我们不再需要该页面,free_huge_page将通过释放页面并减少剩余来处理它.
 		 */
 		spin_unlock(&hugetlb_lock);
 
 		/* yield cpu to avoid soft lockup */
 		cond_resched();
 
+		/* 这里就是去分配我们的页面,同时这里也会让h->nr_huge_pages++; */
 		if (hstate_is_gigantic(h))
 			ret = alloc_fresh_gigantic_page(h, nodes_allowed);
 		else
 			ret = alloc_fresh_huge_page(h, nodes_allowed);
 		spin_lock(&hugetlb_lock);
+		/* 返回1表示成功,所以这里说的是如果失败 */
 		if (!ret)
 			goto out;
 
@@ -2484,20 +2530,39 @@ static unsigned long set_max_huge_pages(struct hstate *h, unsigned long count,
 	 * though, we'll note that we're not allowed to exceed surplus
 	 * and won't grow the pool anywhere else. Not until one of the
 	 * sysctls are changed, or the surplus pages go out of use.
+	 *
+	 * 减小池大小
+	 *
+	 * 首先,将空闲页面返回给伙伴分配器(注意保留足够的页面以满足预留需求).
+	 * 然后,根据需要将页面置于过剩状态,以便随着页面变为空闲,池将缩小到所需大小.
+	 *
+	 * 通过将页面置于过剩状态而不考虑超分配值,我们允许过剩池的大小超过超分配限制.
+	 * 但在这里,合理的选择并不多. 由于__alloc_buddy_huge_page()正在检查全局计数器,因此我们将注意到,我们不允许超过过剩限制,
+	 * 也不会在其他任何地方增加池的大小.除非系统控制(sysctls)之一被更改,或者过剩页面不再被使用.
 	 */
+
+	/* min_count = h->resv_huge_pages + h->nr_huge_pages - h->free_huge_pages */
 	min_count = h->resv_huge_pages + h->nr_huge_pages - h->free_huge_pages;
+	/* min_count选count和min_count的最大值 */
 	min_count = max(count, min_count);
+	/* 释放一些page条件是count >= h->nr_huge_pages之后就不回收了,所以这里保证不回收正在用的呢 */
 	try_to_free_low(h, min_count, nodes_allowed);
+
+	/* 如果min_count < h->nr_huge_pages - h->surplus_huge_pages */
 	while (min_count < persistent_huge_pages(h)) {
+		/* 释放一些page */
 		if (!free_pool_huge_page(h, nodes_allowed, 0))
 			break;
 		cond_resched_lock(&hugetlb_lock);
 	}
+
+	/* 实际上这里做的作用就是把一些临时页变成非临时页 */
 	while (count < persistent_huge_pages(h)) {
 		if (!adjust_pool_surplus(h, nodes_allowed, 1))
 			break;
 	}
 out:
+	/* 返回h->nr_huge_pages - h->surplus_huge_pages */
 	ret = persistent_huge_pages(h);
 	spin_unlock(&hugetlb_lock);
 	return ret;
@@ -2519,6 +2584,7 @@ static struct hstate *kobj_to_hstate(struct kobject *kobj, int *nidp)
 {
 	int i;
 
+	/* 这里就是去拿到hstate,判断标志就是先判断kobj一样取index,然后根据hstates和index来获取对应的hstates */
 	for (i = 0; i < HUGE_MAX_HSTATE; i++)
 		if (hstate_kobjs[i] == kobj) {
 			if (nidp)
@@ -2550,19 +2616,36 @@ static ssize_t __nr_hugepages_store_common(bool obey_mempolicy,
 					   unsigned long count, size_t len)
 {
 	int err;
+
+	/* #if NODES_SHIFT > 8 nodemask_t > 256 bytes
+	 * #define NODEMASK_ALLOC(type, name, gfp_flags)	\
+	 *		type *name = kmalloc(sizeof(*name), gfp_flags)
+	 * #define NODEMASK_FREE(m)			kfree(m)
+	 * #else
+	 * #define NODEMASK_ALLOC(type, name, gfp_flags)	type _##name, *name = &_##name
+	 * #define NODEMASK_FREE(m)			do {} while (0)
+	 * #endif
+	 */
+
+	/* 这里实际上就是去分配nodes_allowed的内存 */
 	NODEMASK_ALLOC(nodemask_t, nodes_allowed, GFP_KERNEL | __GFP_NORETRY);
 
+	/* 如果hstate是巨大(huge_page_order(h) >= MAX_ORDER)的但是gigantic_page又不support,那么直接返回非法参数 */
 	if (hstate_is_gigantic(h) && !gigantic_page_supported()) {
 		err = -EINVAL;
 		goto out;
 	}
 
+	/* 如果nid = NUMA_NO_NODE,说明是全局的hstate */
 	if (nid == NUMA_NO_NODE) {
 		/*
 		 * global hstate attribute
 		 */
+
+		/* 如果obey_mempolicy = false 并且init_nodemask_of_mempolicy = true */
 		if (!(obey_mempolicy &&
 				init_nodemask_of_mempolicy(nodes_allowed))) {
+			/* free掉nodes_allowed */
 			NODEMASK_FREE(nodes_allowed);
 			nodes_allowed = &node_states[N_MEMORY];
 		}
@@ -2576,6 +2659,7 @@ static ssize_t __nr_hugepages_store_common(bool obey_mempolicy,
 	} else
 		nodes_allowed = &node_states[N_MEMORY];
 
+	/* 设置最大页数,并分配具体内存页 */
 	h->max_huge_pages = set_max_huge_pages(h, count, nodes_allowed);
 
 	if (nodes_allowed != &node_states[N_MEMORY])
@@ -2596,10 +2680,12 @@ static ssize_t nr_hugepages_store_common(bool obey_mempolicy,
 	int nid;
 	int err;
 
+	/* 这里是把传过来的buf转换成unsigned long */
 	err = kstrtoul(buf, 10, &count);
 	if (err)
 		return err;
 
+	/* 这里通过kobj拿到对应的hstate */
 	h = kobj_to_hstate(kobj, &nid);
 	return __nr_hugepages_store_common(obey_mempolicy, h, nid, count, len);
 }
@@ -2730,12 +2816,15 @@ static int hugetlb_sysfs_add_hstate(struct hstate *h, struct kobject *parent,
 				    struct attribute_group *hstate_attr_group)
 {
 	int retval;
+	/* 拿到hstate的index */
 	int hi = hstate_index(h);
 
+	/* 在/sys/kernel/mm/hugetlb/创建和添加相应的kobjs */
 	hstate_kobjs[hi] = kobject_create_and_add(h->name, parent);
 	if (!hstate_kobjs[hi])
 		return -ENOMEM;
 
+	/* 创建相应的group */
 	retval = sysfs_create_group(hstate_kobjs[hi], hstate_attr_group);
 	if (retval)
 		kobject_put(hstate_kobjs[hi]);
@@ -2748,10 +2837,13 @@ static void __init hugetlb_sysfs_init(void)
 	struct hstate *h;
 	int err;
 
+	/* 这里就是从/sys/kernel/mm下面创建和添加hugepages对象 */
 	hugepages_kobj = kobject_create_and_add("hugepages", mm_kobj);
+	/* 如果NG了,就return */
 	if (!hugepages_kobj)
 		return;
 
+	/* 这里是对每个hstates进行sysfs的操作 */
 	for_each_hstate(h) {
 		err = hugetlb_sysfs_add_hstate(h, hugepages_kobj,
 					 hstate_kobjs, &hstate_attr_group);
@@ -2934,7 +3026,9 @@ static int __init hugetlb_init(void)
 	/* 这里就是输出hugepages的log */
 	report_hugepages();
 
-	/* 这边是创建sysfs接口 */
+	/* 这边是创建sysfs接口
+	 * 这里就是/sys/kernel/mm/hugepages/
+	 */
 	hugetlb_sysfs_init();
 	hugetlb_register_all_nodes();
 	hugetlb_cgroup_file_init();
