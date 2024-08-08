@@ -135,10 +135,31 @@ out:
 	bio_put(bio);
 }
 
+/* 内核接下来必须查找并比较交换区中所有块的扇区地址,确定各个块是否是连续的.
+ * 如果不是连续的,即可确定不连续.内核首先对构成一页的块数执行此操作.
+ * 如果各块的扇区地址是连续的,那么就在磁盘上找到了长度等于一页的连续区域.
+ * add_swap_extent将该信息插入到区间数据结构中.
+ * 接下来重复整个操作,从下一个尚未检查扇区地址的文件块开始.
+ * 在内核确认该页上的各扇区在磁盘上也是连续的之后,再次调用add_swap_extent将该信息添加到区间链表.
+ * 如果每次调用add_swap_extent都向区间链表添加一个新的链表元素,是不可能合并邻接的连续
+ * 区域从而构建长于一页的连续区的.因而,add_swap_extent试图自动保持链表尽可能紧凑.
+ * 在添加一个新项时,如果其起始扇区紧接着最后一项的结束扇区(换言之,即最后一个swap_extent的
+ * start_block 和 nr_pages 成员之和等于新项的起始扇区),则自动创建一个合并项,将两个项的数据
+ * 合并起来.这确保了区间链表包含的数据项尽可能少.
+ * 但在内核遇到不连续时,会如何处理呢?由于setup_swap_extents 只检查长度为一页的区域,
+ * 当前区域完全可以丢弃.该区域没有任何用处,因为页交换的最小单位是一页.在发现扇区地址不连
+ * 续时,内核将从下一个文件块的扇区地址重新开始搜索.该过程会重复下去,直至发现下一个在硬盘
+ * 上连续的页.这种情况下,如果使用 add_swap_extent 将一个新数据项添加到区间链表,最后一项的
+ * 结束扇区地址和新项的起始扇区地址不再匹配.这意味着这两个项无法合并,内核必须创建一个新的
+ * 链表元素.
+ * 上述过程会一直重复下去,直至已经处理了交换区中所有的块.在处理完成后,最后一步是将可
+ * 用页的数目输入到相关的 swap_info 中.
+ */
 int generic_swapfile_activate(struct swap_info_struct *sis,
 				struct file *swap_file,
 				sector_t *span)
 {
+	/* 拿到对应文件的地址空间 */
 	struct address_space *mapping = swap_file->f_mapping;
 	struct inode *inode = mapping->host;
 	unsigned blocks_per_page;
@@ -151,35 +172,48 @@ int generic_swapfile_activate(struct swap_info_struct *sis,
 	int nr_extents = 0;
 	int ret;
 
+	/* 拿到块的大小 */
 	blkbits = inode->i_blkbits;
+	/* 算出每页有多少块 */
 	blocks_per_page = PAGE_SIZE >> blkbits;
 
 	/*
 	 * Map all the blocks into the extent list.  This code doesn't try
 	 * to be very smart.
+	 *
+	 * 将所有块映射到范围列表中. 这段代码并没有试图变得非常聪明.
 	 */
 	probe_block = 0;
 	page_no = 0;
+	/* 拿到last_block */
 	last_block = i_size_read(inode) >> blkbits;
+	/* 这边就是对每个块进行循环 */
 	while ((probe_block + blocks_per_page) <= last_block &&
 			page_no < sis->max) {
 		unsigned block_in_page;
 		sector_t first_block;
 
 		cond_resched();
-
+		/* 如果交换区是文件,内核需要完成的工作会多一些,因为必须逐个扫描该文件的各个块,来确定
+		 * 块是如何分配到扇区的.
+		 * bmap函数即用于该目的.它是虚拟文件系统的一部分,调用了特定文件系统的地址空间操作中的bmap方法.
+		 * 这里不详细讲述各个特定文件系统的实现,因为它们都会得出同样的
+		 * 结果,即给定块号的硬盘扇区编号
+		 */
 		first_block = bmap(inode, probe_block);
 		if (first_block == 0)
 			goto bad_bmap;
 
 		/*
 		 * It must be PAGE_SIZE aligned on-disk
+		 * 它必须在磁盘上与PAGE_SIZE对齐
 		 */
 		if (first_block & (blocks_per_page - 1)) {
 			probe_block++;
 			goto reprobe;
 		}
 
+		/* 这里就是判断该block到blocks_per_page是否连续 */
 		for (block_in_page = 1; block_in_page < blocks_per_page;
 					block_in_page++) {
 			sector_t block;
@@ -187,6 +221,7 @@ int generic_swapfile_activate(struct swap_info_struct *sis,
 			block = bmap(inode, probe_block + block_in_page);
 			if (block == 0)
 				goto bad_bmap;
+			/* 如果不连续,那么probe_block++,跳过该block */
 			if (block != first_block + block_in_page) {
 				/* Discontiguity */
 				probe_block++;
@@ -194,8 +229,11 @@ int generic_swapfile_activate(struct swap_info_struct *sis,
 			}
 		}
 
+		/* 算first_block需要转换为以页面为单位对齐 */
 		first_block >>= (PAGE_SHIFT - blkbits);
+		/* 有page_no */
 		if (page_no) {	/* exclude the header page */
+			/* 设置lowest_block和highest_block */
 			if (first_block < lowest_block)
 				lowest_block = first_block;
 			if (first_block > highest_block)
@@ -204,16 +242,22 @@ int generic_swapfile_activate(struct swap_info_struct *sis,
 
 		/*
 		 * We found a PAGE_SIZE-length, PAGE_SIZE-aligned run of blocks
+		 *
+		 * 我们发现了一个PAGE_SIZE-length、PAGE_SIZE对齐的块序列
 		 */
 		ret = add_swap_extent(sis, page_no, 1, first_block);
 		if (ret < 0)
 			goto out;
+		/* 让nr_extents加上ret */
 		nr_extents += ret;
+		/* page_no++ */
 		page_no++;
+		/* 进行下一个block */
 		probe_block += blocks_per_page;
 reprobe:
 		continue;
 	}
+	/* 拿到nr_extents */
 	ret = nr_extents;
 	*span = 1 + highest_block - lowest_block;
 	if (page_no == 0)

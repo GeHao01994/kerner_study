@@ -362,21 +362,31 @@ static void swap_discard_work(struct work_struct *work)
 /*
  * The cluster corresponding to page_nr will be used. The cluster will be
  * removed from free cluster list and its usage counter will be increased.
+ *
+ * 将使用与page_nr对应的集群.
+ * 该群集将从空闲群集列表中删除,其使用计数器将增加。
  */
 static void inc_cluster_info_page(struct swap_info_struct *p,
 	struct swap_cluster_info *cluster_info, unsigned long page_nr)
 {
+	/* 拿到该page_nr集群的index */
 	unsigned long idx = page_nr / SWAPFILE_CLUSTER;
 
+	/* 如果cluster_info == NULL,那么直接返回 */
 	if (!cluster_info)
 		return;
+	/* 如果该info->flags & CLUSTER_FLAG_FREE;是free的 */
 	if (cluster_is_free(&cluster_info[idx])) {
+		/* 如果p->free_cluster的第一个cluster_idx != 我们现在的这个idx,那么报个VM_BUG */
 		VM_BUG_ON(cluster_list_first(&p->free_clusters) != idx);
+		/* 那么把头从free_clusters里面拔掉 */
 		cluster_list_del_first(&p->free_clusters, cluster_info);
+		/* 设置当前的cluster_info的值全为0 */
 		cluster_set_count_flag(&cluster_info[idx], 0, 0);
 	}
-
+	/* 这个就是看该cluster的用量是不是大于SWAPFILE_CLUSTER,如果大于了那么就报个BUG吧 */
 	VM_BUG_ON(cluster_count(&cluster_info[idx]) >= SWAPFILE_CLUSTER);
+	/* 否则就在原有的count上 + 1 */
 	cluster_set_count(&cluster_info[idx],
 		cluster_count(&cluster_info[idx]) + 1);
 }
@@ -1707,6 +1717,10 @@ static void destroy_swap_extents(struct swap_info_struct *sis)
  * extent list.  The extent list is kept sorted in page order.
  *
  * This function rather assumes that it is called in ascending page order.
+ *
+ * 将块范围(和相应的页面范围)添加到此swapdev的范围列表中.扩展列表按页面顺序排序.
+ *
+ * 此函数假定它是按页面升序调用的.
  */
 int
 add_swap_extent(struct swap_info_struct *sis, unsigned long start_page,
@@ -1715,18 +1729,24 @@ add_swap_extent(struct swap_info_struct *sis, unsigned long start_page,
 	struct swap_extent *se;
 	struct swap_extent *new_se;
 	struct list_head *lh;
-
+	/* 如果start_page == 0 */
 	if (start_page == 0) {
+		/* 拿到sis里面的first_swap_extent */
 		se = &sis->first_swap_extent;
+		/* 记录我们curr_swap_extent,便于查找 */
 		sis->curr_swap_extent = se;
+		/* 对first_swap_extent进行赋值 */
 		se->start_page = 0;
 		se->nr_pages = nr_pages;
 		se->start_block = start_block;
 		return 1;
 	} else {
+		/* 如果start_page != 0,说明它可能不是连续的,那么就去取最高的范围的 */
 		lh = sis->first_swap_extent.list.prev;	/* Highest extent */
+		/* 通过list_head拿到se */
 		se = list_entry(lh, struct swap_extent, list);
 		BUG_ON(se->start_page + se->nr_pages != start_page);
+		/* 如果是连续的,那么就merge就好了 */
 		if (se->start_block + se->nr_pages == start_block) {
 			/* Merge it */
 			se->nr_pages += nr_pages;
@@ -1736,14 +1756,20 @@ add_swap_extent(struct swap_info_struct *sis, unsigned long start_page,
 
 	/*
 	 * No merge.  Insert a new extent, preserving ordering.
+	 * 不能合并,插入一个新的extent,保持次序
 	 */
+
+	/* 如果不能merge,那么就插入一个新的extent */
 	new_se = kmalloc(sizeof(*se), GFP_KERNEL);
+	/* 如果new_se不能分配空间,那么直接返货-ENOMEM */
 	if (new_se == NULL)
 		return -ENOMEM;
+	/* 设置new_se */
 	new_se->start_page = start_page;
 	new_se->nr_pages = nr_pages;
 	new_se->start_block = start_block;
 
+	/* 添加到链表里面去 */
 	list_add_tail(&new_se->list, &sis->first_swap_extent.list);
 	return 1;
 }
@@ -1778,20 +1804,51 @@ add_swap_extent(struct swap_info_struct *sis, unsigned long start_page,
  * search location in `curr_swap_extent', and start new searches from there.
  * This is extremely effective.  The average number of iterations in
  * map_swap_page() has been measured at about 0.3 per page.  - akpm.
+ *
+ * 交换范围”(swap extent)是一个简单的概念,它将一段连续的页面映射到一段连续的磁盘块上.
+ * 在交换启用时(swapon 时间),构建一个有序的交换范围列表,并在交换写页面(swap_writepage)和交换读页面(swap_readpage)时用于定位页面在磁盘上的位置.
+ *
+ * 如果交换文件是一个S_ISBLK块设备,则安装一个单一的交换范围.这是为了让主操作代码能够将S_ISBLK和S_ISREG 交换文件视为相同.
+ *
+ * 无论swapdev是S_ISREG文件还是S_ISBLK块设备,交换范围列表都以PAGE_SIZE大小的磁盘块操作. 在swapon时间后,S_ISREG和S_ISBLK交换文件的处理是相同的.
+ *
+ * 对于S_ISREG 交换文件,setup_swap_extents()会遍历该文件的所有块,并将其解析为按照PAGE_SIZE切分的有序范围列表.
+ * 如果发现一些不符合PAGE_SIZE对齐要求的零散块,它们会被简单地丢弃 - 我们永远不会使用这些块进行交换.
+ *
+ * 对于S_ISREG交换文件,我们在整个交换启用期间设置S_SWAPFILE.这可以防止root用户通过ftruncate修改正在使用的交换文件,从而导致文件系统损坏.
+ *
+ * 单个交换范围表示的磁盘空间大小是可变的.
+ * 通常,它在1到4兆字节范围内. 因此,我们可以在列表中拥有数百个交换范围.为了避免频繁遍历列表,我们将上一次搜索的位置缓存到curr_swap_extent中,
+ * 并从那里开始新的搜索.这是非常有效的.测得在map_swap_page()中平均迭代次数约为每页0.3 次. - akpm
  */
 static int setup_swap_extents(struct swap_info_struct *sis, sector_t *span)
 {
+	/* 拿到交换空间后备的文件 */
 	struct file *swap_file = sis->swap_file;
+	/* 拿到该文件的地址空间 */
 	struct address_space *mapping = swap_file->f_mapping;
+	/* 拿到该文件的inode */
 	struct inode *inode = mapping->host;
 	int ret;
 
+	/* 在使用交换分区而不是交换文件时,该函数的任务很简单.
+	 * 块设备可以确保所有扇区都包含在一个连续的列表中,因而,在区间链表中只需要一项.
+	 * 该项是使用 add_swap_extent 创建的,包含了分区中所有的块
+	 */
 	if (S_ISBLK(inode->i_mode)) {
+		/* 如果是块设备,那么在这里添加的时候吧所有的扇区都添加到一个连续的列表中 */
 		ret = add_swap_extent(sis, 0, sis->max, 0);
 		*span = sis->pages;
 		return ret;
 	}
 
+	/* 如果交换区是文件,内核需要完成的工作会多一些,因为必须逐个扫描该文件的各个块,来确定
+	 * 块是如何分配到扇区的.
+	 * bmap 函数即用于该目的.它是虚拟文件系统的一部分,调用了特定文件系统的地址空间操作中的bmap方法.
+	 * 这里不详细讲述各个特定文件系统的实现,因为它们都会得出同样的结果,即给定块号的硬盘扇区编号.
+	 * 内核的其他部分可以认为在一个文件内,逻辑上的各个块是连续的.
+	 * 但对与各个块对应的磁盘扇区来说,事实并非如此
+	 */
 	if (mapping->a_ops->swap_activate) {
 		ret = mapping->a_ops->swap_activate(sis, swap_file, span);
 		if (!ret) {
@@ -1809,6 +1866,10 @@ static void _enable_swap_info(struct swap_info_struct *p, int prio,
 				unsigned char *swap_map,
 				struct swap_cluster_info *cluster_info)
 {
+	/* 如果prio >= 0,那么p->prio = prio
+	 * 否则
+	 * p->prio = --least_priority
+	 */
 	if (prio >= 0)
 		p->prio = prio;
 	else
@@ -1816,6 +1877,9 @@ static void _enable_swap_info(struct swap_info_struct *p, int prio,
 	/*
 	 * the plist prio is negated because plist ordering is
 	 * low-to-high, while swap ordering is high-to-low
+	 *
+	 * 由于plist(可能是指某种优先级列表或页面列表)的排序是从低到高,而交换(swap)的排序是从高到低,
+	 * 因此plist中的优先级(prio)在用于交换排序时会被取反(或称为反转)
 	 */
 	p->list.prio = -p->prio;
 	p->avail_list.prio = -p->prio;
@@ -1835,6 +1899,18 @@ static void _enable_swap_info(struct swap_info_struct *p, int prio,
 	 * swap_avail_head needs to be priority ordered for get_swap_page(),
 	 * which allocates swap pages from the highest available priority
 	 * swap_info_struct.
+	 *
+	 * 这两份列表都是plist(可能指的是优先级列表),因此它们都是按照优先级排序的.
+	 * swap_active_head需要按照优先级排序,这对于执行swapoff()操作是必要的.
+	 * 当从系统中移除任何具有自动分配(即负值)优先级的swap_info_struct时,会递增任何具有较低优先级的swap_info_struct的自动分配优先级.
+	 * 这是因为 swapoff() 需要确保在关闭交换分区时,系统能够按照一定顺序安全地释放或处理这些交换分区,避免数据丢失或不一致.
+	 * swap_avail_head同样需要按照优先级排序,这对于 get_swap_page() 函数的操作是必要的.
+	 * get_swap_page() 函数用于从具有最高可用优先级的 swap_info_struct 中分配交换页面.
+	 * 这样做可以确保系统优先使用性能更好或更适合当前工作负载的交换空间.
+	 * 简而言之,swap_active_head 和swap_avail_head这两份列表都按照优先级排序,但它们的用途不同:
+	 * swap_active_head 用于 swapoff() 操作,确保在移除交换分区时能够正确管理优先级.
+	 * swap_avail_head 用于 get_swap_page() 操作,确保系统能够优先从性能更优的交换分区中分配页面.
+	 * 这种设计允许Linux内核更高效地管理交换空间，通过优先级排序来优化性能和数据一致性
 	 */
 	plist_add(&p->list, &swap_active_head);
 	spin_lock(&swap_avail_lock);
@@ -2159,20 +2235,25 @@ static struct swap_info_struct *alloc_swap_info(void)
 	struct swap_info_struct *p;
 	unsigned int type;
 
+	/* 分配swap_info_struct的内存 */
 	p = kzalloc(sizeof(*p), GFP_KERNEL);
 	if (!p)
 		return ERR_PTR(-ENOMEM);
 
 	spin_lock(&swap_lock);
+	/* 这里就是去找swap_info中空闲的项,并把它计入到type中 */
 	for (type = 0; type < nr_swapfiles; type++) {
 		if (!(swap_info[type]->flags & SWP_USED))
 			break;
 	}
+
+	/* 如果说type大于等于MAX_SWAPFILES,也就是满了,那么free掉swap_info_struct,返回-EPERM */
 	if (type >= MAX_SWAPFILES) {
 		spin_unlock(&swap_lock);
 		kfree(p);
 		return ERR_PTR(-EPERM);
 	}
+	/* 如果大于等于nr_swapfiles,说明swap_info中没有空闲的项给你,那你就拿紧接着那个新的吧 */
 	if (type >= nr_swapfiles) {
 		p->type = type;
 		swap_info[type] = p;
@@ -2180,17 +2261,24 @@ static struct swap_info_struct *alloc_swap_info(void)
 		 * Write swap_info[type] before nr_swapfiles, in case a
 		 * racing procfs swap_start() or swap_next() is reading them.
 		 * (We never shrink nr_swapfiles, we never free this entry.)
+		 *
+		 * 在nr_swapfiles之前写入swap_info[type],以防有并发运行的procfs swap_start()或swap_next()函数正在读取它们.
+		 * (我们永远不会缩小nr_swapfiles,也永远不会释放这个条目.)
 		 */
 		smp_wmb();
 		nr_swapfiles++;
 	} else {
+		/* 如果说type < nr_swapfiles,说明之前有人用过,但是退出了,所以这里我们就继承它的swap_info项吧 */
 		kfree(p);
 		p = swap_info[type];
 		/*
 		 * Do not memset this entry: a racing procfs swap_next()
 		 * would be relying on p->type to remain valid.
+		 *
+		 * 不要对这个条目使用memset: 并发运行的procfs swap_next()函数会依赖于p->type保持有效.
 		 */
 	}
+	/* 初始化 */
 	INIT_LIST_HEAD(&p->first_swap_extent.list);
 	plist_node_init(&p->list, 0);
 	plist_node_init(&p->avail_list, 0);
@@ -2205,22 +2293,31 @@ static int claim_swapfile(struct swap_info_struct *p, struct inode *inode)
 {
 	int error;
 
+	/* 如果是块设备 */
 	if (S_ISBLK(inode->i_mode)) {
+		/* 拿到该块设备对应的block_device */
 		p->bdev = bdgrab(I_BDEV(inode));
+		/* blkdev_get()函数负责从gendisk中获取信息,并建立相关数据结构之间的联系 */
 		error = blkdev_get(p->bdev,
 				   FMODE_READ | FMODE_WRITE | FMODE_EXCL, p);
 		if (error < 0) {
 			p->bdev = NULL;
 			return error;
 		}
+		/* 拿到块大小 */
 		p->old_block_size = block_size(p->bdev);
+		/* 设置块大小为PAGE_SIZE */
 		error = set_blocksize(p->bdev, PAGE_SIZE);
 		if (error < 0)
 			return error;
+		/* 带上SWP_BLKDEV的flag */
 		p->flags |= SWP_BLKDEV;
+		/* 如果是文件 */
 	} else if (S_ISREG(inode->i_mode)) {
+		/* 设置它为inode->i_sb->s_bdev */
 		p->bdev = inode->i_sb->s_bdev;
 		inode_lock(inode);
+		/* (inode)->i_flags & S_SWAPFILE,如果它已经是swapfile了,那么返回-EBUSY */
 		if (IS_SWAPFILE(inode))
 			return -EBUSY;
 	} else
@@ -2238,6 +2335,7 @@ static unsigned long read_swap_header(struct swap_info_struct *p,
 	unsigned long swapfilepages;
 	unsigned long last_page;
 
+	/* 比较swap_header的魔数,如果不是SWAPSPACE2,那么直接return 0 */
 	if (memcmp("SWAPSPACE2", swap_header->magic.magic, 10)) {
 		pr_err("Unable to find swap-space signature\n");
 		return 0;
@@ -2248,8 +2346,10 @@ static unsigned long read_swap_header(struct swap_info_struct *p,
 		swab32s(&swap_header->info.version);
 		swab32s(&swap_header->info.last_page);
 		swab32s(&swap_header->info.nr_badpages);
+		/* 如果坏页的数量大于MAX_SWAP_BADPAGES,那么直接返回0 */
 		if (swap_header->info.nr_badpages > MAX_SWAP_BADPAGES)
 			return 0;
+		/* 初始化swap_header->info.badpages数组,大小为i */
 		for (i = 0; i < swap_header->info.nr_badpages; i++)
 			swab32s(&swap_header->info.badpages[i]);
 	}
@@ -2260,6 +2360,7 @@ static unsigned long read_swap_header(struct swap_info_struct *p,
 		return 0;
 	}
 
+	/* 设置lowest_bit为1 */
 	p->lowest_bit  = 1;
 	p->cluster_next = 1;
 	p->cluster_nr = 0;
@@ -2277,35 +2378,60 @@ static unsigned long read_swap_header(struct swap_info_struct *p,
 	 * the initial ~0UL mask that can't be encoded in either
 	 * the swp_entry_t or the architecture definition of a
 	 * swap pte.
+	 *
+	 * 了解单个交换设备能够支持的最大页面数时,需要考虑两个主要的限制因素:
+	 * 1) 在swp_entry_t类型中用于表示交换偏移量的位数.
+	 * 2) 不同体系结构(architecture)定义的交换页表项swap pte 中的位数.
+	 * 为了确定可能的最大位掩码,我们可以创建一个交换条目,其交换类型设置为0,交换偏移量设置为~0UL(即无符号长整型能表示的最大值),
+	 * 然后将这个交换条目编码为一个交换页表项,再将其解码回swp_entry_t类型,最后从解码后的结果中提取交换偏移量.
+	 * 这个过程会屏蔽掉所有那些无法被编码到swp_entry_t或特定体系结构定义的交换页表项中的、来自初始~0UL掩码的位.
+	 * 这样做的目的是找出单个交换设备能够支持的最大页面数.
+	 */
+
+	/* 这里真的非常之经典,值得阅读一下
+	 * swp_entry(0, ~0UL),先用最大值,转换成common part的swp_entry_t
+	 * 然后用swp_entry_to_pte转换成arch-independent的swp_entry_t,通过__swp_entry_to_pte转换成pte
+	 * 然后pte_to_swp_entry把它转回来,最后拿到swp_offset就是我们arch-independent最大支持的maxpages了
 	 */
 	maxpages = swp_offset(pte_to_swp_entry(
 			swp_entry_to_pte(swp_entry(0, ~0UL)))) + 1;
+	/* 拿到swap分区的最后一页 */
 	last_page = swap_header->info.last_page;
+	/* 如果swap分区的最后一页大于maxpages,那么输出一行警告 */
 	if (last_page > maxpages) {
 		pr_warn("Truncating oversized swap area, only using %luk out of %luk\n",
 			maxpages << (PAGE_SHIFT - 10),
 			last_page << (PAGE_SHIFT - 10));
 	}
+	/* 如果maxpage > last_page,说明maxpage大于swap分区的最后一页,那总不可能超过它吧
+	 * 所以就设置maxpages = last_page + 1
+	 */
 	if (maxpages > last_page) {
 		maxpages = last_page + 1;
 		/* p->max is an unsigned int: don't overflow it */
 		if ((unsigned int)maxpages == 0)
 			maxpages = UINT_MAX;
 	}
+	/* 设置swap_info_struct的highest_bit */
 	p->highest_bit = maxpages - 1;
 
 	if (!maxpages)
 		return 0;
+	/* 看看这个inode有多少个size 然后计算出swapfilepages */
 	swapfilepages = i_size_read(inode) >> PAGE_SHIFT;
+	/* 如果swapfilepages 但是maxpages > swapfilepages */
 	if (swapfilepages && maxpages > swapfilepages) {
 		pr_warn("Swap area shorter than signature indicates\n");
 		return 0;
 	}
+	/* 如果有badpages 并且是原始文件,那么直接返回0 */
 	if (swap_header->info.nr_badpages && S_ISREG(inode->i_mode))
 		return 0;
+	/* 如果坏页的数量大于MAX_SWAP_BADPAGES,那么直接返回0 */
 	if (swap_header->info.nr_badpages > MAX_SWAP_BADPAGES)
 		return 0;
 
+	/* 返回最大的页数 */
 	return maxpages;
 }
 
@@ -2319,56 +2445,82 @@ static int setup_swap_map_and_extents(struct swap_info_struct *p,
 	int i;
 	unsigned int nr_good_pages;
 	int nr_extents;
+	/* cluster的数量 = maxpages / SWAPFILE_CLUSTER */
 	unsigned long nr_clusters = DIV_ROUND_UP(maxpages, SWAPFILE_CLUSTER);
+	/* 算出下一个用的cluster的index */
 	unsigned long idx = p->cluster_next / SWAPFILE_CLUSTER;
 
+	/* 设置nr_good_pages,这里排除了头页 */
 	nr_good_pages = maxpages - 1;	/* omit header page */
 
+	/* 初始化free_clusters和discard_clusters链表 */
 	cluster_list_init(&p->free_clusters);
 	cluster_list_init(&p->discard_clusters);
 
+	/* 处理坏页,对每个坏页进行操作 */
 	for (i = 0; i < swap_header->info.nr_badpages; i++) {
+		/* 这里是拿到坏页的number号 */
 		unsigned int page_nr = swap_header->info.badpages[i];
+		/* 如果page_nr == 0 || 或者page_nr大于最后一页,那么就返回-EINVAL */
 		if (page_nr == 0 || page_nr > swap_header->info.last_page)
 			return -EINVAL;
+		/* 如果page_nr < maxpages,那么设置其对应的swap_map数组项为SWAP_MAP_BAD */
 		if (page_nr < maxpages) {
 			swap_map[page_nr] = SWAP_MAP_BAD;
+			/* nr_good_page -- */
 			nr_good_pages--;
 			/*
 			 * Haven't marked the cluster free yet, no list
 			 * operation involved
+			 *
+			 * 尚未将集群标记为空闲,不涉及列表操作
 			 */
+			/* 这里会让它的使用计数 + 1,毕竟是坏页不能用嘛 */
 			inc_cluster_info_page(p, cluster_info, page_nr);
 		}
 	}
 
 	/* Haven't marked the cluster free yet, no list operation involved */
+	/* 这里就是填充maxpages ~ round_up(maxpages, SWAPFILE_CLUSTER)的范围里面的页相当于坏页的操作,因为这些页也不能用嘛 */
 	for (i = maxpages; i < round_up(maxpages, SWAPFILE_CLUSTER); i++)
 		inc_cluster_info_page(p, cluster_info, i);
 
+	/* 如果nr_good_pages不等于0 */
 	if (nr_good_pages) {
+		/* 将头页设置为SWAP_MAP_BAD,因为他保存的是head的信息,也是不能用的 */
 		swap_map[0] = SWAP_MAP_BAD;
 		/*
 		 * Not mark the cluster free yet, no list
 		 * operation involved
 		 */
+		/* 对0 page对应的cluster_info进行操作 */
 		inc_cluster_info_page(p, cluster_info, 0);
+		/* 这是p->max = maxpages,这表示最大的页面数(中间包括坏页,去除了头页) */
 		p->max = maxpages;
+		/* 这里设置p->pages = nr_good_pages,表示出去坏页和头页,可用的页面 */
 		p->pages = nr_good_pages;
+		/* setup_swap_extents函数,为一段连续的pages映射到连续的磁盘快中,返回的是磁盘快的数量,
+		 * 如果最先建立的是交换分区,则这里就仅仅需要一个块,
+		 * 而如果对应的是磁盘文件,就需要对文件涉及的各个磁盘快分别建立结构,并关联起来.
+		 */
 		nr_extents = setup_swap_extents(p, span);
 		if (nr_extents < 0)
 			return nr_extents;
 		nr_good_pages = p->pages;
 	}
+	/* 如果nr_good_pages为NULL,那么报一行警告之后返回-EINVAL */
 	if (!nr_good_pages) {
 		pr_warn("Empty swap-file\n");
 		return -EINVAL;
 	}
 
+	/* 如果cluster_info = NULL,直接返回 */
 	if (!cluster_info)
 		return nr_extents;
 
+	/* 否则对每个cluster进行轮询 */
 	for (i = 0; i < nr_clusters; i++) {
+		/* 如果里面没有坏块、或者有人用了,那么就把它放到free_clusters链表里面去 */
 		if (!cluster_count(&cluster_info[idx])) {
 			cluster_set_flag(&cluster_info[idx], CLUSTER_FLAG_FREE);
 			cluster_list_add_tail(&p->free_clusters, cluster_info,
@@ -2378,6 +2530,7 @@ static int setup_swap_map_and_extents(struct swap_info_struct *p,
 		if (idx == nr_clusters)
 			idx = 0;
 	}
+
 	return nr_extents;
 }
 
@@ -2419,18 +2572,22 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
+	/* 为swap_info_struct分配内存,并做局部初始化 */
 	p = alloc_swap_info();
 	if (IS_ERR(p))
 		return PTR_ERR(p);
 
+	/* 初始化discard_work */
 	INIT_WORK(&p->discard_work, swap_discard_work);
 
+	/* 这边将specialfile转换成filename */
 	name = getname(specialfile);
 	if (IS_ERR(name)) {
 		error = PTR_ERR(name);
 		name = NULL;
 		goto bad_swap;
 	}
+	/* 打开文件 */
 	swap_file = file_open_name(name, O_RDWR|O_LARGEFILE, 0);
 	if (IS_ERR(swap_file)) {
 		error = PTR_ERR(swap_file);
@@ -2438,11 +2595,13 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 		goto bad_swap;
 	}
 
+	/* 让p->swap_file指向该swap_file */
 	p->swap_file = swap_file;
 	mapping = swap_file->f_mapping;
 	inode = mapping->host;
 
 	/* If S_ISREG(inode->i_mode) will do inode_lock(inode); */
+	/* 设置bdev等相关信息 */
 	error = claim_swapfile(p, inode);
 	if (unlikely(error))
 		goto bad_swap;
@@ -2450,49 +2609,65 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	/*
 	 * Read the swap header.
 	 */
+	/* 如果没有readpage函数,那么goto bad_swap */
 	if (!mapping->a_ops->readpage) {
 		error = -EINVAL;
 		goto bad_swap;
 	}
+	/* 读第一页 */
 	page = read_mapping_page(mapping, 0, swap_file);
 	if (IS_ERR(page)) {
 		error = PTR_ERR(page);
 		goto bad_swap;
 	}
+	/* 映射该页 */
 	swap_header = kmap(page);
-
+	/* 这里是读取该swap分区能容纳的最大page数 */
 	maxpages = read_swap_header(p, swap_header, inode);
 	if (unlikely(!maxpages)) {
 		error = -EINVAL;
 		goto bad_swap;
 	}
 
-	/* OK, set up the swap map and apply the bad block list */
+	/* OK, set up the swap map and apply the bad block list
+	 * 好的,设置交换映射并应用坏块列表
+	 */
 	swap_map = vzalloc(maxpages);
 	if (!swap_map) {
 		error = -ENOMEM;
 		goto bad_swap;
 	}
 
+	/* 如果backing_dev支持稳定的写操作,那么设置p->flags |= SWP_STABLE_WRITES */
 	if (bdi_cap_stable_pages_required(inode_to_bdi(inode)))
 		p->flags |= SWP_STABLE_WRITES;
 
+	/* #define QUEUE_FLAG_NONROT      12 non-rotational device (SSD)
+	 * 如果说这个blk队列是非旋转设备(SSD) */
 	if (p->bdev && blk_queue_nonrot(bdev_get_queue(p->bdev))) {
 		int cpu;
 
+		/* 带上SWP_SOLIDSTATE 表示blkdev寻道是非常廉价的 */
 		p->flags |= SWP_SOLIDSTATE;
 		/*
 		 * select a random position to start with to help wear leveling
 		 * SSD
+		 *
+		 * 选择一个随机位置开始,以帮助平衡SSD的磨损
 		 */
+
+		/* 这边就是选一个随机位置 */
 		p->cluster_next = 1 + (prandom_u32() % p->highest_bit);
 
+		/* 这里分配cluster_info,大小为 maxpages / SWAPFILE_CLUSTER * sizeof(*cluster_info) */
 		cluster_info = vzalloc(DIV_ROUND_UP(maxpages,
 			SWAPFILE_CLUSTER) * sizeof(*cluster_info));
+		/* 如果没有分配到内存,那么就返回-ENOMEM */
 		if (!cluster_info) {
 			error = -ENOMEM;
 			goto bad_swap;
 		}
+		/* 为每个CPU分配给一个独立的集群(cluster),可以使每个CPU能够从其自己的集群中分配交换条目,并按顺序进行交换出操作. */
 		p->percpu_cluster = alloc_percpu(struct percpu_cluster);
 		if (!p->percpu_cluster) {
 			error = -ENOMEM;
@@ -2501,6 +2676,11 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 		for_each_possible_cpu(cpu) {
 			struct percpu_cluster *cluster;
 			cluster = per_cpu_ptr(p->percpu_cluster, cpu);
+			/* 这里就是初始化cluster
+			 *
+			 * info->flags = CLUSTER_FLAG_NEXT_NULL;
+			 * info->data = 0;
+			 */
 			cluster_set_null(&cluster->index);
 		}
 	}
@@ -2509,6 +2689,7 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	if (error)
 		goto bad_swap;
 
+	/* 初始化swap_info_struct结构和建立swap_extent链表 */
 	nr_extents = setup_swap_map_and_extents(p, swap_header, swap_map,
 		cluster_info, maxpages, &span);
 	if (unlikely(nr_extents < 0)) {
@@ -2516,15 +2697,26 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 		goto bad_swap;
 	}
 	/* frontswap enabled? set up bit-per-page map for frontswap */
+	/*
+	 * Frontswap之所以如此命名,是因为它可以被视为交换设备的“背后存储”的反义词.
+	 * 数据被存储在“超越性内存”中,这是一种内存,内核无法直接访问或寻址,其大小可能是未知的,并且可能随时间变化.
+	 * 当超越性内存中有空间可用时,可以显著减少交换I/O操作.
+	 * 当没有可用空间时,所有的frontswap调用都会被简化为单个指针与NULL比较,这几乎不会对性能产生影响,并且交换数据会像通常一样存储在匹配的交换设备上.
+	 */
+
+	/* 分配位图 */
 	if (IS_ENABLED(CONFIG_FRONTSWAP))
 		frontswap_map = vzalloc(BITS_TO_LONGS(maxpages) * sizeof(long));
 
+	/* 如果p->bdev有东西并且swap有discard(丢弃)并且block 队列也有丢弃的功能 */
 	if (p->bdev &&(swap_flags & SWAP_FLAG_DISCARD) && swap_discardable(p)) {
 		/*
 		 * When discard is enabled for swap with no particular
 		 * policy flagged, we set all swap discard flags here in
 		 * order to sustain backward compatibility with older
 		 * swapon(8) releases.
+		 *
+		 * 当为swap启用了丢弃(discard),且没有特定的策略标志时,我们在这里设置所有的交换丢弃标志,以保持与旧版swapon(8)的向后兼容性
 		 */
 		p->flags |= (SWP_DISCARDABLE | SWP_AREA_DISCARD |
 			     SWP_PAGE_DISCARD);
@@ -2534,6 +2726,9 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 		 * either do single-time area discards only, or to just
 		 * perform discards for released swap page-clusters.
 		 * Now it's time to adjust the p->flags accordingly.
+		 *
+		 * 通过标记sys_swapon,系统管理员可以指示我们仅执行单次区域丢弃操作,或者仅对已释放的交换页簇执行丢弃操作.
+		 * 现在,是时候根据这些指示相应地调整p->flags了
 		 */
 		if (swap_flags & SWAP_FLAG_DISCARD_ONCE)
 			p->flags &= ~SWP_PAGE_DISCARD;
@@ -2550,6 +2745,7 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	}
 
 	mutex_lock(&swapon_mutex);
+	/* 设置优先级为-1 */
 	prio = -1;
 	if (swap_flags & SWAP_FLAG_PREFER)
 		prio =

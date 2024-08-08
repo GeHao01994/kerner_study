@@ -15,6 +15,30 @@
  * shmem/tmpfs to shift it all up a further two bits: see swp_to_radix_entry().
  *
  * swp_entry_t's are *never* stored anywhere in their arch-dependent format.
+ *
+ * 交换缓存(swapcache)页面被存储在swapper_space基数树中.我们希望在这棵树中达到良好的压缩密度,因此索引应该在低位比特中密集排列.
+ *
+ * 我们安排type和offset字段,使得type位于swp_entry_t的七个高位比特中,而offset则在剩余的位中右对齐.
+ * 尽管type本身只需要五个比特,但我们为共享内存（shmem）/临时文件系统（tmpfs）预留了额外的两个比特来上移它: 参见swp_to_radix_entry()函数.
+ *
+ * swp_entry_t类型的值从不以任何架构依赖的格式存储在任何地方。
+ */
+
+/* SWP_TYPE_SHIFT = 8*8 - 7 = 64 - 7 = 63
+ * 所以应该是搞7位用来给type,剩下的用来给OFFSET
+ *
+ * 实际上这只是common part,arch有自己的layout,譬如arm64就有如下定义
+ *
+ *
+ * Encode and decode a swap entry:
+ *	bits 0-1:	present (must be zero)
+ *	bits 2-7:	swap type
+ *	bits 8-57:	swap offset
+ *	bit  58:	PTE_PROT_NONE (must be zero)
+ *
+ * #define __SWP_TYPE_SHIFT	2
+ *
+ * #define __swp_entry(type,offset) ((swp_entry_t) { ((type) << __SWP_TYPE_SHIFT) | ((offset) << __SWP_OFFSET_SHIFT) })
  */
 #define SWP_TYPE_SHIFT(e)	((sizeof(e.val) * 8) - \
 			(MAX_SWAPFILES_SHIFT + RADIX_TREE_EXCEPTIONAL_SHIFT))
@@ -75,11 +99,13 @@ static inline swp_entry_t pte_to_swp_entry(pte_t pte)
 /*
  * Convert the arch-independent representation of a swp_entry_t into the
  * arch-dependent pte representation.
+ *
+ * 将swp_entry_t的与架构无关的表示形式转换为与架构相关的页表项(PTE,Page Table Entry)表示形式.
  */
 static inline pte_t swp_entry_to_pte(swp_entry_t entry)
 {
 	swp_entry_t arch_entry;
-
+	/* 这里就是转换成架构相关的swp_entry_t */
 	arch_entry = __swp_entry(swp_type(entry), swp_offset(entry));
 	return __swp_entry_to_pte(arch_entry);
 }
