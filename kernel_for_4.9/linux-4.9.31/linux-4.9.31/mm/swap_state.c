@@ -77,6 +77,9 @@ void show_swap_cache_info(void)
 /*
  * __add_to_swap_cache resembles add_to_page_cache_locked on swapper_space,
  * but sets SwapCache flag and private instead of mapping and index.
+ *
+ * __add_to_swap_cache函数与在交换空间(swapper_space)上使用的add_to_page_cache_locked函数类似,
+ * 但它在将页面添加到缓存时设置了SwapCache标志和私有数据(private)而不是设置映射(mapping)和索引(index).
  */
 int __add_to_swap_cache(struct page *page, swp_entry_t entry)
 {
@@ -87,17 +90,24 @@ int __add_to_swap_cache(struct page *page, swp_entry_t entry)
 	VM_BUG_ON_PAGE(PageSwapCache(page), page);
 	VM_BUG_ON_PAGE(!PageSwapBacked(page), page);
 
+	/* page->_refcount + 1 */
 	get_page(page);
+	/* 设置该page的PG_swapcache */
 	SetPageSwapCache(page);
+	/* (page)->private = entry.val */
 	set_page_private(page, entry.val);
-
+	/* 拿到对应entry对应的type对应的address_space */
 	address_space = swap_address_space(entry);
 	spin_lock_irq(&address_space->tree_lock);
+	/* 这边就是把它添加到radix_tree中去 */
 	error = radix_tree_insert(&address_space->page_tree,
 				  swp_offset(entry), page);
 	if (likely(!error)) {
+		/* nrpages++ */
 		address_space->nrpages++;
+		/* node的NR_FILE_PAGES++ */
 		__inc_node_page_state(page, NR_FILE_PAGES);
+		/* swap_cache_info.add_total++; */
 		INC_CACHE_INFO(add_total);
 	}
 	spin_unlock_irq(&address_space->tree_lock);
@@ -107,10 +117,16 @@ int __add_to_swap_cache(struct page *page, swp_entry_t entry)
 		 * Only the context which have set SWAP_HAS_CACHE flag
 		 * would call add_to_swap_cache().
 		 * So add_to_swap_cache() doesn't returns -EEXIST.
+		 *
+		 * 只有那些已经设置了SWAP_HAS_CACHE标志的上下文会调用add_to_swap_cache()函数.
+		 * 因此,add_to_swap_cache()函数不会返回-EEXIST(表示已存在的错误码)
 		 */
 		VM_BUG_ON(error == -EEXIST);
+		/* 设置(page)->private 为0 */
 		set_page_private(page, 0UL);
+		/* 清除PG_swapcache */
 		ClearPageSwapCache(page);
+		/* page->_refcount - 1 */
 		put_page(page);
 	}
 
@@ -133,6 +149,8 @@ int add_to_swap_cache(struct page *page, swp_entry_t entry, gfp_t gfp_mask)
 /*
  * This must be called only on pages that have
  * been verified to be in the swap cache.
+ *
+ * 这个方法(或函数)仅应在已经确认处于swap缓存中的页面上调用.
  */
 void __delete_from_swap_cache(struct page *page)
 {
@@ -143,13 +161,21 @@ void __delete_from_swap_cache(struct page *page)
 	VM_BUG_ON_PAGE(!PageSwapCache(page), page);
 	VM_BUG_ON_PAGE(PageWriteback(page), page);
 
+	/* 拿到swap_entry_t */
 	entry.val = page_private(page);
+	/* 拿到对应的地址空间 */
 	address_space = swap_address_space(entry);
+	/* 把它从对应的radix_tree里面删除掉 */
 	radix_tree_delete(&address_space->page_tree, swp_offset(entry));
+	/* 清除(page)->private */
 	set_page_private(page, 0);
+	/* 清除PG_swapcache */
 	ClearPageSwapCache(page);
+	/* 对应的address_space->nrpages-- */
 	address_space->nrpages--;
+	/* NR_FILE_PAGES -- */
 	__dec_node_page_state(page, NR_FILE_PAGES);
+	/* swap_cache_info.del_total-- */
 	INC_CACHE_INFO(del_total);
 }
 
@@ -158,7 +184,12 @@ void __delete_from_swap_cache(struct page *page)
  * @page: page we want to move to swap
  *
  * Allocate swap space for the page and add the page to the
- * swap cache.  Caller needs to hold the page lock. 
+ * swap cache.  Caller needs to hold the page lock.
+ *
+ * add_to_swap - 为一个页面分配swap空间
+ * @page: 我们想要移动到swap空间的页面
+ *
+ * 为页面分配swap空间,并将该页面添加到swap缓存中.调用者需要持有页面的锁.
  */
 int add_to_swap(struct page *page, struct list_head *list)
 {
@@ -188,11 +219,17 @@ int add_to_swap(struct page *page, struct list_head *list)
 	 * completely exhaust the page allocator. __GFP_NOMEMALLOC
 	 * stops emergency reserves from being allocated.
 	 *
+	 * 从PF_MEMALLOC上下文中分配Radix树节点可能会完全耗尽页面分配器.
+	 * 使用__GFP_NOMEMALLOC标志会阻止分配紧急储备内存.
+	 *
 	 * TODO: this could cause a theoretical memory reclaim
 	 * deadlock in the swap out path.
+	 *
+	 * 这可能会导致在内存交换出(swap-out)过程中理论上出现内存回收死锁.
 	 */
 	/*
 	 * Add it to the swap cache.
+	 * 把它添加到swap cache中
 	 */
 	err = add_to_swap_cache(page, entry,
 			__GFP_HIGH|__GFP_NOMEMALLOC|__GFP_NOWARN);
@@ -214,19 +251,24 @@ int add_to_swap(struct page *page, struct list_head *list)
  * been verified to be in the swap cache and locked.
  * It will never put the page into the free list,
  * the caller has a reference on the page.
+ *
+ * 这个方法(或函数)仅应在已经确认处于swap缓存中并且已被锁定的页面上调用.
+ * 它永远不会将页面放入空闲列表,因为调用者已经对该页面持有了一个引用
  */
 void delete_from_swap_cache(struct page *page)
 {
 	swp_entry_t entry;
 	struct address_space *address_space;
-
+	/* 拿到swp_entry_t */
 	entry.val = page_private(page);
 
+	/* 找到该地址空间 */
 	address_space = swap_address_space(entry);
 	spin_lock_irq(&address_space->tree_lock);
+	/* 把它从swap_cacahe中删除 */
 	__delete_from_swap_cache(page);
 	spin_unlock_irq(&address_space->tree_lock);
-
+	/* 释放swapcache */
 	swapcache_free(entry);
 	put_page(page);
 }

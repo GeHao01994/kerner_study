@@ -66,6 +66,9 @@ static const char Unused_offset[] = "Unused swap offset entry ";
 /*
  * all active swap_info_structs
  * protected with swap_lock, and ordered by priority.
+ *
+ * 所有活跃的swap_info_structs
+ * 受swap_lock保护,并按优先级排序
  */
 PLIST_HEAD(swap_active_head);
 
@@ -80,6 +83,16 @@ PLIST_HEAD(swap_active_head);
  * add/remove itself to/from this list, but the swap_info_struct->lock
  * is held and the locking order requires swap_lock to be taken
  * before any swap_info_struct->lock.
+ *
+ * 所有可用的(活跃的、未满的)swap_info_structs都受到swap_avail_lock锁的保护,
+ * 并且它们根据优先级进行排序.
+ * get_swap_page()函数使用这个排序的列表而不是swap_active_head,
+ * 因为swap_active_head包含了所有的swap_info_structs,但get_swap_page()函数不需要查看那些已经满的交换空间信息.
+ *
+ * 此列表使用它自己的锁(swap_avail_lock)而不是swap_lock,原因在于当某个swap_info_struct的状态从非满变为满,或者从满变为非满时,它需要从这个列表中添加或移除自己.
+ * 然而,在这个过程中,swap_info_struct的锁(swap_info_struct->lock)会被持有,且根据锁的顺序要求,
+ * 必须先获取swap_lock才能获取任何swap_info_struct->lock.
+ * 因此,为了保持锁的顺序并避免死锁,这个特定的列表操作使用了不同的锁(swap_avail_lock).
  */
 static PLIST_HEAD(swap_avail_head);
 static DEFINE_SPINLOCK(swap_avail_lock);
@@ -98,13 +111,15 @@ static inline unsigned char swap_count(unsigned char ent)
 }
 
 /* returns 1 if swap entry is freed */
+/* 这个应该是回收这个swap cache */
 static int
 __try_to_reclaim_swap(struct swap_info_struct *si, unsigned long offset)
 {
+	/* 找到这个swp_entry_t */
 	swp_entry_t entry = swp_entry(si->type, offset);
 	struct page *page;
 	int ret = 0;
-
+	/* 通过entry找到对应的swap cache */
 	page = find_get_page(swap_address_space(entry), swp_offset(entry));
 	if (!page)
 		return 0;
@@ -114,6 +129,10 @@ __try_to_reclaim_swap(struct swap_info_struct *si, unsigned long offset)
 	 * We have to use trylock for avoiding deadlock. This is a special
 	 * case and you should use try_to_free_swap() with explicit lock_page()
 	 * in usual operations.
+	 *
+	 * 这个函数是从scan_swap_map()中被调用的,并且在vmscan.c中用于回收页面时也会被调用.
+	 * 因此,在这里我们需要对页面加锁.为了避免死锁,我们必须使用尝试锁(trylock).
+	 * 这是一个特殊情况,在常规操作中,你应该结合显式的lock_page()调用try_to_free_swap()函数.
 	 */
 	if (trylock_page(page)) {
 		ret = try_to_free_swap(page);
@@ -520,9 +539,26 @@ static unsigned long scan_swap_map(struct swap_info_struct *si,
 	 * overall disk seek times between swap pages.  -- sct
 	 * But we do now try to find an empty cluster.  -Andrea
 	 * And we let swap pages go all over an SSD partition.  Hugh
+	 *
+	 * 我们尝试通过在swap中顺序分配swap页面来将它们聚集在一起.
+	 * 然而,一旦我们以这种方式分配了SWAPFILE_CLUSTER数量的页面后,我们就会转而采用“首次空闲分配”策略,开始一个新的聚集区.
+	 * 这样做可以防止swap页面分散在整个swap分区中,从而减少swap页面之间的总体磁盘寻道时间. ——sct
+	 * 但我们现在也尝试找到一个空的聚集区. ——Andrea
+	 * 并且我们允许swap页面遍布SSD分区的各个位置. ——Hugh
+	 *
+	 * 这里的“聚集区”可以理解为在swap分区中连续分配的一系列swap页面,它们物理上相邻,可以减少磁盘的寻道次数,提高swap操作的效率.
+	 * SWAPFILE_CLUSTER是一个定义好的页面数量,当达到这个数量后,系统会开始一个新的聚集区进行swap页面的分配.
+	 *
+	 * Andrea提到的“找到一个空的聚集区”可能是指系统尝试在分配新的swap页面时,优先检查是否有足够的连续空闲空间来形成一个新的聚集区,而不是简单地采用“首次空闲”策略.
+	 *
+	 * Hugh的评论则指出,在SSD分区上,由于SSD的随机读写性能远高于传统硬盘,因此允许swap页面遍布整个分区可能不会对性能造成太大影响.
+	 * 然而,即使在SSD上,通过聚集swap页面来减少寻道次数(虽然SSD的寻道时间非常短)仍然是一个可以考虑的优化策略,特别是在高负载或需要频繁进行swap操作的情况下.
 	 */
 
+	/* SWP_SCANNING	= (1 << 11), refcount in scan_swap_map */
+	/* 这里表示的是说引用计数 + 1 */
 	si->flags += SWP_SCANNING;
+	/* 这里就是拿到下一个cluster,基于这个我们去寻找 */
 	scan_base = offset = si->cluster_next;
 
 	/* SSD algorithm */
@@ -531,8 +567,15 @@ static unsigned long scan_swap_map(struct swap_info_struct *si,
 		goto checks;
 	}
 
+	/* 这里是先判断si->cluster_nr是否等于0,在判断--
+	 * 这里就是想分配一个聚集(cluster)
+	 */
 	if (unlikely(!si->cluster_nr--)) {
+		/* 如果si->pages - si->inuser_pages(在使用的page) < SWAPFILE_CLUSTER
+		 * 如果交换分区中剩余的槽位不足以分配一个聚集,就跳过直接扫描剩余的槽位
+		 */
 		if (si->pages - si->inuse_pages < SWAPFILE_CLUSTER) {
+			/* 设置cluster_nr = SWAPFILE_CLUSTER - 1 */
 			si->cluster_nr = SWAPFILE_CLUSTER - 1;
 			goto checks;
 		}
@@ -544,64 +587,86 @@ static unsigned long scan_swap_map(struct swap_info_struct *si,
 		 * start of partition, to minimize the span of allocated swap.
 		 * If seek is cheap, that is the SWP_SOLIDSTATE si->cluster_info
 		 * case, just handled by scan_swap_map_try_ssd_cluster() above.
+		 *
+		 * 如果查找成本很高,请从分区开始搜索新集群,以尽量减少分配的交换范围.
+		 * 如果seek很便宜,那就是SWP_SOLIDSTATE si->cluster_info的情况,刚刚由上面的scan_swap_map_try_ssd_cluster()处理.
 		 */
+		/* lowest_bit指向第一个空闲的槽位 */
 		scan_base = offset = si->lowest_bit;
 		last_in_cluster = offset + SWAPFILE_CLUSTER - 1;
 
 		/* Locate the first empty (unaligned) cluster */
+		/* highest_bit保存的是最后一个槽位,下面循环尝试找到SWAPFILE_CLUSTER个连续槽位 */
 		for (; last_in_cluster <= si->highest_bit; offset++) {
-			if (si->swap_map[offset])
+			if (si->swap_map[offset])	/* 不为0表示已经被占用,last_in_cluster后移 */
 				last_in_cluster = offset + SWAPFILE_CLUSTER;
-			else if (offset == last_in_cluster) {
+			else if (offset == last_in_cluster) {	/* 相等表示找到SWAPFILE_CLUSTER个连续槽位 */
 				spin_lock(&si->lock);
 				offset -= SWAPFILE_CLUSTER - 1;
+				/* 设置聚集中第一个空闲槽位 */
 				si->cluster_next = offset;
+				/* cluster_nr表示当前聚集中仍然可用的槽位数,在消耗了这些空闲槽位之后,则必须建立一个新的聚集,
+				 * 否则(如果没有足够空闲槽位可用于建立新的聚集)就只能进行细粒度分配了(即不再按聚
+				 * 集分配槽位).
+				 */
 				si->cluster_nr = SWAPFILE_CLUSTER - 1;
 				goto checks;
 			}
+			/* 这里应该说的是定时延迟,就如果循环了latency_ration就cond_resched出去 */
 			if (unlikely(--latency_ration < 0)) {
 				cond_resched();
 				latency_ration = LATENCY_LIMIT;
 			}
 		}
-
+		/* 如果没能成功分配一个聚集就重新扫描,希望分配一个单独的槽位 */
 		offset = scan_base;
 		spin_lock(&si->lock);
 		si->cluster_nr = SWAPFILE_CLUSTER - 1;
 	}
 
 checks:
+	/* ssd */
 	if (si->cluster_info) {
 		while (scan_swap_map_ssd_cluster_conflict(si, offset))
 			scan_swap_map_try_ssd_cluster(si, &offset, &scan_base);
 	}
+	/* SWP_WRITEOK 指定当前项对应的交换区可写
+	 * 如果该交换区不是可写的,那么goto no_page */
 	if (!(si->flags & SWP_WRITEOK))
 		goto no_page;
+	/* 如果highest_bit = 0说明没有空闲的槽位了,那么goto no_page */
 	if (!si->highest_bit)
 		goto no_page;
+	/* 如果offset > si->highest_bit,有可能是上面分配的聚集超过的原因,那么就只分配一个吧 */
 	if (offset > si->highest_bit)
 		scan_base = offset = si->lowest_bit;
 
 	/* reuse swap entry of cache-only swap if not busy. */
+	/* 如果可用槽位数不到总槽位数的一半,并且当前的槽位还有swap_cache时,那么回收该槽的swap cache */
 	if (vm_swap_full() && si->swap_map[offset] == SWAP_HAS_CACHE) {
 		int swap_was_freed;
 		spin_unlock(&si->lock);
 		swap_was_freed = __try_to_reclaim_swap(si, offset);
 		spin_lock(&si->lock);
 		/* entry was freed successfully, try to use this again */
+		/* 如果回收成功了,那么再去check一下 */
 		if (swap_was_freed)
 			goto checks;
 		goto scan; /* check next one */
 	}
 
+	/* 判断si->swap_map[offset]这个位置是否是空的槽位 */
 	if (si->swap_map[offset])
 		goto scan;
 
+	/* 如果offset是si->lowest_bit或si->highest_bit,压缩lowest_bit ~ highest_bit的空间 */
 	if (offset == si->lowest_bit)
 		si->lowest_bit++;
 	if (offset == si->highest_bit)
 		si->highest_bit--;
+	/* 设置si->inuse_pages++ */
 	si->inuse_pages++;
+	/* 如果已经想等了,说明已经满了,那么设置si->lowest_bit和si->highest_bit之后把它从swap_avail_head中拔掉 */
 	if (si->inuse_pages == si->pages) {
 		si->lowest_bit = si->max;
 		si->highest_bit = 0;
@@ -609,16 +674,22 @@ checks:
 		plist_del(&si->avail_list, &swap_avail_head);
 		spin_unlock(&swap_avail_lock);
 	}
+	/* 设置相关标记,表示这个槽位已经在使用中 */
 	si->swap_map[offset] = usage;
+	/* 设置相关的cluster_info中的offset成员 */
 	inc_cluster_info_page(si, si->cluster_info, offset);
+	/* cluster_next表示在交换区中接下来使用的槽位(在某个现存聚集中)的索引,设置为offset + 1 */
 	si->cluster_next = offset + 1;
+	/* 前面引用计数 +1 了,这里-1 */
 	si->flags -= SWP_SCANNING;
 
 	return offset;
-
+	/* 前面没有分配到空闲槽位,下面扩大扫描范围查找 */
 scan:
 	spin_unlock(&si->lock);
+	/* 一个一个的找,从++offset到si->highest_bit范围开始找 */
 	while (++offset <= si->highest_bit) {
+		/* 如果找到一个空闲槽位就goto checks */
 		if (!si->swap_map[offset]) {
 			spin_lock(&si->lock);
 			goto checks;
@@ -633,6 +704,7 @@ scan:
 		}
 	}
 	offset = si->lowest_bit;
+	/* 既然上面没找到,那么就往前找,从si->lowest_bit到scan_base开始找 */
 	while (offset < scan_base) {
 		if (!si->swap_map[offset]) {
 			spin_lock(&si->lock);
@@ -660,6 +732,7 @@ swp_entry_t get_swap_page(void)
 	struct swap_info_struct *si, *next;
 	pgoff_t offset;
 
+	/* 如果os中没有swap,那么直接返回noswap */
 	if (atomic_long_read(&nr_swap_pages) <= 0)
 		goto noswap;
 	atomic_long_dec(&nr_swap_pages);
@@ -667,29 +740,52 @@ swp_entry_t get_swap_page(void)
 	spin_lock(&swap_avail_lock);
 
 start_over:
+	/* 这里就是轮询swap_avail_head链表 */
 	plist_for_each_entry_safe(si, next, &swap_avail_head, avail_list) {
 		/* requeue si to after same-priority siblings */
+		/* 把它放到相同优先级的siblings的最后
+		 * 实际上这里达到的效果就是相同优先级交换分区使用均衡
+		 */
 		plist_requeue(&si->avail_list, &swap_avail_head);
 		spin_unlock(&swap_avail_lock);
 		spin_lock(&si->lock);
+		/* 为了减少扫描整个交换区查找空闲槽位的搜索时间,内核借助lowest_bit和highest_bit成员,
+		 * 来管理搜索区域的下界和上界.在 lowest_bit 之下和 highest_bit 之上,是没有空闲槽
+		 * 位的,因而搜索相关区域是无意义的.
+		 * 尽管这两个成员的名称以_bit结尾,但二者不是位域,只是普通整数,解释为交换区
+		 * 中线性排布的各槽位的索引
+		 *
+		 * SWP_WRITEOK 指定当前项对应的交换区可写.
+		 *
+		 * 如果si->highest_bit为0,或者说交换区不是可写的
+		 */
 		if (!si->highest_bit || !(si->flags & SWP_WRITEOK)) {
 			spin_lock(&swap_avail_lock);
+			/* 这里就是说如果该si已经从plist被拔掉了,那么解锁之后搜索下一个si */
 			if (plist_node_empty(&si->avail_list)) {
 				spin_unlock(&si->lock);
 				goto nextsi;
 			}
+
+			/* 如果说还在swap_avail_head链表里面,那么看!si->highest_bit和!(si->flags & SWP_WRITEOK)
+			 * 报警告
+			 */
 			WARN(!si->highest_bit,
 			     "swap_info %d in list but !highest_bit\n",
 			     si->type);
 			WARN(!(si->flags & SWP_WRITEOK),
 			     "swap_info %d in list but !SWP_WRITEOK\n",
 			     si->type);
+			/* 把它从swap_avail_head中删除 */
 			plist_del(&si->avail_list, &swap_avail_head);
+			/* 解锁之后去查询下一个si */
 			spin_unlock(&si->lock);
 			goto nextsi;
 		}
 
-		/* This is called for allocating swap entry for cache */
+		/* This is called for allocating swap entry for cache
+		 * 这用于为缓存分配交换条目
+		 */
 		offset = scan_swap_map(si, SWAP_HAS_CACHE);
 		spin_unlock(&si->lock);
 		if (offset)
@@ -707,6 +803,12 @@ nextsi:
 		 * Since we dropped the swap_avail_lock, the swap_avail_head
 		 * list may have been modified; so if next is still in the
 		 * swap_avail_head list then try it, otherwise start over.
+		 *
+		 * 如果我们到达这里,那么很可能之前si(swap info,即交换信息)几乎已经满了.
+		 * 因为scan_swap_map()函数可能会释放si->lock,所以多个调用者可能都试图从同一个si中获取页面,
+		 * 而在我们能够获取一个页面之前,它就已经被填满了;或者,在我们释放swap_avail_lock和重新获取si->lock之间，si被填满了.
+		 * 由于我们释放了swap_avail_lock,swap_avail_head列表(交换可用头列表)可能已经被修改了.
+		 * 因此，如果next仍然位于swap_avail_head列表中,则尝试获取它;否则,重新开始
 		 */
 		if (plist_node_empty(&next->avail_list))
 			goto start_over;
@@ -864,8 +966,10 @@ void swapcache_free(swp_entry_t entry)
 {
 	struct swap_info_struct *p;
 
+	/* 拿到对应是swap_info_struct */
 	p = swap_info_get(entry);
 	if (p) {
+		/* 把swap_entry_t也给释放掉 */
 		swap_entry_free(p, entry, SWAP_HAS_CACHE);
 		spin_unlock(&p->lock);
 	}
@@ -875,6 +979,9 @@ void swapcache_free(swp_entry_t entry)
  * How many references to page are currently swapped out?
  * This does not give an exact answer when swap count is continued,
  * but does include the high COUNT_CONTINUED flag to allow for that.
+ *
+ * 当前有多少个对页面的引用是被交换出去的?
+ * 当swap计数持续(即超过了一定阈值)时,这并不能给出一个确切的答案,但确实包括了高位的COUNT_CONTINUED标志来允许这种情况的发生.
  */
 int page_swapcount(struct page *page)
 {
@@ -882,9 +989,12 @@ int page_swapcount(struct page *page)
 	struct swap_info_struct *p;
 	swp_entry_t entry;
 
+	/* 拿到该page对应的swap_entry_t */
 	entry.val = page_private(page);
+	/* 拿到对应是swap_info_struct */
 	p = swap_info_get(entry);
 	if (p) {
+		/* ent & ~SWAP_HAS_CACHE; may include SWAP_HAS_CONT flag */
 		count = swap_count(p->swap_map[swp_offset(entry)]);
 		spin_unlock(&p->lock);
 	}
@@ -988,15 +1098,20 @@ out:
 /*
  * If swap is getting full, or if there are no more mappings of this page,
  * then try_to_free_swap is called to free its swap space.
+ *
+ * 如果swap空间即将满,或者这个页面已经没有更多的映射了,那么会调用try_to_free_swap函数来释放它所占用的swap空间.
  */
 int try_to_free_swap(struct page *page)
 {
 	VM_BUG_ON_PAGE(!PageLocked(page), page);
 
+	/* 如果不是SwapCache,那么return 0 */
 	if (!PageSwapCache(page))
 		return 0;
+	/* 如果不能写回,那么返回0 */
 	if (PageWriteback(page))
 		return 0;
+	/* 如果对应的swap被占用了,那么也返回0 */
 	if (page_swapcount(page))
 		return 0;
 
@@ -1014,10 +1129,18 @@ int try_to_free_swap(struct page *page)
 	 *
 	 * Hibernation suspends storage while it is writing the image
 	 * to disk so check that here.
+	 *
+	 * 一旦休眠过程开始创建内存镜像,就存在一个风险,即try_to_free_swap()函数的调用之一
+	 * - 最可能的是在休眠过程中分配用于镜像的swap页面时由__try_to_reclaim_swap()发起的调用,
+	 * 但理论上甚至可能是由内存回收过程发起的调用 - 可能会释放那些已经被记录为干净swapcache页面的swap空间,
+	 * 并随后将该swap空间重用于镜像中的另一个页面.
+	 * 当从休眠中唤醒时,原始页面可能会因内存压力而被释放,然后稍后从swap中读取回来时,会包含错误的数据.
+	 *
+	 * 休眠在将镜像写入磁盘时会暂停存储操作,因此请在这里检查这一点.
 	 */
 	if (pm_suspended_storage())
 		return 0;
-
+	/* 从swap cache中删除该page */
 	delete_from_swap_cache(page);
 	SetPageDirty(page);
 	return 1;
