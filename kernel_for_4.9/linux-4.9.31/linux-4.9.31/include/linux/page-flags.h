@@ -124,13 +124,17 @@ enum pageflags {
 	/* page中的数据正在被回写到后备存储器。*/
 	PG_writeback,		/* Page is under writeback */
 	PG_head,		/* A head page */
-	/* 已经分配了swap空间 */
+	/* 已经分配了swap cache了 */
 	PG_swapcache,		/* Swap page: swp_entry_t in private */
 	/* 表示page中的数据在后备存储器中有对应的块 */
 	PG_mappedtodisk,	/* Has blocks allocated on-disk */
-	/* 页正在进行回收，只有在内存回收时才会对需要回收的页进行此标记 */
+	/* 页正在进行回收,只有在内存回收时才会对需要回收的页进行此标记 */
 	PG_reclaim,		/* To be reclaimed asap */
-	/* 此页可写入swap分区，一般用于表示此页是非文件页 */
+	/* 此页可写入swap分区,一般用于表示此页是非文件页
+	 * PG_swapbacked标志表示页面是可以写入swap分区的,通常用于表示该页是非文件页.
+	 * 这意味着这些页面可以被交换到磁盘上的swap分区,当物理内存不足时,这些页面可以被暂时移到磁盘上,
+	 * 以释放物理内存空间.这种页面通常包含进程的匿名页,如堆、栈、数据段等,以及匿名mmap共享内存映射、shmem共享内存映射等
+	 */
 	PG_swapbacked,		/* Page is backed by RAM/swap */
 	/* 表示这个页面不能回收 */
 	PG_unevictable,		/* Page is "unevictable"  */

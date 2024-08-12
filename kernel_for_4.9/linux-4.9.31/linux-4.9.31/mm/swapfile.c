@@ -882,16 +882,23 @@ out:
 static unsigned char swap_entry_free(struct swap_info_struct *p,
 				     swp_entry_t entry, unsigned char usage)
 {
+	/* 拿到offset */
 	unsigned long offset = swp_offset(entry);
 	unsigned char count;
 	unsigned char has_cache;
 
+	/* 拿到对应的count */
 	count = p->swap_map[offset];
+	/* 拿到对应的CACHE */
 	has_cache = count & SWAP_HAS_CACHE;
+	/* 清除count对应的SWAP_HAS_CACHE */
 	count &= ~SWAP_HAS_CACHE;
 
+	/* 如果关注的是SWAP_HAS_CACHE */
 	if (usage == SWAP_HAS_CACHE) {
+		/* 如果has_cache = 0,那么报个BUG */
 		VM_BUG_ON(!has_cache);
+		/* 设置has_cache = 0 */
 		has_cache = 0;
 	} else if (count == SWAP_MAP_SHMEM) {
 		/*
@@ -909,28 +916,39 @@ static unsigned char swap_entry_free(struct swap_info_struct *p,
 			count--;
 	}
 
+	/* 并上has_cache */
 	usage = count | has_cache;
+	/* 把它设置进去 */
 	p->swap_map[offset] = usage;
 
 	/* free if no reference */
+	/* 如果说没人引用,那么就free掉它 */
 	if (!usage) {
 		mem_cgroup_uncharge_swap(entry);
 		dec_cluster_info_page(p, p->cluster_info, offset);
+		/* 如果offset < p->lowest_bit,那么把 p->lowest_bit = offset */
 		if (offset < p->lowest_bit)
 			p->lowest_bit = offset;
+		/* 如果说offset > p->highest_bit */
 		if (offset > p->highest_bit) {
+			/* 如果说!p->highest_bit,那么说明这个swap_info_struct是满的 */
 			bool was_full = !p->highest_bit;
+			/* 设置p->highest_bit = offset */
 			p->highest_bit = offset;
+			/* 如果满了,并且这个swap_info_struct是可写的 */
 			if (was_full && (p->flags & SWP_WRITEOK)) {
 				spin_lock(&swap_avail_lock);
 				WARN_ON(!plist_node_empty(&p->avail_list));
+				/* 把它添加到swap_avail_head中 */
 				if (plist_node_empty(&p->avail_list))
 					plist_add(&p->avail_list,
 						  &swap_avail_head);
 				spin_unlock(&swap_avail_lock);
 			}
 		}
+		/* nr_swap_pages++ */
 		atomic_long_inc(&nr_swap_pages);
+		/* p->inuse_pages-- */
 		p->inuse_pages--;
 		frontswap_invalidate_page(p->type, offset);
 		if (p->flags & SWP_BLKDEV) {
@@ -961,6 +979,8 @@ void swap_free(swp_entry_t entry)
 
 /*
  * Called after dropping swapcache to decrease refcnt to swap entries.
+ *
+ * 在丢弃交换缓存(swapcache)之后调用,以减少对交换条目(swap entries)的引用计数(refcnt)
  */
 void swapcache_free(swp_entry_t entry)
 {
@@ -2953,6 +2973,16 @@ void si_swapinfo(struct sysinfo *val)
  * - swap-cache reference is requested but there is already one. -> EEXIST
  * - swap-cache reference is requested but the entry is not used. -> ENOENT
  * - swap-mapped reference requested but needs continued swap count. -> ENOMEM
+ *
+ * 验证交换条目是否有效,并增加其交换映射计数.
+ *
+ * 在以下情况下返回错误代码。
+ * - success -> 0
+ * - swp_tentry无效 -> EINVAL
+ * - swp_tentry 是迁移条目 ->EINVAL
+ * - 请求了交换缓存引用,但已有一个. -> EEXIST
+ * - 请求了交换缓存引用,但未使用该条目. ->ENOENT
+ * - 请求了交换映射引用,但需要继续交换计数. -> ENOMEM
  */
 static int __swap_duplicate(swp_entry_t entry, unsigned char usage)
 {
@@ -2962,42 +2992,62 @@ static int __swap_duplicate(swp_entry_t entry, unsigned char usage)
 	unsigned char has_cache;
 	int err = -EINVAL;
 
+	/* 如果不是swap_entry,返回-EINVAL */
 	if (non_swap_entry(entry))
 		goto out;
 
+	/* 拿到swp_tye */
 	type = swp_type(entry);
+	/* 如果type >= nr_swapfiles,直接沟通bad_file */
 	if (type >= nr_swapfiles)
 		goto bad_file;
+	/* 拿到对应的swap_info_struct */
 	p = swap_info[type];
+	/* 拿到offset */
 	offset = swp_offset(entry);
 
 	spin_lock(&p->lock);
+	/* 如果offset >= p->max,那么也直接返回-EINVAL */
 	if (unlikely(offset >= p->max))
 		goto unlock_out;
 
+	/* 拿到对应的count */
 	count = p->swap_map[offset];
 
 	/*
 	 * swapin_readahead() doesn't check if a swap entry is valid, so the
 	 * swap entry could be SWAP_MAP_BAD. Check here with lock held.
+	 *
+	 * swapin_readahead()不检查交换条目是否有效,因此交换条目可能是SWAP_MAP_BAD.
+	 * 在保持锁的情况下检查此处.
 	 */
+
+	/* *count&~SWAP_HAS_CACHE */
+	/* 如果是SWAP_MAP_BAD,那么直接返回-ENOENT */
 	if (unlikely(swap_count(count) == SWAP_MAP_BAD)) {
 		err = -ENOENT;
 		goto unlock_out;
 	}
 
+	/* 如果有swap_cache,那么has_cache = true */
 	has_cache = count & SWAP_HAS_CACHE;
+	/* 清掉SWAP_HAS_CACHE */
 	count &= ~SWAP_HAS_CACHE;
 	err = 0;
 
+	/* 如果是usage == SWAP_HAS_CACHE */
 	if (usage == SWAP_HAS_CACHE) {
 
-		/* set SWAP_HAS_CACHE if there is no cache and entry is used */
+		/* set SWAP_HAS_CACHE if there is no cache and entry is used
+		 * 如果没有缓存并且使用了条目,则设置SWAP_HAS_CACHE
+		 */
+		/* 如果说这个entry没有swap cache,并且count != 0 */
 		if (!has_cache && count)
 			has_cache = SWAP_HAS_CACHE;
+		/* 如果有swap_cache,那么就是说其他人添加了cache */
 		else if (has_cache)		/* someone else added cache */
 			err = -EEXIST;
-		else				/* no users remaining */
+		else	/* 没有剩余用户 */				/* no users remaining */
 			err = -ENOENT;
 
 	} else if (count || has_cache) {
@@ -3053,10 +3103,17 @@ int swap_duplicate(swp_entry_t entry)
 /*
  * @entry: swap entry for which we allocate swap cache.
  *
+ * @entry 参数表示我们为其分配交换缓存的交换条目
+ *
  * Called when allocating swap cache for existing swap entry,
  * This can return error codes. Returns 0 at success.
  * -EBUSY means there is a swap cache.
  * Note: return code is different from swap_duplicate().
+ *
+ * 当为已存在的交换条目分配交换缓存时调用此函数,该函数可能会返回错误码.
+ * 成功时返回0.如果返回-EBUSY,则表示已经存在一个交换缓存.
+ *
+ * 注意: 返回码与swap_duplicate()函数的返回码不同.
  */
 int swapcache_prepare(swp_entry_t entry)
 {

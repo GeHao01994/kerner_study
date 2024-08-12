@@ -24,6 +24,9 @@
  * Per-task flags relevant to delay accounting
  * maintained privately to avoid exhausting similar flags in sched.h:PF_*
  * Used to set current->delays->flags
+ *
+ * 针对延迟计算的每个任务相关标志,私有维护以避免耗尽sched.h中类似的标志:PF_*
+ * 用于设置current->delays->flags
  */
 #define DELAYACCT_PF_SWAPIN	0x00000001	/* I am doing a swapin */
 #define DELAYACCT_PF_BLKIO	0x00000002	/* I am waiting on IO */

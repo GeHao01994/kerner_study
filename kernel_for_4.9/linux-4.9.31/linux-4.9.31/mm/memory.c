@@ -2952,41 +2952,70 @@ int do_swap_page(struct fault_env *fe, pte_t orig_pte)
 	int exclusive = 0;
 	int ret = 0;
 
+	/* 这里就是判断fe->pte和orig_pte是否相等,如果不相等那么直接goto out */
 	if (!pte_unmap_same(vma->vm_mm, fe->pmd, fe->pte, orig_pte))
 		goto out;
 
+	/* 通过pte找到swp_entry_t */
 	entry = pte_to_swp_entry(orig_pte);
+	/* 如果不是swap_entry */
 	if (unlikely(non_swap_entry(entry))) {
+		/* 如果是迁移的entry */
 		if (is_migration_entry(entry)) {
+			/* 等待迁移完成 */
 			migration_entry_wait(vma->vm_mm, fe->pmd, fe->address);
+			/* 如果是hardware poisoned pages,那么ret = VM_FAULT_HWPOISON */
 		} else if (is_hwpoison_entry(entry)) {
 			ret = VM_FAULT_HWPOISON;
 		} else {
+			/* 否则输出坏页 */
 			print_bad_pte(vma, fe->address, orig_pte, NULL);
 			ret = VM_FAULT_SIGBUS;
 		}
 		goto out;
 	}
+	/*
+	 * if (current->delays)
+	 *	current->delays->flags |= flag;
+	 */
 	delayacct_set_flag(DELAYACCT_PF_SWAPIN);
+	/* 在swap cache中查找swap entry,这里不会带FGP_CREAT,也就是说找到了就找到了,没找到就没找到 */
 	page = lookup_swap_cache(entry);
 	if (!page) {
+		/* 这里就是swapin的预读 */
 		page = swapin_readahead(entry,
 					GFP_HIGHUSER_MOVABLE, vma, fe->address);
+		/* 如果page为NULL */
 		if (!page) {
 			/*
 			 * Back out if somebody else faulted in this pte
 			 * while we released the pte lock.
+			 *
+			 * 在我们释放页表项(PTE)锁的过程中,如果其他人因为fault而在这个页表项中进行了操作,则回退(取消更改)
 			 */
+
+			/* 拿到pte */
 			fe->pte = pte_offset_map_lock(vma->vm_mm, fe->pmd,
 					fe->address, &fe->ptl);
+			/* 如果pte还是一样的,那么就说明可能是没有内存了 */
 			if (likely(pte_same(*fe->pte, orig_pte)))
 				ret = VM_FAULT_OOM;
+			/* 如果pte被更改了,那么就清除DELAYACCT_PF_SWAPIN flag */
 			delayacct_clear_flag(DELAYACCT_PF_SWAPIN);
 			goto unlock;
 		}
 
 		/* Had to read the page from swap area: Major fault */
+		/* 必须从交换区域读取页面: 主要错误(或称为大页错误)
+		 *
+		 * 在Linux系统中,当物理内存(RAM)不足以满足当前运行的程序需求时,系统会将部分内存页(pages)的内容交换(swap)到磁盘上的交换空间(swap space)中,
+		 * 以释放物理内存供其他程序使用.当这些被交换出去的页面再次被访问时,系统需要从交换空间中读取这些页面回物理内存,这个过程就称为"页错误"(page fault).
+		 *
+		 * "主要错误"(Major fault)或"大页错误"通常指的是那些需要从磁盘(即交换空间)读取页面到物理内存中的页错误,
+		 * 与之相对的是"次要错误"(Minor fault),后者通常指的是页面已经在物理内存中,但相关的页表项(PTE)需要被更新以反映页面的新位置或状态,而不需要从磁盘读取数据.
+		 */
 		ret = VM_FAULT_MAJOR;
+		/* PGMAJFAULT event + 1 */
 		count_vm_event(PGMAJFAULT);
 		mem_cgroup_count_vm_event(vma->vm_mm, PGMAJFAULT);
 	} else if (PageHWPoison(page)) {
@@ -3000,10 +3029,14 @@ int do_swap_page(struct fault_env *fe, pte_t orig_pte)
 		goto out_release;
 	}
 
+	/* 将page赋值给swapcache */
 	swapcache = page;
+	/* lock该page */
 	locked = lock_page_or_retry(page, vma->vm_mm, fe->flags);
 
+	/* 清除DELAYACCT_PF_SWAPIN的flag */
 	delayacct_clear_flag(DELAYACCT_PF_SWAPIN);
+	/* 处理没lock住的情况 */
 	if (!locked) {
 		ret |= VM_FAULT_RETRY;
 		goto out_release;
@@ -3014,10 +3047,17 @@ int do_swap_page(struct fault_env *fe, pte_t orig_pte)
 	 * release the swapcache from under us.  The page pin, and pte_same
 	 * test below, are not enough to exclude that.  Even if it is still
 	 * swapcache, we need to check that the page's swap has not changed.
+	 *
+	 * 确保try_to_free_swap、reuse_swap_page或swapoff操作没有在我们不知情的情况下释放了交换缓存(swapcache).
+	 * 仅仅依靠页面锁定(page pin)和下面的pte_same测试是不够的来排除这种情况.
+	 * 即使它仍然是交换缓存的一部分,我们也需要检查该页面的交换信息是否没有发生变化
 	 */
+
+	/* 如果page没有设置PG_swapcache或者说page_private(page) != entry.val,那么goto out_page */
 	if (unlikely(!PageSwapCache(page) || page_private(page) != entry.val))
 		goto out_page;
 
+	/* 这边就是去拷贝,也就是说从ksm里面给分离出一个page出来 */
 	page = ksm_might_need_to_copy(page, vma, fe->address);
 	if (unlikely(!page)) {
 		ret = VM_FAULT_OOM;
@@ -3033,12 +3073,16 @@ int do_swap_page(struct fault_env *fe, pte_t orig_pte)
 
 	/*
 	 * Back out if somebody else already faulted in this pte.
+	 *
+	 * 如果其他人已经因为页错误(page fault)而修改了这个页表项(PTE),则回退(取消当前操作)
 	 */
 	fe->pte = pte_offset_map_lock(vma->vm_mm, fe->pmd, fe->address,
 			&fe->ptl);
+	/* 如果已经不想等了,说明已经有人修改了这个页表项,那么goto out_nomap */
 	if (unlikely(!pte_same(*fe->pte, orig_pte)))
 		goto out_nomap;
 
+	/* 如果该页不是最新的,那么返回VM_FAULT_SIGBUS */
 	if (unlikely(!PageUptodate(page))) {
 		ret = VM_FAULT_SIGBUS;
 		goto out_nomap;
@@ -3052,20 +3096,34 @@ int do_swap_page(struct fault_env *fe, pte_t orig_pte)
 	 * while the page is counted on swap but not yet in mapcount i.e.
 	 * before page_add_anon_rmap() and swap_free(); try_to_free_swap()
 	 * must be called after the swap_free(), or it will never succeed.
+	 *
+	 * 该页面当前不在物理内存中,请继续处理错误。
+	 *
+	 * 注意这里的操作顺序.为了正确计算,必须在页面在swap上计数但尚未在mapcount中计数时调用reuse_swap_page(),
+	 * 即在page_add_anon_rmap()和swap_free()之前;
+	 * try_to_free_swap()必须在swap_free()之后调用,否则它永远不会成功.
 	 */
-
+	/* task->rss_stat.count[MM_ANONPAGES]++ */
 	inc_mm_counter_fast(vma->vm_mm, MM_ANONPAGES);
+	/* task->rss_stat.count[MM_SWAPENTS]-- */
 	dec_mm_counter_fast(vma->vm_mm, MM_SWAPENTS);
+	/* 通过page和vma->vm_page_prot构造一个pte */
 	pte = mk_pte(page, vma->vm_page_prot);
+	/* 如果是写操作导致的fault,如果没有其他引用,我们可以在没有COW的情况下写入一个匿名页面.*/
 	if ((fe->flags & FAULT_FLAG_WRITE) && reuse_swap_page(page, NULL)) {
+		/* 设置该pte的PTE_WRITE位 */
 		pte = maybe_mkwrite(pte_mkdirty(pte), vma);
+		/* 清除fe->flags的FAULT_FLAG_WRITE */
 		fe->flags &= ~FAULT_FLAG_WRITE;
+		/* ref |= VM_FAULT_WRITE */
 		ret |= VM_FAULT_WRITE;
 		exclusive = RMAP_EXCLUSIVE;
 	}
 	flush_icache_page(vma, page);
 	if (pte_swp_soft_dirty(orig_pte))
 		pte = pte_mksoft_dirty(pte);
+
+	/* 把它设置到页表项里面去 */
 	set_pte_at(vma->vm_mm, fe->address, fe->pte, pte);
 	if (page == swapcache) {
 		do_page_add_anon_rmap(page, vma, fe->address, exclusive);
@@ -3077,6 +3135,7 @@ int do_swap_page(struct fault_env *fe, pte_t orig_pte)
 		lru_cache_add_active_or_unevictable(page, vma);
 	}
 
+	/* 释放掉swap_cache */
 	swap_free(entry);
 	if (mem_cgroup_swap_full(page) ||
 	    (vma->vm_flags & VM_LOCKED) || PageMlocked(page))

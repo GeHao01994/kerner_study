@@ -320,19 +320,26 @@ void free_pages_and_swap_cache(struct page **pages, int nr)
  * unlocked and with its refcount incremented - we rely on the kernel
  * lock getting page table operations atomic even if we drop the page
  * lock before returning.
+ *
+ * 在swap缓存中查找一个swap条目.
+ * 如果找到了页面,该页面将以未加锁的状态返回,并且其引用计数会增加 - 我们依赖内核锁来确保即使我们在返回前释放了页面锁,页表操作也是原子的.
  */
 struct page * lookup_swap_cache(swp_entry_t entry)
 {
 	struct page *page;
 
+	/* 在地址空间找到该page,也就是在entry对应的地址空间,找到该page */
 	page = find_get_page(swap_address_space(entry), swp_offset(entry));
-
+	/* 如果找到了page */
 	if (page) {
+		/* 那么swap_cache_info.find_success++ */
 		INC_CACHE_INFO(find_success);
+		/* 如果有预读位,那么清除 */
 		if (TestClearPageReadahead(page))
 			atomic_inc(&swapin_readahead_hits);
 	}
 
+	/* swap_cache_info.find_total++ */
 	INC_CACHE_INFO(find_total);
 	return page;
 }
@@ -342,6 +349,7 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 			bool *new_page_allocated)
 {
 	struct page *found_page, *new_page = NULL;
+	/* 拿到该entry对应的地址空间 */
 	struct address_space *swapper_space = swap_address_space(entry);
 	int err;
 	*new_page_allocated = false;
@@ -351,15 +359,22 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 		 * First check the swap cache.  Since this is normally
 		 * called after lookup_swap_cache() failed, re-calling
 		 * that would confuse statistics.
+		 *
+		 * 首先检查交换缓存.
+		 * 由于这通常是在lookup_swap_cache()失败后调用的,因此重新调用会混淆统计数据
 		 */
+		/* 在swap cache中找该page,如果找到了就break */
 		found_page = find_get_page(swapper_space, swp_offset(entry));
 		if (found_page)
 			break;
 
 		/*
 		 * Get a new page to read into from swap.
+		 *
+		 * 这边就是分配一个新page为了从swap中读取
 		 */
 		if (!new_page) {
+			/* 分配一个新页面 */
 			new_page = alloc_page_vma(gfp_mask, vma, addr);
 			if (!new_page)
 				break;		/* Out of memory */
@@ -374,6 +389,8 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 
 		/*
 		 * Swap entry may have been freed since our caller observed it.
+		 *
+		 * 自从我们的调用者观察到交换条目以来,它可能已经被释放
 		 */
 		err = swapcache_prepare(entry);
 		if (err == -EEXIST) {
@@ -392,37 +409,58 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 			 * busy looping, we just conditionally invoke the
 			 * scheduler here, if there are some more important
 			 * tasks to run.
+			 *
+			 * 我们可能会与get_swap_page()函数发生竞争,并遇到一个SWAP_HAS_CACHE状态的swap_map条目,
+			 * 其对应的页面尚未被加入到交换缓存(swapcache)中,而与此同时,
+			 * 另一端在scan_swap_map()函数中因为等待丢弃(discard)I/O操作的完成而被调度出去.
+			 *
+			 * 为了避免在!CONFIG_PREEMPT(即没有启用抢占式调度)的情况下,如果I/O完成操作恰好在我们当前正忙于循环的CPU等待队列上等待,
+			 * 从而导致这种瞬态状态转变为围绕-EEXIST情况的永久循环,我们在这里会条件性地调用调度器,如果有更重要的任务需要运行的话.
 			 */
 			cond_resched();
 			continue;
 		}
-		if (err) {		/* swp entry is obsolete ? */
+		if (err) {		/* swp entry is obsolete ?
+					 * swp条目已经过时了吗?
+					 */
 			radix_tree_preload_end();
 			break;
 		}
 
 		/* May fail (-ENOMEM) if radix-tree node allocation failed. */
+		/* 设置PG_locked */
 		__SetPageLocked(new_page);
+		/* 设置PG_swapbacked */
 		__SetPageSwapBacked(new_page);
+		/* 把它添加到swap_cache中 */
 		err = __add_to_swap_cache(new_page, entry);
+		/* 如果返回0 */
 		if (likely(!err)) {
 			radix_tree_preload_end();
 			/*
 			 * Initiate read into locked page and return.
+			 *
+			 * 准备把它添加到匿名页面中
 			 */
 			lru_cache_add_anon(new_page);
+			/* 设置new_page_allocated = true; */
 			*new_page_allocated = true;
+			/* 返回分配的page */
 			return new_page;
 		}
 		radix_tree_preload_end();
+		/* 清除PG_locked */
 		__ClearPageLocked(new_page);
 		/*
 		 * add_to_swap_cache() doesn't return -EEXIST, so we can safely
 		 * clear SWAP_HAS_CACHE flag.
+		 *
+		 * add_to_swap_cache()不返回-EEXIST,因此我们可以安全地清除SWAP_HAS_CACHE标志.
 		 */
 		swapcache_free(entry);
 	} while (err != -ENOMEM);
 
+	/* __add_to_swap_cache会调用get_page,所以这里调用put_page */
 	if (new_page)
 		put_page(new_page);
 	return found_page;
@@ -433,6 +471,9 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
  * and reading the disk if it is not already cached.
  * A failure return means that either the page allocation failed or that
  * the swap entry is no longer in use.
+ *
+ * 在物理内存中定位一个交换(swap)页面,保留交换缓存空间,如果该页面尚未缓存,则从磁盘读取.
+ * 如果操作失败返回,意味着页面分配失败或者该交换条目已不再被使用.
  */
 struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 			struct vm_area_struct *vma, unsigned long addr)
@@ -441,6 +482,7 @@ struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 	struct page *retpage = __read_swap_cache_async(entry, gfp_mask,
 			vma, addr, &page_was_allocated);
 
+	/* 如果page被分配了,那么还要调用swap_readpage去读 */
 	if (page_was_allocated)
 		swap_readpage(retpage);
 
@@ -453,7 +495,9 @@ static unsigned long swapin_nr_pages(unsigned long offset)
 	unsigned int pages, max_pages, last_ra;
 	static atomic_t last_readahead_pages;
 
+	/* max_pages = 1 << page_cluster */
 	max_pages = 1 << READ_ONCE(page_cluster);
+	/* 如果max_pages <= 1,那么直接返回1 */
 	if (max_pages <= 1)
 		return 1;
 
@@ -461,19 +505,30 @@ static unsigned long swapin_nr_pages(unsigned long offset)
 	 * This heuristic has been found to work well on both sequential and
 	 * random loads, swapping to hard disk or to SSD: please don't ask
 	 * what the "+ 2" means, it just happens to work well, that's all.
+	 *
+	 * 这种启发式方法已被发现在顺序加载和随机加载到硬盘或SSD时都工作得很好:
+	 * 请不要问'+ 2'代表什么意思,它只是恰好工作得很好,仅此而已.
 	 */
+
+	/* 将将新值写入给定内存位置,并返回之前在该位置的值 */
 	pages = atomic_xchg(&swapin_readahead_hits, 0) + 2;
+	/* 如果之前的swapin_readahead_hits就是=0的 */
 	if (pages == 2) {
 		/*
 		 * We can have no readahead hits to judge by: but must not get
 		 * stuck here forever, so check for an adjacent offset instead
 		 * (and don't even bother to check whether swap type is same).
+		 *
+		 * 我们无法仅凭预读命中来判断: 但绝不能永远卡在这里.因此改为检查相邻的偏移量(甚至无需费心去检查交换类型是否相同)
 		 */
+		/* 这个prev_offset是个static的,如果不是连续的,那么pages = 1 */
 		if (offset != prev_offset + 1 && offset != prev_offset - 1)
 			pages = 1;
+		/* 设置prev_offset = offset,更新prev_offset的值 */
 		prev_offset = offset;
 	} else {
 		unsigned int roundup = 4;
+		/* roundup一直*2,直到roundup >= page */
 		while (roundup < pages)
 			roundup <<= 1;
 		pages = roundup;
@@ -509,34 +564,59 @@ static unsigned long swapin_nr_pages(unsigned long offset)
  * the readahead.
  *
  * Caller must hold down_read on the vma->vm_mm if vma is not NULL.
+ *
+ * swapin_readahead - 提前将页面交换进内存,希望我们很快需要它们
+ *
+ * @entry: 该内存对应的swap条目
+ * @gfp_mask: 内存分配标志
+ * @vma: 该地址所属的用户虚拟内存区域(vma)
+ * @addr: 用于内存策略的目标地址
+ *
+ * 该函数在排队进行swapin操作后,返回与entry和addr对应的struct page.
+ *
+ * 这是原始的swap预读代码.
+ * 我们简单地读取swap区域中一个对齐的块,该块包含(1 << page_cluster)个条目.选择这种方法是因为它不会消耗我们任何寻道时间.
+ * 我们还确保将“原始”请求与预读请求一起排队...
+ *
+ * 此功能已被扩展为使用触发预读的内存管理(mm)的NUMA策略.
+ *
+ * 如果vma不为NULL,则调用者必须持有vma->vm_mm的down_read锁.
  */
 struct page *swapin_readahead(swp_entry_t entry, gfp_t gfp_mask,
 			struct vm_area_struct *vma, unsigned long addr)
 {
 	struct page *page;
+	/* 拿到该entry的offset */
 	unsigned long entry_offset = swp_offset(entry);
 	unsigned long offset = entry_offset;
 	unsigned long start_offset, end_offset;
 	unsigned long mask;
 	struct blk_plug plug;
 
+	/* 在读入交换分区的页的时候也顺便预读旁边的页,函数swapin_nr_pages是计算预读的页数 */
 	mask = swapin_nr_pages(offset) - 1;
 	if (!mask)
 		goto skip;
 
-	/* Read a page_cluster sized and aligned cluster around offset. */
+	/* Read a page_cluster sized and aligned cluster around offset.
+	 * 读取一个page_cluster大小且围绕offset对齐的簇
+	 */
 	start_offset = offset & ~mask;
 	end_offset = offset | mask;
+	/* 第一个page是swap header,不用读 */
 	if (!start_offset)	/* First page is swap header. */
 		start_offset++;
 
 	blk_start_plug(&plug);
+	/* 逐页读取指定的页数 */
 	for (offset = start_offset; offset <= end_offset ; offset++) {
 		/* Ok, do the async read-ahead now */
+		/* 从交换区读入一页数据 */
 		page = read_swap_cache_async(swp_entry(swp_type(entry), offset),
 						gfp_mask, vma, addr);
 		if (!page)
 			continue;
+		/* 如果offset != entry_offset,那么设置PG_readahead */
 		if (offset != entry_offset)
 			SetPageReadahead(page);
 		put_page(page);
